@@ -1430,6 +1430,9 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) (*Account, bool) {
 	var selected *Account
 	selectedCompactTier := -1
+	// tierWeightSum 是当前 tier（同 priority 同 compactTier）内累计的 LoadFactor 之和，
+	// 用于加权 reservoir sampling：进入新候选时按 weight/tierWeightSum 概率替换 selected。
+	var tierWeightSum float64
 	compactBlocked := false
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 
@@ -1462,24 +1465,46 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			}
 		}
 
-		// 选择优先级最高且最久未使用的账号
-		// Select highest priority and least recently used
+		freshWeight := float64(fresh.EffectiveLoadFactor())
+		if freshWeight <= 0 {
+			freshWeight = 1
+		}
+
 		if selected == nil {
 			selected = fresh
 			selectedCompactTier = compactTier
+			tierWeightSum = freshWeight
 			continue
 		}
 
-		// compact 模式下高 tier 优先；同 tier 内才比较 priority/LRU。
+		// compact 模式下高 tier 严格优先；同 tier 内才比较 priority。
 		if requireCompact && compactTier != selectedCompactTier {
 			if compactTier > selectedCompactTier {
 				selected = fresh
 				selectedCompactTier = compactTier
+				tierWeightSum = freshWeight
 			}
 			continue
 		}
 
-		if s.isBetterAccount(fresh, selected) {
+		// priority 严格分层：数值更小的 priority 永远胜出。
+		// Priority is a hard tier: lower number always wins.
+		if fresh.Priority < selected.Priority {
+			selected = fresh
+			selectedCompactTier = compactTier
+			tierWeightSum = freshWeight
+			continue
+		}
+		if fresh.Priority > selected.Priority {
+			continue
+		}
+
+		// 同 priority + 同 compactTier：按 LoadFactor 做加权 reservoir sampling。
+		// Pro 20x 类大号 LoadFactor=20 会按 20:1 的概率长期赢过 LoadFactor=1 的 Plus。
+		// Within the same priority/compact tier, perform weighted reservoir sampling
+		// by EffectiveLoadFactor so that traffic distributes proportionally to capacity.
+		tierWeightSum += freshWeight
+		if rand.Float64()*tierWeightSum < freshWeight {
 			selected = fresh
 			selectedCompactTier = compactTier
 		}
