@@ -1430,9 +1430,6 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) (*Account, bool) {
 	var selected *Account
 	selectedCompactTier := -1
-	// tierWeightSum 是当前 tier（同 priority 同 compactTier）内累计的 LoadFactor 之和，
-	// 用于加权 reservoir sampling：进入新候选时按 weight/tierWeightSum 概率替换 selected。
-	var tierWeightSum float64
 	compactBlocked := false
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 
@@ -1465,46 +1462,19 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			}
 		}
 
-		freshWeight := float64(fresh.EffectiveLoadFactor())
-		if freshWeight <= 0 {
-			freshWeight = 1
-		}
-
 		if selected == nil {
 			selected = fresh
 			selectedCompactTier = compactTier
-			tierWeightSum = freshWeight
 			continue
 		}
-
-		// compact 模式下高 tier 严格优先；同 tier 内才比较 priority。
 		if requireCompact && compactTier != selectedCompactTier {
 			if compactTier > selectedCompactTier {
 				selected = fresh
 				selectedCompactTier = compactTier
-				tierWeightSum = freshWeight
 			}
 			continue
 		}
-
-		// priority 严格分层：数值更小的 priority 永远胜出。
-		// Priority is a hard tier: lower number always wins.
-		if fresh.Priority < selected.Priority {
-			selected = fresh
-			selectedCompactTier = compactTier
-			tierWeightSum = freshWeight
-			continue
-		}
-		if fresh.Priority > selected.Priority {
-			continue
-		}
-
-		// 同 priority + 同 compactTier：按 LoadFactor 做加权 reservoir sampling。
-		// Pro 20x 类大号 LoadFactor=20 会按 20:1 的概率长期赢过 LoadFactor=1 的 Plus。
-		// Within the same priority/compact tier, perform weighted reservoir sampling
-		// by EffectiveLoadFactor so that traffic distributes proportionally to capacity.
-		tierWeightSum += freshWeight
-		if rand.Float64()*tierWeightSum < freshWeight {
+		if s.isBetterAccount(fresh, selected) {
 			selected = fresh
 			selectedCompactTier = compactTier
 		}
@@ -1544,6 +1514,96 @@ func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool
 		// 都使用过，选择最久未使用的
 		return candidate.LastUsedAt.Before(*current.LastUsedAt)
 	}
+}
+
+// weightedShuffleByLoadFactorWithinSortGroups 对已经按 (Priority, LoadRate) 排过序的
+// accountWithLoad 切片进行原地加权洗牌：
+//   - 分组键只用 (Priority, LoadRate)，不再绑定 LastUsedAt——这样 load_factor 加权
+//     可以盖掉 LRU 平均化效应，让高 capacity 的账号按比例占据更多前排位置；
+//   - 每组内做加权 Fisher–Yates，权重取 account.EffectiveLoadFactor()。
+//
+// 选第一位的概率 ≈ w_i / Σw_j（与号池其它账号一致），用于多账号场景下的「按容量分流」。
+// 该函数仅在 OpenAI 选号路径中调用，不影响其它平台的 shuffleWithinSortGroups 行为。
+func weightedShuffleByLoadFactorWithinSortGroups(accounts []accountWithLoad) {
+	if len(accounts) <= 1 {
+		return
+	}
+	i := 0
+	for i < len(accounts) {
+		j := i + 1
+		for j < len(accounts) && samePriorityAndLoadRateGroup(accounts[i], accounts[j]) {
+			j++
+		}
+		if j-i > 1 {
+			weightedShuffleSegmentByLoadFactor(accounts[i:j])
+		}
+		i = j
+	}
+}
+
+func samePriorityAndLoadRateGroup(a, b accountWithLoad) bool {
+	if a.account.Priority != b.account.Priority {
+		return false
+	}
+	return a.loadInfo.LoadRate == b.loadInfo.LoadRate
+}
+
+// weightedShuffleSegmentByLoadFactor 在 seg 上做加权 Fisher–Yates：
+// 每轮从 seg[i:] 中按 EffectiveLoadFactor 抽 1 个，交换到位置 i。
+// 池规模通常 < 100，O(n^2) 完全够用。
+//
+// 当所有账号的 EffectiveLoadFactor 都相等（典型的旧部署：全部 LoadFactor=nil 且
+// Concurrency 相同）时，回退到 shuffleWithinSortGroups 的旧逻辑——按 LastUsedAt
+// 子组打散，保留 LRU/never-used 优先的语义；仅在权重存在差异时才用加权抽样。
+func weightedShuffleSegmentByLoadFactor(seg []accountWithLoad) {
+	if !hasNonUniformLoadFactor(seg) {
+		shuffleWithinSortGroups(seg)
+		return
+	}
+	n := len(seg)
+	for i := 0; i < n-1; i++ {
+		var sumW float64
+		for k := i; k < n; k++ {
+			w := float64(seg[k].account.EffectiveLoadFactor())
+			if w <= 0 {
+				w = 1
+			}
+			sumW += w
+		}
+		if sumW <= 0 {
+			return
+		}
+		r := rand.Float64() * sumW
+		var cum float64
+		chosen := n - 1
+		for k := i; k < n; k++ {
+			w := float64(seg[k].account.EffectiveLoadFactor())
+			if w <= 0 {
+				w = 1
+			}
+			cum += w
+			if r < cum {
+				chosen = k
+				break
+			}
+		}
+		if chosen != i {
+			seg[i], seg[chosen] = seg[chosen], seg[i]
+		}
+	}
+}
+
+func hasNonUniformLoadFactor(seg []accountWithLoad) bool {
+	if len(seg) <= 1 {
+		return false
+	}
+	first := seg[0].account.EffectiveLoadFactor()
+	for k := 1; k < len(seg); k++ {
+		if seg[k].account.EffectiveLoadFactor() != first {
+			return true
+		}
+	}
+	return false
 }
 
 // SelectAccountWithLoadAwareness selects an account with load-awareness and wait plan.
@@ -1747,7 +1807,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					return a.account.LastUsedAt.Before(*b.account.LastUsedAt)
 				}
 			})
-			shuffleWithinSortGroups(available)
+			// loadfactor-v3: OpenAI 路径下用按 EffectiveLoadFactor 加权的 Fisher–Yates，
+			// 让 Pro 20x（load_factor=15）按比例占 ≈15/(15+9) ≈62.5% 流量；
+			// 不再让 LastUsedAt（LRU）和 0% LoadRate 平均化把高容量账号拉回 1/N 份额。
+			weightedShuffleByLoadFactorWithinSortGroups(available)
 
 			selectionOrder := make([]accountWithLoad, 0, len(available))
 			if requireCompact {
