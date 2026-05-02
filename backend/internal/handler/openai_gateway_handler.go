@@ -408,7 +408,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+				ChannelUsageFields: applyOpenAICompatClaudeBillingSource(
+					channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					reqModel,
+				),
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.responses"),
@@ -1367,13 +1370,17 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 }
 
 func applyOpenAIMessagesDispatchBillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
-	if strings.TrimSpace(fields.BillingModelSource) != "" {
-		return fields
-	}
 	if strings.TrimSpace(mappedModel) == "" {
 		return fields
 	}
+	return applyOpenAICompatClaudeBillingSource(fields, reqModel)
+}
+
+func applyOpenAICompatClaudeBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(reqModel)), "claude") {
+		return fields
+	}
+	if strings.EqualFold(strings.TrimSpace(fields.BillingModelSource), service.BillingModelSourceUpstream) {
 		return fields
 	}
 	fields.BillingModelSource = service.BillingModelSourceRequested
