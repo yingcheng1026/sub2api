@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -141,9 +142,9 @@ func (s *DashboardService) GetModelStatsWithFilters(ctx context.Context, startTi
 }
 
 func (s *DashboardService) GetModelStatsWithFiltersBySource(ctx context.Context, startTime, endTime time.Time, userID, apiKeyID, accountID, groupID int64, requestType *int16, stream *bool, billingType *int8, modelSource string) ([]usagestats.ModelStat, error) {
-	normalizedSource := usagestats.NormalizeModelSource(modelSource)
-	if normalizedSource == usagestats.ModelSourceRequested {
-		return s.GetModelStatsWithFilters(ctx, startTime, endTime, userID, apiKeyID, accountID, groupID, requestType, stream, billingType)
+	normalizedSource := usagestats.ModelSourceUpstream
+	if rawSource := strings.TrimSpace(modelSource); rawSource != "" {
+		normalizedSource = usagestats.NormalizeModelSource(rawSource)
 	}
 
 	type modelStatsBySourceRepo interface {
