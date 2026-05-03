@@ -460,6 +460,37 @@ func TestApplyOpenAIMessagesDispatchBillingSource(t *testing.T) {
 		require.Equal(t, service.BillingModelSourceRequested, fields.BillingModelSource)
 		require.Equal(t, "claude-opus-4-7", fields.OriginalModel)
 	})
+
+	t.Run("all_claude_compat_entries_use_product_billing_model", func(t *testing.T) {
+		for _, tt := range []struct {
+			reqModel string
+			want     string
+		}{
+			{reqModel: "opus[1m]", want: "claude-opus-4-7"},
+			{reqModel: "sonnet[1m]", want: "claude-sonnet-4-6"},
+			{reqModel: "default", want: "claude-sonnet-4-6"},
+			{reqModel: "haiku", want: "claude-haiku-4-5"},
+		} {
+			fields := applyClaudeProductBillingSource(service.ChannelUsageFields{
+				OriginalModel:      tt.reqModel,
+				ChannelMappedModel: "gpt-5.5",
+				BillingModelSource: service.BillingModelSourceUpstream,
+			}, tt.reqModel)
+			require.Equal(t, service.BillingModelSourceRequested, fields.BillingModelSource)
+			require.Equal(t, tt.want, fields.OriginalModel)
+			require.Equal(t, "gpt-5.5", fields.ChannelMappedModel)
+		}
+	})
+
+	t.Run("native_openai_entries_are_not_reclassified_as_claude", func(t *testing.T) {
+		fields := applyClaudeProductBillingSource(service.ChannelUsageFields{
+			OriginalModel:      "gpt-5.5",
+			ChannelMappedModel: "gpt-5.5",
+			BillingModelSource: service.BillingModelSourceUpstream,
+		}, "gpt-5.5")
+		require.Equal(t, service.BillingModelSourceUpstream, fields.BillingModelSource)
+		require.Equal(t, "gpt-5.5", fields.OriginalModel)
+	})
 }
 
 func TestOpenAIResponses_MissingDependencies_ReturnsServiceUnavailable(t *testing.T) {

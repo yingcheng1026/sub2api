@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestModels_HidesGatewayModelsForClaudeCodeOpenAIDispatch(t *testing.T) {
+func TestModels_HidesGatewayModelsForClaudeCodeModelPicker(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	w := httptest.NewRecorder()
@@ -40,7 +40,7 @@ func TestModels_HidesGatewayModelsForClaudeCodeOpenAIDispatch(t *testing.T) {
 	require.Empty(t, body.Data)
 }
 
-func TestHideGatewayModelsForClaudeCodeModelPickerOnlyMatchesClaudeCodeOpenAIDispatch(t *testing.T) {
+func TestHideGatewayModelsForClaudeCodeModelPickerOnlyMatchesClaudeCodeUserAgent(t *testing.T) {
 	apiKey := &service.APIKey{
 		Group: &service.Group{
 			Platform:              service.PlatformOpenAI,
@@ -52,9 +52,9 @@ func TestHideGatewayModelsForClaudeCodeModelPickerOnlyMatchesClaudeCodeOpenAIDis
 	require.False(t, hideGatewayModelsForClaudeCodeModelPicker(apiKey, "curl/8.7.1"))
 
 	apiKey.Group.AllowMessagesDispatch = false
-	require.False(t, hideGatewayModelsForClaudeCodeModelPicker(apiKey, "claude-cli/2.1.126 (external, cli)"))
+	require.True(t, hideGatewayModelsForClaudeCodeModelPicker(apiKey, "claude-cli/2.1.126 (external, cli)"))
 
 	apiKey.Group.AllowMessagesDispatch = true
 	apiKey.Group.Platform = service.PlatformAnthropic
-	require.False(t, hideGatewayModelsForClaudeCodeModelPicker(apiKey, "claude-cli/2.1.126 (external, cli)"))
+	require.True(t, hideGatewayModelsForClaudeCodeModelPicker(apiKey, "claude-cli/2.1.126 (external, cli)"))
 }

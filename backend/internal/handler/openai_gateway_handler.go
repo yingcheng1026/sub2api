@@ -1373,10 +1373,14 @@ func applyOpenAIMessagesDispatchBillingSource(fields service.ChannelUsageFields,
 	if strings.TrimSpace(mappedModel) == "" {
 		return fields
 	}
-	return applyOpenAICompatClaudeBillingSource(fields, reqModel)
+	return applyClaudeProductBillingSource(fields, reqModel)
 }
 
 func applyOpenAICompatClaudeBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
+	return applyClaudeProductBillingSource(fields, reqModel)
+}
+
+func applyClaudeProductBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
 	billingModel := service.CanonicalClaudeMessagesDispatchBillingModel(reqModel)
 	if billingModel == "" {
 		return fields

@@ -512,7 +512,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					RequestPayloadHash: requestPayloadHash,
 					ForceCacheBilling:  fs.ForceCacheBilling,
 					APIKeyService:      h.apiKeyService,
-					ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					ChannelUsageFields: applyClaudeProductBillingSource(
+						channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+						reqModel,
+					),
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.gateway.messages"),
@@ -900,7 +903,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					RequestPayloadHash: requestPayloadHash,
 					ForceCacheBilling:  fs.ForceCacheBilling,
 					APIKeyService:      h.apiKeyService,
-					ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					ChannelUsageFields: applyClaudeProductBillingSource(
+						channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+						reqModel,
+					),
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.gateway.messages"),
@@ -983,12 +989,6 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 }
 
 func hideGatewayModelsForClaudeCodeModelPicker(apiKey *service.APIKey, userAgent string) bool {
-	if apiKey == nil || apiKey.Group == nil {
-		return false
-	}
-	if apiKey.Group.Platform != service.PlatformOpenAI || !apiKey.Group.AllowMessagesDispatch {
-		return false
-	}
 	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
 }
 
