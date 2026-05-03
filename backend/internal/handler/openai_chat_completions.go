@@ -281,7 +281,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				UserAgent:        userAgent,
 				IPAddress:        clientIP,
 				APIKeyService:    h.apiKeyService,
-				ChannelUsageFields: applyOpenAICompatClaudeBillingSource(
+				ChannelUsageFields: preserveOpenAICompatSub2BillingSource(
 					channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 					reqModel,
 				),

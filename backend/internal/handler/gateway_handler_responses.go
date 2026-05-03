@@ -272,7 +272,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: applyClaudeProductBillingSource(
+				ChannelUsageFields: preserveSub2NativeBillingSource(
 					channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 					reqModel,
 				),

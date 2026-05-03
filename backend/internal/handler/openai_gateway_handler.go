@@ -431,7 +431,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: applyOpenAICompatClaudeBillingSource(
+				ChannelUsageFields: preserveOpenAICompatSub2BillingSource(
 					channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 					reqModel,
 				),
@@ -797,7 +797,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		dispatchMappedModel := effectiveMappedModel
 		h.submitUsageRecordTask(func(ctx context.Context) {
 			usageFields := channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel)
-			usageFields = applyOpenAIMessagesDispatchBillingSource(usageFields, reqModel, dispatchMappedModel)
+			usageFields = preserveOpenAIMessagesDispatchSub2BillingSource(usageFields, reqModel, dispatchMappedModel)
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -1392,24 +1392,19 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 	}
 }
 
-func applyOpenAIMessagesDispatchBillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
-	if strings.TrimSpace(mappedModel) == "" {
-		return fields
-	}
-	return applyClaudeProductBillingSource(fields, reqModel)
+func preserveOpenAIMessagesDispatchSub2BillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
+	return preserveSub2NativeBillingSource(fields, reqModel)
 }
 
-func applyOpenAICompatClaudeBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
-	return applyClaudeProductBillingSource(fields, reqModel)
+func preserveOpenAICompatSub2BillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
+	return preserveSub2NativeBillingSource(fields, reqModel)
 }
 
-func applyClaudeProductBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
-	billingModel := service.CanonicalClaudeMessagesDispatchBillingModel(reqModel)
-	if billingModel == "" {
-		return fields
-	}
-	fields.BillingModelSource = service.BillingModelSourceRequested
-	fields.OriginalModel = billingModel
+func preserveSub2NativeBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
+	// Billing must follow Sub2API's native channel/upstream basis. Claude
+	// compatibility model names are kept in ChannelUsageFields for audit, but
+	// they must not force requested-model billing when the request is mapped to
+	// a GPT/OpenAI upstream model.
 	return fields
 }
 

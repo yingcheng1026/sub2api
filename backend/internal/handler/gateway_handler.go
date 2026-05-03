@@ -512,7 +512,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					RequestPayloadHash: requestPayloadHash,
 					ForceCacheBilling:  fs.ForceCacheBilling,
 					APIKeyService:      h.apiKeyService,
-					ChannelUsageFields: applyClaudeProductBillingSource(
+					ChannelUsageFields: preserveSub2NativeBillingSource(
 						channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 						reqModel,
 					),
@@ -903,7 +903,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					RequestPayloadHash: requestPayloadHash,
 					ForceCacheBilling:  fs.ForceCacheBilling,
 					APIKeyService:      h.apiKeyService,
-					ChannelUsageFields: applyClaudeProductBillingSource(
+					ChannelUsageFields: preserveSub2NativeBillingSource(
 						channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 						reqModel,
 					),
