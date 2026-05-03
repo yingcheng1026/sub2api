@@ -768,7 +768,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)
 
+		dispatchMappedModel := effectiveMappedModel
 		h.submitUsageRecordTask(func(ctx context.Context) {
+			usageFields := channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel)
+			usageFields = applyOpenAIMessagesDispatchBillingSource(usageFields, reqModel, dispatchMappedModel)
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -781,7 +784,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel),
+				ChannelUsageFields: usageFields,
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.messages"),
@@ -1361,6 +1364,20 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 	if !started {
 		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", "Internal server error")
 	}
+}
+
+func applyOpenAIMessagesDispatchBillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
+	if strings.TrimSpace(fields.BillingModelSource) != "" {
+		return fields
+	}
+	if strings.TrimSpace(mappedModel) == "" {
+		return fields
+	}
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(reqModel)), "claude") {
+		return fields
+	}
+	fields.BillingModelSource = service.BillingModelSourceRequested
+	return fields
 }
 
 func (h *OpenAIGatewayHandler) ensureResponsesDependencies(c *gin.Context, reqLog *zap.Logger) bool {

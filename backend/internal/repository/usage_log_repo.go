@@ -87,11 +87,13 @@ var usageLogInsertArgTypes = [...]string{
 }
 
 const rawUsageLogModelColumn = "model"
+const requestedUsageLogModelExpr = "COALESCE(NULLIF(TRIM(requested_model), ''), model)"
 const visibleUsageLogModelExpr = "COALESCE(NULLIF(TRIM(upstream_model), ''), model)"
 
 // rawUsageLogModelColumn preserves the exact stored usage_logs.model semantics for direct filters.
 // Historical rows may contain upstream/billing model values, while newer rows store requested_model.
-// Customer-visible model analytics must use visibleUsageLogModelExpr or resolveModelDimensionExpression instead.
+// Product/billing analytics must default to requestedUsageLogModelExpr so mapped upstream models
+// do not collapse customer-facing product tiers. Admin upstream views should request upstream explicitly.
 
 // dateFormatWhitelist 将 granularity 参数映射为 PostgreSQL TO_CHAR 格式字符串，防止外部输入直接拼入 SQL
 var dateFormatWhitelist = map[string]string{
@@ -2611,7 +2613,7 @@ func (r *usageLogRepository) GetUserModelStats(ctx context.Context, userID int64
 		WHERE user_id = $1 AND created_at >= $2 AND created_at < $3
 		GROUP BY %s
 		ORDER BY total_tokens DESC
-	`, visibleUsageLogModelExpr, visibleUsageLogModelExpr)
+	`, requestedUsageLogModelExpr, requestedUsageLogModelExpr)
 
 	rows, err := r.sql.QueryContext(ctx, query, userID, startTime, endTime)
 	if err != nil {
@@ -2998,7 +3000,7 @@ func (r *usageLogRepository) getUsageTrendFromAggregates(ctx context.Context, st
 
 // GetModelStatsWithFilters returns model statistics with optional filters
 func (r *usageLogRepository) GetModelStatsWithFilters(ctx context.Context, startTime, endTime time.Time, userID, apiKeyID, accountID, groupID int64, requestType *int16, stream *bool, billingType *int8) (results []ModelStat, err error) {
-	return r.getModelStatsWithFiltersBySource(ctx, startTime, endTime, userID, apiKeyID, accountID, groupID, requestType, stream, billingType, usagestats.ModelSourceUpstream)
+	return r.getModelStatsWithFiltersBySource(ctx, startTime, endTime, userID, apiKeyID, accountID, groupID, requestType, stream, billingType, usagestats.ModelSourceRequested)
 }
 
 // GetModelStatsWithFiltersBySource returns model statistics with optional filters and model source dimension.
@@ -3279,16 +3281,15 @@ func (r *usageLogRepository) GetAllGroupUsageSummary(ctx context.Context, todayS
 
 // resolveModelDimensionExpression maps model source type to a safe SQL expression.
 func resolveModelDimensionExpression(modelType string) string {
-	requestedExpr := "COALESCE(NULLIF(TRIM(requested_model), ''), model)"
 	switch strings.ToLower(strings.TrimSpace(modelType)) {
 	case usagestats.ModelSourceRequested:
-		return requestedExpr
+		return requestedUsageLogModelExpr
 	case usagestats.ModelSourceUpstream:
 		return visibleUsageLogModelExpr
 	case usagestats.ModelSourceMapping:
-		return fmt.Sprintf("(%s || ' -> ' || COALESCE(NULLIF(TRIM(upstream_model), ''), %s))", requestedExpr, requestedExpr)
+		return fmt.Sprintf("(%s || ' -> ' || COALESCE(NULLIF(TRIM(upstream_model), ''), %s))", requestedUsageLogModelExpr, requestedUsageLogModelExpr)
 	default:
-		return visibleUsageLogModelExpr
+		return requestedUsageLogModelExpr
 	}
 }
 
