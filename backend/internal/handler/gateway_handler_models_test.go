@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -57,4 +58,16 @@ func TestHideGatewayModelsForClaudeCodeModelPickerOnlyMatchesClaudeCodeUserAgent
 	apiKey.Group.AllowMessagesDispatch = true
 	apiKey.Group.Platform = service.PlatformAnthropic
 	require.True(t, hideGatewayModelsForClaudeCodeModelPicker(apiKey, "claude-cli/2.1.126 (external, cli)"))
+}
+
+func TestBuildGatewayModelListFromIDsUsesOpenAIShape(t *testing.T) {
+	data := buildGatewayModelListFromIDs([]string{"gpt-5.4"}, service.PlatformOpenAI)
+
+	models, ok := data.([]openai.Model)
+	require.True(t, ok)
+	require.Len(t, models, 1)
+	require.Equal(t, "gpt-5.4", models[0].ID)
+	require.Equal(t, "model", models[0].Object)
+	require.Equal(t, "openai", models[0].OwnedBy)
+	require.NotZero(t, models[0].Created)
 }

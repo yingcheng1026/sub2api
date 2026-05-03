@@ -415,6 +415,56 @@ func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 	})
 }
 
+func TestOpenAIGatewayCountTokensReturnsLocalEstimate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{
+		"model":"claude-sonnet-4-5-20250929",
+		"system":"You are concise.",
+		"messages":[{"role":"user","content":"hello from claude code"}],
+		"tools":[{"name":"lookup","description":"search docs","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}]
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{
+			Platform:              service.PlatformOpenAI,
+			AllowMessagesDispatch: true,
+		},
+	})
+
+	(&OpenAIGatewayHandler{}).CountTokens(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Greater(t, body.InputTokens, 0)
+}
+
+func TestOpenAIGatewayCountTokensRequiresMessagesDispatchPermission(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{
+		"model":"claude-sonnet-4-5-20250929",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{Platform: service.PlatformOpenAI},
+	})
+
+	(&OpenAIGatewayHandler{}).CountTokens(c)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "does not allow /v1/messages dispatch")
+}
+
 func TestApplyOpenAIMessagesDispatchBillingSource(t *testing.T) {
 	t.Run("claude_dispatch_bills_requested_model", func(t *testing.T) {
 		fields := applyOpenAIMessagesDispatchBillingSource(service.ChannelUsageFields{}, "claude-opus-4-7", "gpt-5.5")

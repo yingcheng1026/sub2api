@@ -956,19 +956,9 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, "")
 
 	if len(availableModels) > 0 {
-		// Build model list from whitelist
-		models := make([]claude.Model, 0, len(availableModels))
-		for _, modelID := range availableModels {
-			models = append(models, claude.Model{
-				ID:          modelID,
-				Type:        "model",
-				DisplayName: modelID,
-				CreatedAt:   "2024-01-01T00:00:00Z",
-			})
-		}
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
-			"data":   models,
+			"data":   buildGatewayModelListFromIDs(availableModels, platform),
 		})
 		return
 	}
@@ -990,6 +980,34 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 func hideGatewayModelsForClaudeCodeModelPicker(apiKey *service.APIKey, userAgent string) bool {
 	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
+}
+
+func buildGatewayModelListFromIDs(modelIDs []string, platform string) any {
+	if platform == service.PlatformOpenAI {
+		models := make([]openai.Model, 0, len(modelIDs))
+		for _, modelID := range modelIDs {
+			models = append(models, openai.Model{
+				ID:          modelID,
+				Object:      "model",
+				Created:     1704067200,
+				OwnedBy:     "openai",
+				Type:        "model",
+				DisplayName: modelID,
+			})
+		}
+		return models
+	}
+
+	models := make([]claude.Model, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		models = append(models, claude.Model{
+			ID:          modelID,
+			Type:        "model",
+			DisplayName: modelID,
+			CreatedAt:   "2024-01-01T00:00:00Z",
+		})
+	}
+	return models
 }
 
 // AntigravityModels 返回 Antigravity 支持的全部模型
