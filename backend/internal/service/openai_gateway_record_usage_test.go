@@ -1032,6 +1032,51 @@ func TestOpenAIGatewayServiceRecordUsage_ChannelMappedOverridesBillingModelWhenM
 	require.True(t, usageRepo.lastLog.ActualCost > 0, "cost must not be zero")
 }
 
+func TestOpenAIGatewayServiceRecordUsage_ClaudeSelectorBillsCanonicalRequestedModel(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
+	usage := OpenAIUsage{InputTokens: 20, OutputTokens: 10}
+
+	expectedClaudeCost, err := svc.billingService.CalculateCost("claude-opus-4-7", UsageTokens{
+		InputTokens:  20,
+		OutputTokens: 10,
+	}, 1.1)
+	require.NoError(t, err)
+	gptCost, err := svc.billingService.CalculateCost("gpt-5.5", UsageTokens{
+		InputTokens:  20,
+		OutputTokens: 10,
+	}, 1.1)
+	require.NoError(t, err)
+
+	err = svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_claude_selector_requested_billing",
+			Model:         "opus[1m]",
+			BillingModel:  "gpt-5.5",
+			UpstreamModel: "gpt-5.5",
+			Usage:         usage,
+			Duration:      time.Second,
+		},
+		APIKey:  &APIKey{ID: 10},
+		User:    &User{ID: 20},
+		Account: &Account{ID: 30},
+		ChannelUsageFields: ChannelUsageFields{
+			OriginalModel:      "claude-opus-4-7",
+			ChannelMappedModel: "gpt-5.5",
+			BillingModelSource: BillingModelSourceRequested,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, "opus[1m]", usageRepo.lastLog.Model)
+	require.Equal(t, "claude-opus-4-7", usageRepo.lastLog.RequestedModel)
+	require.InDelta(t, expectedClaudeCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
+	require.NotEqual(t, gptCost.ActualCost, usageRepo.lastLog.ActualCost)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_SubscriptionBillingSetsSubscriptionFields(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}

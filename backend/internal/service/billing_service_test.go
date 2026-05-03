@@ -78,6 +78,7 @@ func TestGetModelPricing_FallbackMatchesByFamily(t *testing.T) {
 		model         string
 		expectedInput float64
 	}{
+		{"claude-opus-4-7", 5e-6},
 		{"claude-opus-4.5-20250101", 5e-6},
 		{"claude-3-opus-20240229", 15e-6},
 		{"claude-sonnet-4-20250514", 3e-6},

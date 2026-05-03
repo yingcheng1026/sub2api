@@ -408,7 +408,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+				ChannelUsageFields: applyOpenAICompatClaudeBillingSource(
+					channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					reqModel,
+				),
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.responses"),
@@ -768,7 +771,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)
 
+		dispatchMappedModel := effectiveMappedModel
 		h.submitUsageRecordTask(func(ctx context.Context) {
+			usageFields := channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel)
+			usageFields = applyOpenAIMessagesDispatchBillingSource(usageFields, reqModel, dispatchMappedModel)
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -781,7 +787,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel),
+				ChannelUsageFields: usageFields,
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.messages"),
@@ -1361,6 +1367,27 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 	if !started {
 		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", "Internal server error")
 	}
+}
+
+func applyOpenAIMessagesDispatchBillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
+	if strings.TrimSpace(mappedModel) == "" {
+		return fields
+	}
+	return applyClaudeProductBillingSource(fields, reqModel)
+}
+
+func applyOpenAICompatClaudeBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
+	return applyClaudeProductBillingSource(fields, reqModel)
+}
+
+func applyClaudeProductBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
+	billingModel := service.CanonicalClaudeMessagesDispatchBillingModel(reqModel)
+	if billingModel == "" {
+		return fields
+	}
+	fields.BillingModelSource = service.BillingModelSourceRequested
+	fields.OriginalModel = billingModel
+	return fields
 }
 
 func (h *OpenAIGatewayHandler) ensureResponsesDependencies(c *gin.Context, reqLog *zap.Logger) bool {
