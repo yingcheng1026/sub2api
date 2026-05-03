@@ -938,7 +938,7 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		platform = forcedPlatform
 	}
 
-	if service.NewClaudeCodeValidator().ValidateUserAgent(c.GetHeader("User-Agent")) {
+	if shouldHideGatewayModelListForClient(c.GetHeader("User-Agent")) {
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
 			"data":   []any{},
@@ -980,6 +980,14 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		"object": "list",
 		"data":   claude.DefaultModels,
 	})
+}
+
+func shouldHideGatewayModelListForClient(userAgent string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(userAgent))
+	if strings.HasPrefix(normalized, "claude-code/") || strings.HasPrefix(normalized, "claude-cli/") {
+		return true
+	}
+	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
 }
 
 // AntigravityModels 返回 Antigravity 支持的全部模型
