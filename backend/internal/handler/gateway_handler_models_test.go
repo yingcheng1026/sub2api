@@ -20,6 +20,11 @@ func TestGatewayModelListPlatformForClientUsesAnthropicShapeForClaudeCode(t *tes
 	)
 }
 
+func TestShouldHideGatewayModelListForClaudeCode(t *testing.T) {
+	require.True(t, shouldHideGatewayModelListForClient("claude-cli/2.1.126 (external, cli)"))
+	require.False(t, shouldHideGatewayModelListForClient("curl/8.7.1"))
+}
+
 func TestBuildGatewayModelListFromIDsUsesOpenAIShape(t *testing.T) {
 	data := buildGatewayModelListFromIDs([]string{"gpt-5.4"}, service.PlatformOpenAI)
 

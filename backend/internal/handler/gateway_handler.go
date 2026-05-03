@@ -944,7 +944,16 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		platform = forcedPlatform
 	}
 
-	modelListPlatform := gatewayModelListPlatformForClient(platform, c.GetHeader("User-Agent"))
+	userAgent := c.GetHeader("User-Agent")
+	if shouldHideGatewayModelListForClient(userAgent) {
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   []any{},
+		})
+		return
+	}
+
+	modelListPlatform := gatewayModelListPlatformForClient(platform, userAgent)
 
 	// Get available models from account configurations (without platform filter)
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, "")
@@ -977,6 +986,10 @@ func gatewayModelListPlatformForClient(platform, userAgent string) string {
 		return service.PlatformAnthropic
 	}
 	return platform
+}
+
+func shouldHideGatewayModelListForClient(userAgent string) bool {
+	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
 }
 
 func buildGatewayModelListFromIDs(modelIDs []string, platform string) any {
