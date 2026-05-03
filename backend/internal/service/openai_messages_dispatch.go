@@ -6,6 +6,10 @@ const (
 	defaultOpenAIMessagesDispatchOpusMappedModel   = "gpt-5.5"
 	defaultOpenAIMessagesDispatchSonnetMappedModel = "gpt-5.4"
 	defaultOpenAIMessagesDispatchHaikuMappedModel  = "gpt-5.4-mini"
+
+	defaultClaudeMessagesDispatchOpusBillingModel   = "claude-opus-4-7"
+	defaultClaudeMessagesDispatchSonnetBillingModel = "claude-sonnet-4-6"
+	defaultClaudeMessagesDispatchHaikuBillingModel  = "claude-haiku-4-5"
 )
 
 func normalizeOpenAIMessagesDispatchMappedModel(model string) string {
@@ -64,6 +68,36 @@ func claudeMessagesDispatchFamily(model string) string {
 		return "sonnet"
 	case strings.Contains(normalized, "haiku"):
 		return "haiku"
+	default:
+		return ""
+	}
+}
+
+// CanonicalClaudeMessagesDispatchBillingModel maps Claude Code selectors onto
+// the Claude product model IDs used by our billing table. The upstream model may
+// be GPT, but customer billing stays anchored to the requested Claude product.
+func CanonicalClaudeMessagesDispatchBillingModel(model string) string {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	if normalized == "" {
+		return ""
+	}
+	if strings.Contains(normalized, "/") {
+		parts := strings.Split(normalized, "/")
+		normalized = strings.TrimSpace(parts[len(parts)-1])
+	}
+	normalized = strings.TrimSuffix(normalized, "[1m]")
+
+	if strings.HasPrefix(normalized, "claude-") {
+		return normalized
+	}
+
+	switch normalized {
+	case "opus":
+		return defaultClaudeMessagesDispatchOpusBillingModel
+	case "sonnet", "default":
+		return defaultClaudeMessagesDispatchSonnetBillingModel
+	case "haiku":
+		return defaultClaudeMessagesDispatchHaikuBillingModel
 	default:
 		return ""
 	}

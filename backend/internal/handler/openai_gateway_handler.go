@@ -1377,13 +1377,15 @@ func applyOpenAIMessagesDispatchBillingSource(fields service.ChannelUsageFields,
 }
 
 func applyOpenAICompatClaudeBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(reqModel)), "claude") {
+	billingModel := service.CanonicalClaudeMessagesDispatchBillingModel(reqModel)
+	if billingModel == "" {
 		return fields
 	}
 	if strings.EqualFold(strings.TrimSpace(fields.BillingModelSource), service.BillingModelSourceUpstream) {
 		return fields
 	}
 	fields.BillingModelSource = service.BillingModelSourceRequested
+	fields.OriginalModel = billingModel
 	return fields
 }
 
