@@ -944,13 +944,7 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		platform = forcedPlatform
 	}
 
-	if hideGatewayModelsForClaudeCodeModelPicker(apiKey, c.GetHeader("User-Agent")) {
-		c.JSON(http.StatusOK, gin.H{
-			"object": "list",
-			"data":   []claude.Model{},
-		})
-		return
-	}
+	modelListPlatform := gatewayModelListPlatformForClient(platform, c.GetHeader("User-Agent"))
 
 	// Get available models from account configurations (without platform filter)
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, "")
@@ -958,13 +952,13 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	if len(availableModels) > 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
-			"data":   buildGatewayModelListFromIDs(availableModels, platform),
+			"data":   buildGatewayModelListFromIDs(availableModels, modelListPlatform),
 		})
 		return
 	}
 
 	// Fallback to default models
-	if platform == "openai" {
+	if modelListPlatform == service.PlatformOpenAI {
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
 			"data":   openai.DefaultModels,
@@ -978,8 +972,11 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	})
 }
 
-func hideGatewayModelsForClaudeCodeModelPicker(apiKey *service.APIKey, userAgent string) bool {
-	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
+func gatewayModelListPlatformForClient(platform, userAgent string) string {
+	if service.NewClaudeCodeValidator().ValidateUserAgent(userAgent) {
+		return service.PlatformAnthropic
+	}
+	return platform
 }
 
 func buildGatewayModelListFromIDs(modelIDs []string, platform string) any {
