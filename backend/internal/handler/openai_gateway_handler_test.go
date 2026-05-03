@@ -376,6 +376,30 @@ func TestResolveOpenAIForwardDefaultMappedModel(t *testing.T) {
 	})
 }
 
+func TestResolveOpenAIChatCompletionsRoutingModel(t *testing.T) {
+	t.Run("uses_channel_mapped_model_for_account_selection", func(t *testing.T) {
+		mapping := service.ChannelMappingResult{
+			Mapped:      true,
+			MappedModel: "gpt-5.4-mini",
+		}
+		require.Equal(t, "gpt-5.4-mini", resolveOpenAIChatCompletionsRoutingModel("claude-haiku-4-5", mapping))
+	})
+
+	t.Run("keeps_requested_model_without_mapping", func(t *testing.T) {
+		mapping := service.ChannelMappingResult{
+			MappedModel: "gpt-5.4",
+		}
+		require.Equal(t, "gpt-5.4", resolveOpenAIChatCompletionsRoutingModel("gpt-5.4", mapping))
+	})
+
+	t.Run("falls_back_to_requested_model_when_mapping_target_empty", func(t *testing.T) {
+		mapping := service.ChannelMappingResult{
+			Mapped: true,
+		}
+		require.Equal(t, "claude-haiku-4-5", resolveOpenAIChatCompletionsRoutingModel("claude-haiku-4-5", mapping))
+	})
+}
+
 func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 	t.Run("exact_claude_model_override_wins", func(t *testing.T) {
 		apiKey := &service.APIKey{

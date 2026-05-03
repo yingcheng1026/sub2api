@@ -82,6 +82,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	routingModel := resolveOpenAIChatCompletionsRoutingModel(reqModel, channelMapping)
 
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
@@ -127,7 +128,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			apiKey.GroupID,
 			"",
 			sessionHash,
-			reqModel,
+			routingModel,
 			failedAccountIDs,
 			service.OpenAIUpstreamTransportAny,
 			false,
@@ -142,7 +143,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				if apiKey.Group != nil {
 					defaultModel = apiKey.Group.DefaultMappedModel
 				}
-				if defaultModel != "" && defaultModel != reqModel {
+				if defaultModel != "" && defaultModel != routingModel {
 					reqLog.Info("openai_chat_completions.fallback_to_default_model",
 						zap.String("default_mapped_model", defaultModel),
 					)
