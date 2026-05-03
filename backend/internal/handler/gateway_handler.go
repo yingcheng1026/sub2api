@@ -938,6 +938,14 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		platform = forcedPlatform
 	}
 
+	if hideGatewayModelsForClaudeCodeModelPicker(apiKey, c.GetHeader("User-Agent")) {
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   []claude.Model{},
+		})
+		return
+	}
+
 	// Get available models from account configurations (without platform filter)
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, "")
 
@@ -972,6 +980,16 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		"object": "list",
 		"data":   claude.DefaultModels,
 	})
+}
+
+func hideGatewayModelsForClaudeCodeModelPicker(apiKey *service.APIKey, userAgent string) bool {
+	if apiKey == nil || apiKey.Group == nil {
+		return false
+	}
+	if apiKey.Group.Platform != service.PlatformOpenAI || !apiKey.Group.AllowMessagesDispatch {
+		return false
+	}
+	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
 }
 
 // AntigravityModels 返回 Antigravity 支持的全部模型
