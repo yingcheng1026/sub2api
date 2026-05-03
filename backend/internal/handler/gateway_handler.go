@@ -994,7 +994,13 @@ func shouldHideGatewayModelListForClient(userAgent string) bool {
 
 func isClaudeCodeModelListClient(userAgent string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(userAgent))
-	if strings.HasPrefix(normalized, "claude-code/") || strings.HasPrefix(normalized, "claude-cli/") {
+	compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(normalized)
+	if compact == "claudecode" ||
+		compact == "claudecli" ||
+		strings.HasPrefix(compact, "claudecode/") ||
+		strings.HasPrefix(compact, "claudecli/") ||
+		strings.HasPrefix(compact, "claudecode(") ||
+		strings.HasPrefix(compact, "claudecli(") {
 		return true
 	}
 	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)

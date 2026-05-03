@@ -19,6 +19,10 @@ func TestGatewayModelListPlatformForClientUsesAnthropicShapeForClaudeCode(t *tes
 		gatewayModelListPlatformForClient(service.PlatformOpenAI, "claude-code/2.1.126"),
 	)
 	require.Equal(t,
+		service.PlatformAnthropic,
+		gatewayModelListPlatformForClient(service.PlatformOpenAI, "Claude Code/2.1.126"),
+	)
+	require.Equal(t,
 		service.PlatformOpenAI,
 		gatewayModelListPlatformForClient(service.PlatformOpenAI, "curl/8.7.1"),
 	)
@@ -27,6 +31,7 @@ func TestGatewayModelListPlatformForClientUsesAnthropicShapeForClaudeCode(t *tes
 func TestShouldHideGatewayModelListForClaudeCode(t *testing.T) {
 	require.True(t, shouldHideGatewayModelListForClient("claude-cli/2.1.126 (external, cli)"))
 	require.True(t, shouldHideGatewayModelListForClient("claude-code/2.1.126"))
+	require.True(t, shouldHideGatewayModelListForClient("Claude Code/2.1.126"))
 	require.False(t, shouldHideGatewayModelListForClient("curl/8.7.1"))
 }
 
