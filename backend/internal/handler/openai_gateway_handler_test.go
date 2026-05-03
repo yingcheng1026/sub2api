@@ -382,21 +382,32 @@ func TestResolveOpenAIChatCompletionsRoutingModel(t *testing.T) {
 			Mapped:      true,
 			MappedModel: "gpt-5.4-mini",
 		}
-		require.Equal(t, "gpt-5.4-mini", resolveOpenAIChatCompletionsRoutingModel("claude-haiku-4-5", mapping))
+		require.Equal(t, "gpt-5.4-mini", resolveOpenAIChatCompletionsRoutingModel(nil, "claude-haiku-4-5", mapping))
+	})
+
+	t.Run("uses_messages_dispatch_mapping_when_channel_mapping_absent", func(t *testing.T) {
+		apiKey := &service.APIKey{
+			Group: &service.Group{
+				MessagesDispatchModelConfig: service.OpenAIMessagesDispatchModelConfig{
+					HaikuMappedModel: "gpt-5.4-mini",
+				},
+			},
+		}
+		require.Equal(t, "gpt-5.4-mini", resolveOpenAIChatCompletionsRoutingModel(apiKey, "claude-haiku-4-5", service.ChannelMappingResult{}))
 	})
 
 	t.Run("keeps_requested_model_without_mapping", func(t *testing.T) {
 		mapping := service.ChannelMappingResult{
 			MappedModel: "gpt-5.4",
 		}
-		require.Equal(t, "gpt-5.4", resolveOpenAIChatCompletionsRoutingModel("gpt-5.4", mapping))
+		require.Equal(t, "gpt-5.4", resolveOpenAIChatCompletionsRoutingModel(nil, "gpt-5.4", mapping))
 	})
 
 	t.Run("falls_back_to_requested_model_when_mapping_target_empty", func(t *testing.T) {
 		mapping := service.ChannelMappingResult{
 			Mapped: true,
 		}
-		require.Equal(t, "claude-haiku-4-5", resolveOpenAIChatCompletionsRoutingModel("claude-haiku-4-5", mapping))
+		require.Equal(t, "claude-haiku-4-5", resolveOpenAIChatCompletionsRoutingModel(nil, "claude-haiku-4-5", mapping))
 	})
 }
 

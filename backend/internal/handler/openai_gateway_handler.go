@@ -47,11 +47,14 @@ func resolveOpenAIForwardDefaultMappedModel(apiKey *service.APIKey, fallbackMode
 	return strings.TrimSpace(apiKey.Group.DefaultMappedModel)
 }
 
-func resolveOpenAIChatCompletionsRoutingModel(requestedModel string, channelMapping service.ChannelMappingResult) string {
+func resolveOpenAIChatCompletionsRoutingModel(apiKey *service.APIKey, requestedModel string, channelMapping service.ChannelMappingResult) string {
 	if channelMapping.Mapped {
 		if mappedModel := strings.TrimSpace(channelMapping.MappedModel); mappedModel != "" {
 			return mappedModel
 		}
+	}
+	if mappedModel := resolveOpenAIMessagesDispatchMappedModel(apiKey, requestedModel); mappedModel != "" {
+		return mappedModel
 	}
 	return requestedModel
 }
