@@ -2339,9 +2339,60 @@ func TestWeightedShuffleByLoadFactor_RatioMatchesLoadFactor(t *testing.T) {
 	}
 }
 
+// TestWeightedShuffleByLoadFactor_CrossLoadRateSamePriority 验证同 Priority 且
+// 未满载的账号即使 LoadRate 不同，也必须进入同一个 LoadFactor 加权池。
+// 回归场景：Plus 账号 LoadRate=0 排在前段，高容量账号 LoadRate=50 被旧分组
+// 切到后段，导致高容量账号首位命中率从理论值掉到 0。
+func TestWeightedShuffleByLoadFactor_CrossLoadRateSamePriority(t *testing.T) {
+	const (
+		proID         = int64(19)
+		proLoadFactor = 15
+		plusCount     = 5
+		iterations    = 3000
+	)
+
+	build := func() []accountWithLoad {
+		out := make([]accountWithLoad, 0, plusCount+1)
+		for i := 0; i < plusCount; i++ {
+			out = append(out, accountWithLoad{
+				account: &Account{
+					ID:         int64(300 + i),
+					Priority:   1,
+					LoadFactor: intPtrForTest(1),
+				},
+				loadInfo: &AccountLoadInfo{LoadRate: 0},
+			})
+		}
+		out = append(out, accountWithLoad{
+			account: &Account{
+				ID:         proID,
+				Priority:   1,
+				LoadFactor: intPtrForTest(proLoadFactor),
+			},
+			loadInfo: &AccountLoadInfo{LoadRate: 50},
+		})
+		return out
+	}
+
+	proHits := 0
+	for i := 0; i < iterations; i++ {
+		pool := build()
+		weightedShuffleByLoadFactorWithinSortGroups(pool)
+		if pool[0].account.ID == proID {
+			proHits++
+		}
+	}
+
+	expectedProRatio := float64(proLoadFactor) / float64(proLoadFactor+plusCount)
+	proRatio := float64(proHits) / float64(iterations)
+	require.InDelta(t, expectedProRatio, proRatio, 0.06,
+		"同 Priority 健康账号不应被 LoadRate 切 segment；Pro 实际占比 %.2f%% 与期望 %.2f%% 偏差过大",
+		proRatio*100, expectedProRatio*100)
+}
+
 // TestWeightedShuffleByLoadFactor_PreservesPriorityGrouping 验证不同 Priority
 // 的账号即使在同一切片里也会被严格分组：高 Priority（数值小）的账号永远
-// 排在低 Priority 前面，加权抽样只在同 Priority+LoadRate 的子组内生效。
+// 排在低 Priority 前面，加权抽样只在同 Priority 子组内生效。
 func TestWeightedShuffleByLoadFactor_PreservesPriorityGrouping(t *testing.T) {
 	const iterations = 1000
 	for i := 0; i < iterations; i++ {

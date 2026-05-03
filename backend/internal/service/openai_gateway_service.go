@@ -1518,8 +1518,8 @@ func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool
 
 // weightedShuffleByLoadFactorWithinSortGroups 对已经按 (Priority, LoadRate) 排过序的
 // accountWithLoad 切片进行原地加权洗牌：
-//   - 分组键只用 (Priority, LoadRate)，不再绑定 LastUsedAt——这样 load_factor 加权
-//     可以盖掉 LRU 平均化效应，让高 capacity 的账号按比例占据更多前排位置；
+//   - 分组键只用 Priority，不再绑定 LoadRate 或 LastUsedAt。LoadRate>=100 的满载
+//     账号已在上层过滤；剩余健康账号应由 LoadFactor 决定长期容量占比；
 //   - 每组内做加权 Fisher–Yates，权重取 account.EffectiveLoadFactor()。
 //
 // 选第一位的概率 ≈ w_i / Σw_j（与号池其它账号一致），用于多账号场景下的「按容量分流」。
@@ -1545,7 +1545,7 @@ func samePriorityAndLoadRateGroup(a, b accountWithLoad) bool {
 	if a.account.Priority != b.account.Priority {
 		return false
 	}
-	return a.loadInfo.LoadRate == b.loadInfo.LoadRate
+	return true
 }
 
 // weightedShuffleSegmentByLoadFactor 在 seg 上做加权 Fisher–Yates：
