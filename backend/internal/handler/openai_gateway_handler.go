@@ -771,7 +771,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		dispatchMappedModel := effectiveMappedModel
 		h.submitUsageRecordTask(func(ctx context.Context) {
 			usageFields := channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel)
-			usageFields = applyOpenAIMessagesDispatchBillingSource(usageFields, reqModel, dispatchMappedModel)
+			usageFields = preserveOpenAIMessagesDispatchSub2BillingSource(usageFields, reqModel, dispatchMappedModel)
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -1366,17 +1366,11 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 	}
 }
 
-func applyOpenAIMessagesDispatchBillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
-	if strings.TrimSpace(fields.BillingModelSource) != "" {
-		return fields
-	}
-	if strings.TrimSpace(mappedModel) == "" {
-		return fields
-	}
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(reqModel)), "claude") {
-		return fields
-	}
-	fields.BillingModelSource = service.BillingModelSourceRequested
+func preserveOpenAIMessagesDispatchSub2BillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
+	// Billing must follow Sub2API's native channel/upstream basis. Claude
+	// compatibility model names are kept in ChannelUsageFields for audit, but
+	// they must not force requested-model billing when the request is mapped to
+	// a GPT/OpenAI upstream model.
 	return fields
 }
 
