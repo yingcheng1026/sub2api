@@ -59,6 +59,17 @@ func resolveOpenAIChatCompletionsRoutingModel(apiKey *service.APIKey, requestedM
 	return requestedModel
 }
 
+func resolveOpenAIChatCompletionsForwardModel(requestedModel, routingModel string, channelMapping service.ChannelMappingResult) string {
+	if channelMapping.Mapped {
+		return strings.TrimSpace(channelMapping.MappedModel)
+	}
+	routingModel = strings.TrimSpace(routingModel)
+	if routingModel != "" && routingModel != requestedModel {
+		return routingModel
+	}
+	return ""
+}
+
 func resolveOpenAIMessagesDispatchMappedModel(apiKey *service.APIKey, requestedModel string) string {
 	if apiKey == nil || apiKey.Group == nil {
 		return ""

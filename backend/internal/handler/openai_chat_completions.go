@@ -194,8 +194,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 		defaultMappedModel := resolveOpenAIForwardDefaultMappedModel(apiKey, c.GetString("openai_chat_completions_fallback_model"))
 		forwardBody := body
-		if channelMapping.Mapped {
-			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
+		if forwardModel := resolveOpenAIChatCompletionsForwardModel(reqModel, routingModel, channelMapping); forwardModel != "" {
+			forwardBody = h.gatewayService.ReplaceModelInBody(body, forwardModel)
 		}
 		result, err := h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
 
