@@ -982,13 +982,21 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 }
 
 func gatewayModelListPlatformForClient(platform, userAgent string) string {
-	if service.NewClaudeCodeValidator().ValidateUserAgent(userAgent) {
+	if isClaudeCodeModelListClient(userAgent) {
 		return service.PlatformAnthropic
 	}
 	return platform
 }
 
 func shouldHideGatewayModelListForClient(userAgent string) bool {
+	return isClaudeCodeModelListClient(userAgent)
+}
+
+func isClaudeCodeModelListClient(userAgent string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(userAgent))
+	if strings.HasPrefix(normalized, "claude-code/") || strings.HasPrefix(normalized, "claude-cli/") {
+		return true
+	}
 	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
 }
 
