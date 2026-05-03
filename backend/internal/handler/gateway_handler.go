@@ -938,6 +938,14 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		platform = forcedPlatform
 	}
 
+	if service.NewClaudeCodeValidator().ValidateUserAgent(c.GetHeader("User-Agent")) {
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   []any{},
+		})
+		return
+	}
+
 	// Get available models from account configurations (without platform filter)
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, "")
 
