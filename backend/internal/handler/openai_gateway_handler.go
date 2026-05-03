@@ -1381,9 +1381,6 @@ func applyOpenAICompatClaudeBillingSource(fields service.ChannelUsageFields, req
 	if billingModel == "" {
 		return fields
 	}
-	if strings.EqualFold(strings.TrimSpace(fields.BillingModelSource), service.BillingModelSourceUpstream) {
-		return fields
-	}
 	fields.BillingModelSource = service.BillingModelSourceRequested
 	fields.OriginalModel = billingModel
 	return fields

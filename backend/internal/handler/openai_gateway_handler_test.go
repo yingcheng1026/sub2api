@@ -440,11 +440,12 @@ func TestApplyOpenAIMessagesDispatchBillingSource(t *testing.T) {
 		require.Equal(t, "claude-opus-4-7", fields.OriginalModel)
 	})
 
-	t.Run("preserves_explicit_upstream_billing_source", func(t *testing.T) {
+	t.Run("claude_dispatch_overrides_explicit_upstream_billing_source", func(t *testing.T) {
 		fields := applyOpenAIMessagesDispatchBillingSource(service.ChannelUsageFields{
 			BillingModelSource: service.BillingModelSourceUpstream,
 		}, "claude-opus-4-7", "gpt-5.5")
-		require.Equal(t, service.BillingModelSourceUpstream, fields.BillingModelSource)
+		require.Equal(t, service.BillingModelSourceRequested, fields.BillingModelSource)
+		require.Equal(t, "claude-opus-4-7", fields.OriginalModel)
 	})
 
 	t.Run("openai_native_model_keeps_default_billing", func(t *testing.T) {
