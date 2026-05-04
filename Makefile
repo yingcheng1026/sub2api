@@ -42,6 +42,7 @@ test-datamanagementd:
 
 test-deploy-scripts:
 	@bash deploy/test_build_image_retention.sh
+	@bash deploy/test_docker_build_guard.sh
 
 secret-scan:
 	@python3 tools/secret_scan.py
