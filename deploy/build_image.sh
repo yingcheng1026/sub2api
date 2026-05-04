@@ -91,19 +91,30 @@ cleanup_old_feature_images() {
 prune_builder_cache() {
     local gc_enabled="${SUB2API_BUILDER_GC:-1}"
     local keep_storage="${SUB2API_BUILDER_KEEP_STORAGE:-5GB}"
+    local help_text
+    local prune_args=(--force)
 
     if [[ "${gc_enabled}" == "0" || "${gc_enabled}" == "false" ]]; then
         echo "Build cache GC disabled by SUB2API_BUILDER_GC=${gc_enabled}."
         return 0
     fi
 
+    help_text="$(docker builder prune --help 2>&1 || true)"
+    if [[ "${help_text}" == *"--keep-storage"* ]]; then
+        prune_args+=(--keep-storage "${keep_storage}")
+    elif [[ "${help_text}" == *"--max-used-space"* ]]; then
+        prune_args+=(--max-used-space "${keep_storage}")
+    else
+        echo "Warning: Docker builder prune has no cache-size flag; pruning prompt-only cache." >&2
+    fi
+
     if [[ "${SUB2API_BUILDER_GC_DRY_RUN:-0}" == "1" ]]; then
-        echo "DRY RUN: docker builder prune --force --keep-storage ${keep_storage}"
+        echo "DRY RUN: docker builder prune ${prune_args[*]}"
         return 0
     fi
 
-    echo "Pruning Docker build cache with keep storage ${keep_storage}"
-    docker builder prune --force --keep-storage "${keep_storage}" || \
+    echo "Pruning Docker build cache with limit ${keep_storage}"
+    docker builder prune "${prune_args[@]}" || \
         echo "Warning: failed to prune Docker build cache." >&2
 }
 

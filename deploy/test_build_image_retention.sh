@@ -109,6 +109,11 @@ test_builder_gc_uses_keep_storage() {
     local builder_prune_command=""
 
     docker() {
+        if [[ "$1" == "builder" && "$2" == "prune" && "$3" == "--help" ]]; then
+            echo "      --max-used-space bytes   Maximum amount of disk space allowed to keep for cache"
+            return 0
+        fi
+
         if [[ "$1" == "builder" && "$2" == "prune" ]]; then
             builder_prune_command="$*"
             return 0
@@ -120,7 +125,7 @@ test_builder_gc_uses_keep_storage() {
     SUB2API_BUILDER_GC=1 SUB2API_BUILDER_KEEP_STORAGE=5GB \
         prune_builder_cache >/tmp/sub2api-image-retention-test.out
 
-    assert_eq "builder prune --force --keep-storage 5GB" "${builder_prune_command}" "builder prune command"
+    assert_eq "builder prune --force --max-used-space 5GB" "${builder_prune_command}" "builder prune command"
 }
 
 test_builder_gc_can_be_disabled() {
