@@ -105,9 +105,41 @@ test_cleanup_skips_latest() {
     assert_eq "0" "${#removed[@]}" "latest cleanup remove count"
 }
 
+test_builder_gc_uses_keep_storage() {
+    local builder_prune_command=""
+
+    docker() {
+        if [[ "$1" == "builder" && "$2" == "prune" ]]; then
+            builder_prune_command="$*"
+            return 0
+        fi
+
+        fail "unexpected docker command: $*"
+    }
+
+    SUB2API_BUILDER_GC=1 SUB2API_BUILDER_KEEP_STORAGE=5GB \
+        prune_builder_cache >/tmp/sub2api-image-retention-test.out
+
+    assert_eq "builder prune --force --keep-storage 5GB" "${builder_prune_command}" "builder prune command"
+}
+
+test_builder_gc_can_be_disabled() {
+    local builder_prune_called=0
+
+    docker() {
+        builder_prune_called=1
+        fail "builder GC disabled but docker was called: $*"
+    }
+
+    SUB2API_BUILDER_GC=0 prune_builder_cache >/tmp/sub2api-image-retention-test.out
+    assert_eq "0" "${builder_prune_called}" "disabled builder prune call count"
+}
+
 test_parse_image_ref
 test_derive_feature_prefix
 test_cleanup_keeps_three_matching_tags
 test_cleanup_skips_latest
+test_builder_gc_uses_keep_storage
+test_builder_gc_can_be_disabled
 
 echo "PASS: build image retention tests"
