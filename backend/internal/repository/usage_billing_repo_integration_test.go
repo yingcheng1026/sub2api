@@ -471,3 +471,274 @@ func TestUsageBillingLedgerMigration_BackfillsMissingEntryIdempotently(t *testin
 	require.Equal(t, 1, ledgerEntryCount)
 	require.InDelta(t, 0.75, ledgerDeltaUSD, 0.000001)
 }
+
+func TestBillingUsageEntry_PostsBalancedDoubleEntryLedger(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("double-entry-usage-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-double-entry-usage-" + uuid.NewString(),
+		Name:   "double-entry-usage",
+	})
+	account := mustCreateAccount(t, client, &service.Account{
+		Name: "double-entry-usage-account-" + uuid.NewString(),
+		Type: service.AccountTypeAPIKey,
+	})
+
+	var usageLogID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		INSERT INTO usage_logs (
+			user_id, api_key_id, account_id, request_id, model,
+			input_tokens, output_tokens, total_cost, actual_cost, billing_type, created_at
+		)
+		VALUES ($1, $2, $3, $4, 'gpt-5.4-mini', 12, 4, 1.25, 0.75, $5, NOW())
+		RETURNING id
+	`, user.ID, apiKey.ID, account.ID, "double-entry-usage-"+uuid.NewString(), service.BillingTypeBalance).Scan(&usageLogID))
+
+	var (
+		billingEntryID int64
+		transactionID  int64
+		txType         string
+		txAmount       float64
+	)
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT b.id, lt.id, lt.transaction_type, lt.amount_usd::double precision
+		FROM billing_usage_entries b
+		JOIN ledger_transactions lt
+		  ON lt.idempotency_key = 'billing_usage_entry:' || b.id::text
+		WHERE b.usage_log_id = $1
+	`, usageLogID).Scan(&billingEntryID, &transactionID, &txType, &txAmount))
+	require.NotZero(t, billingEntryID)
+	require.NotZero(t, transactionID)
+	require.Equal(t, "usage_charge", txType)
+	require.InDelta(t, 0.75, txAmount, 0.000001)
+
+	assertBalancedLedgerTransaction(t, ctx, transactionID, user.ID, 0.75, "liability", "revenue:api_usage")
+}
+
+func TestRedeemCodeBalance_PostsWalletDoubleEntryLedger(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("double-entry-redeem-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+	})
+
+	var redeemCodeID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		INSERT INTO redeem_codes (code, type, value, status, used_by, used_at, created_at)
+		VALUES ($1, 'admin_balance', 12.34, 'used', $2, NOW(), NOW())
+		RETURNING id
+	`, "DOUBLE-ENTRY-"+uuid.NewString()[:12], user.ID).Scan(&redeemCodeID))
+
+	var transactionID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT id
+		FROM ledger_transactions
+		WHERE idempotency_key = 'redeem_code:' || $1::bigint::text || ':wallet'
+	`, redeemCodeID).Scan(&transactionID))
+
+	assertBalancedLedgerTransaction(t, ctx, transactionID, user.ID, 12.34, "expense", "user_wallet")
+}
+
+func TestPaymentRefundAudit_PostsWalletDebitDoubleEntryLedger(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("double-entry-refund-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+	})
+
+	var orderID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		INSERT INTO payment_orders (
+			user_id, user_email, user_name, amount, pay_amount, recharge_code,
+			order_type, status, expires_at, paid_at, completed_at, created_at, updated_at
+		)
+		VALUES ($1, $2, '', 20.00, 20.00, $3, 'balance', 'COMPLETED', NOW() + INTERVAL '1 hour', NOW(), NOW(), NOW(), NOW())
+		RETURNING id
+	`, user.ID, user.Email, "REFUND-"+uuid.NewString()[:12]).Scan(&orderID))
+
+	var auditID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		INSERT INTO payment_audit_logs (order_id, action, detail, operator, created_at)
+		VALUES ($1, 'REFUND_SUCCESS', '{"refundAmount":5.00,"balanceDeducted":3.21,"force":false}', 'admin', NOW())
+		RETURNING id
+	`, fmt.Sprintf("%d", orderID)).Scan(&auditID))
+
+	var transactionID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT id
+		FROM ledger_transactions
+		WHERE idempotency_key = 'payment_audit_log:' || $1::bigint::text || ':refund_balance_deduction'
+	`, auditID).Scan(&transactionID))
+
+	assertBalancedLedgerTransaction(t, ctx, transactionID, user.ID, 3.21, "liability", "asset:payment_cash_clearing")
+}
+
+func TestDoubleEntryLedgerMigration_BackfillsExistingSourcesIdempotently(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("double-entry-backfill-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-double-entry-backfill-" + uuid.NewString(),
+		Name:   "double-entry-backfill",
+	})
+	account := mustCreateAccount(t, client, &service.Account{
+		Name: "double-entry-backfill-account-" + uuid.NewString(),
+		Type: service.AccountTypeAPIKey,
+	})
+
+	var usageLogID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		INSERT INTO usage_logs (
+			user_id, api_key_id, account_id, request_id, model,
+			input_tokens, output_tokens, total_cost, actual_cost, billing_type, created_at
+		)
+		VALUES ($1, $2, $3, $4, 'gpt-5.4-mini', 12, 4, 1.25, 0.75, $5, NOW())
+		RETURNING id
+	`, user.ID, apiKey.ID, account.ID, "double-entry-backfill-"+uuid.NewString(), service.BillingTypeBalance).Scan(&usageLogID))
+
+	var billingEntryID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT id FROM billing_usage_entries WHERE usage_log_id = $1
+	`, usageLogID).Scan(&billingEntryID))
+
+	_, err := integrationDB.ExecContext(ctx, `
+		DELETE FROM ledger_transactions
+		WHERE idempotency_key = 'billing_usage_entry:' || $1::bigint::text
+	`, billingEntryID)
+	require.NoError(t, err)
+
+	migrationSQL, err := fs.ReadFile(migrations.FS, "135_double_entry_billing_ledger.sql")
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, string(migrationSQL))
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, string(migrationSQL))
+	require.NoError(t, err)
+
+	var (
+		transactionCount int
+		lineCount        int
+		debitTotal       float64
+		creditTotal      float64
+	)
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT
+			COUNT(DISTINCT lt.id),
+			COUNT(ll.id),
+			COALESCE(SUM(ll.amount_usd) FILTER (WHERE ll.side = 'debit'), 0)::double precision,
+			COALESCE(SUM(ll.amount_usd) FILTER (WHERE ll.side = 'credit'), 0)::double precision
+		FROM ledger_transactions lt
+		LEFT JOIN ledger_lines ll ON ll.transaction_id = lt.id
+		WHERE lt.idempotency_key = 'billing_usage_entry:' || $1::bigint::text
+	`, billingEntryID).Scan(&transactionCount, &lineCount, &debitTotal, &creditTotal))
+	require.Equal(t, 1, transactionCount)
+	require.Equal(t, 2, lineCount)
+	require.InDelta(t, 0.75, debitTotal, 0.000001)
+	require.InDelta(t, 0.75, creditTotal, 0.000001)
+}
+
+func TestDoubleEntryLedgerMigration_PostsOpeningBalanceAdjustment(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("double-entry-opening-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Balance:      9.99,
+	})
+
+	migrationSQL, err := fs.ReadFile(migrations.FS, "135_double_entry_billing_ledger.sql")
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, string(migrationSQL))
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, string(migrationSQL))
+	require.NoError(t, err)
+
+	var (
+		transactionCount int
+		walletBalance    float64
+		difference       float64
+		unbalancedCount  int
+	)
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM ledger_transactions
+		WHERE idempotency_key = 'opening_wallet_balance:user:' || $1::bigint::text || ':135'
+	`, user.ID).Scan(&transactionCount))
+	require.Equal(t, 1, transactionCount)
+
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT ledger_wallet_balance_usd::double precision, difference_usd::double precision
+		FROM ledger_wallet_reconciliation
+		WHERE user_id = $1
+	`, user.ID).Scan(&walletBalance, &difference))
+	require.InDelta(t, 9.99, walletBalance, 0.000001)
+	require.InDelta(t, 0, difference, 0.000001)
+
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM ledger_unbalanced_transactions
+	`).Scan(&unbalancedCount))
+	require.Equal(t, 0, unbalancedCount)
+}
+
+func assertBalancedLedgerTransaction(t *testing.T, ctx context.Context, transactionID, userID int64, expectedAmount float64, debitAccountType, creditAccountCode string) {
+	t.Helper()
+
+	var (
+		lineCount        int
+		debitTotal       float64
+		creditTotal      float64
+		hasDebitAccount  bool
+		hasCreditAccount bool
+		unbalancedCount  int
+	)
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(ll.amount_usd) FILTER (WHERE ll.side = 'debit'), 0)::double precision,
+			COALESCE(SUM(ll.amount_usd) FILTER (WHERE ll.side = 'credit'), 0)::double precision,
+			COALESCE(BOOL_OR(ll.side = 'debit' AND (
+				($2 = 'user_wallet' AND la.owner_type = 'user' AND la.owner_id = $3)
+				OR la.account_type = $2
+				OR la.account_code = $2
+			)), FALSE),
+			COALESCE(BOOL_OR(ll.side = 'credit' AND (
+				($4 = 'user_wallet' AND la.owner_type = 'user' AND la.owner_id = $3)
+				OR la.account_type = $4
+				OR la.account_code = $4
+			)), FALSE)
+		FROM ledger_lines ll
+		JOIN ledger_accounts la ON la.id = ll.account_id
+		WHERE ll.transaction_id = $1
+	`, transactionID, debitAccountType, userID, creditAccountCode).Scan(
+		&lineCount,
+		&debitTotal,
+		&creditTotal,
+		&hasDebitAccount,
+		&hasCreditAccount,
+	))
+	require.Equal(t, 2, lineCount)
+	require.InDelta(t, expectedAmount, debitTotal, 0.000001)
+	require.InDelta(t, expectedAmount, creditTotal, 0.000001)
+	require.True(t, hasDebitAccount)
+	require.True(t, hasCreditAccount)
+
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM ledger_unbalanced_transactions WHERE transaction_id = $1
+	`, transactionID).Scan(&unbalancedCount))
+	require.Equal(t, 0, unbalancedCount)
+}
