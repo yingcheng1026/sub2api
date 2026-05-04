@@ -80,12 +80,14 @@ the same feature line are removed after a successful build:
 ```
 
 By default the script keeps the newest 3 local tags with the same feature prefix,
-for example `chat-routing-*`, and removes older tags with `docker image rm`
-without `--force`. Override with:
+for example `chat-routing-*`, removes older tags with `docker image rm` without
+`--force`, and prunes Docker build cache with `--keep-storage 5GB`. Override with:
 
 ```bash
 SUB2API_IMAGE_KEEP=5 ./deploy/build_image.sh "hfc/sub2api:chat-routing-$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d-%H%M%S)"
 SUB2API_IMAGE_CLEANUP=0 ./deploy/build_image.sh "hfc/sub2api:manual-test-$(date +%Y%m%d-%H%M%S)"
+SUB2API_BUILDER_KEEP_STORAGE=8GB ./deploy/build_image.sh "hfc/sub2api:chat-routing-$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d-%H%M%S)"
+SUB2API_BUILDER_GC=0 ./deploy/build_image.sh "hfc/sub2api:manual-test-$(date +%Y%m%d-%H%M%S)"
 ```
 
 ## Links

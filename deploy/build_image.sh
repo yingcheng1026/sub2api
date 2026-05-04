@@ -88,6 +88,25 @@ cleanup_old_feature_images() {
     done <<< "${tag_list}"
 }
 
+prune_builder_cache() {
+    local gc_enabled="${SUB2API_BUILDER_GC:-1}"
+    local keep_storage="${SUB2API_BUILDER_KEEP_STORAGE:-5GB}"
+
+    if [[ "${gc_enabled}" == "0" || "${gc_enabled}" == "false" ]]; then
+        echo "Build cache GC disabled by SUB2API_BUILDER_GC=${gc_enabled}."
+        return 0
+    fi
+
+    if [[ "${SUB2API_BUILDER_GC_DRY_RUN:-0}" == "1" ]]; then
+        echo "DRY RUN: docker builder prune --force --keep-storage ${keep_storage}"
+        return 0
+    fi
+
+    echo "Pruning Docker build cache with keep storage ${keep_storage}"
+    docker builder prune --force --keep-storage "${keep_storage}" || \
+        echo "Warning: failed to prune Docker build cache." >&2
+}
+
 main() {
     local image="${SUB2API_IMAGE:-${IMAGE:-}}"
     local repository
@@ -114,6 +133,7 @@ main() {
         "${REPO_ROOT}"
 
     cleanup_old_feature_images "${repository}" "${tag}"
+    prune_builder_cache
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
