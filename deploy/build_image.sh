@@ -1,13 +1,121 @@
 #!/usr/bin/env bash
-# 本地构建镜像的快速脚本，避免在命令行反复输入构建参数。
+# 本地/生产构建镜像的快速脚本，避免在命令行反复输入构建参数。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-docker build -t sub2api:latest \
-    --build-arg GOPROXY=https://goproxy.cn,direct \
-    --build-arg GOSUMDB=sum.golang.google.cn \
-    -f "${REPO_ROOT}/Dockerfile" \
-    "${REPO_ROOT}"
+parse_image_ref() {
+    local image="$1"
+    local last_part="${image##*/}"
+
+    if [[ "${last_part}" == *:* ]]; then
+        printf '%s\t%s\n' "${image%:*}" "${image##*:}"
+    else
+        printf '%s\t%s\n' "${image}" "latest"
+    fi
+}
+
+derive_feature_prefix() {
+    local tag="$1"
+
+    if [[ -z "${tag}" || "${tag}" == "latest" || "${tag}" == "<none>" ]]; then
+        return 1
+    fi
+
+    if [[ "${tag}" =~ ^(.+)-[0-9a-f]{7,40}-[0-9]{8}(-[0-9]{4,6})?$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    if [[ "${tag}" =~ ^(.+)-[0-9]{8}(-[0-9]{4,6})?$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    return 1
+}
+
+cleanup_old_feature_images() {
+    local repository="$1"
+    local current_tag="$2"
+    local keep="${SUB2API_IMAGE_KEEP:-3}"
+    local cleanup_enabled="${SUB2API_IMAGE_CLEANUP:-1}"
+    local prefix="${SUB2API_IMAGE_PREFIX:-}"
+    local tag_list
+    local tag
+    local count=0
+
+    if [[ "${cleanup_enabled}" == "0" || "${cleanup_enabled}" == "false" ]]; then
+        echo "Image cleanup disabled by SUB2API_IMAGE_CLEANUP=${cleanup_enabled}."
+        return 0
+    fi
+
+    if ! [[ "${keep}" =~ ^[0-9]+$ ]] || (( keep < 1 )); then
+        echo "SUB2API_IMAGE_KEEP must be a positive integer, got: ${keep}" >&2
+        return 1
+    fi
+
+    if [[ -z "${prefix}" ]]; then
+        if ! prefix="$(derive_feature_prefix "${current_tag}")"; then
+            echo "Skip image cleanup: tag '${current_tag}' has no feature prefix."
+            return 0
+        fi
+    fi
+
+    if ! tag_list="$(docker image ls "${repository}" --format '{{.Tag}}')"; then
+        echo "Warning: unable to list Docker images for ${repository}; skipping cleanup." >&2
+        return 0
+    fi
+
+    while IFS= read -r tag; do
+        [[ -z "${tag}" || "${tag}" == "<none>" ]] && continue
+        [[ "${tag}" == "${prefix}-"* ]] || continue
+
+        count=$((count + 1))
+        if (( count <= keep )); then
+            continue
+        fi
+
+        if [[ "${SUB2API_IMAGE_CLEANUP_DRY_RUN:-0}" == "1" ]]; then
+            echo "DRY RUN: docker image rm ${repository}:${tag}"
+        else
+            echo "Removing old image tag ${repository}:${tag}"
+            docker image rm "${repository}:${tag}" || \
+                echo "Warning: failed to remove ${repository}:${tag}; it may still be in use." >&2
+        fi
+    done <<< "${tag_list}"
+}
+
+main() {
+    local image="${SUB2API_IMAGE:-${IMAGE:-}}"
+    local repository
+    local tag
+
+    if [[ $# -gt 0 && "$1" != -* ]]; then
+        image="$1"
+        shift
+    fi
+
+    if [[ -z "${image}" ]]; then
+        repository="${SUB2API_IMAGE_REPOSITORY:-${IMAGE_REPOSITORY:-sub2api}}"
+        tag="${SUB2API_IMAGE_TAG:-${IMAGE_TAG:-latest}}"
+        image="${repository}:${tag}"
+    else
+        read -r repository tag < <(parse_image_ref "${image}")
+    fi
+
+    docker build -t "${image}" \
+        --build-arg GOPROXY=https://goproxy.cn,direct \
+        --build-arg GOSUMDB=sum.golang.google.cn \
+        "$@" \
+        -f "${REPO_ROOT}/Dockerfile" \
+        "${REPO_ROOT}"
+
+    cleanup_old_feature_images "${repository}" "${tag}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

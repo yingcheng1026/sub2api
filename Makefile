@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend build-datamanagementd test test-backend test-frontend test-frontend-critical test-datamanagementd secret-scan
+.PHONY: build build-backend build-frontend build-datamanagementd test test-backend test-frontend test-frontend-critical test-datamanagementd test-deploy-scripts secret-scan
 
 FRONTEND_CRITICAL_VITEST := \
 	src/views/auth/__tests__/LinuxDoCallbackView.spec.ts \
@@ -39,6 +39,9 @@ test-frontend-critical:
 
 test-datamanagementd:
 	@cd datamanagement && go test ./...
+
+test-deploy-scripts:
+	@bash deploy/test_build_image_retention.sh
 
 secret-scan:
 	@python3 tools/secret_scan.py
