@@ -19,6 +19,7 @@ type dashboardUsageRepoCapture struct {
 	trendStream      *bool
 	modelRequestType *int16
 	modelStream      *bool
+	modelSource      string
 	rankingLimit     int
 	ranking          []usagestats.UserSpendingRankingItem
 	rankingTotal     float64
@@ -49,6 +50,21 @@ func (s *dashboardUsageRepoCapture) GetModelStatsWithFilters(
 ) ([]usagestats.ModelStat, error) {
 	s.modelRequestType = requestType
 	s.modelStream = stream
+	return []usagestats.ModelStat{}, nil
+}
+
+func (s *dashboardUsageRepoCapture) GetModelStatsWithFiltersBySource(
+	ctx context.Context,
+	startTime, endTime time.Time,
+	userID, apiKeyID, accountID, groupID int64,
+	requestType *int16,
+	stream *bool,
+	billingType *int8,
+	source string,
+) ([]usagestats.ModelStat, error) {
+	s.modelRequestType = requestType
+	s.modelStream = stream
+	s.modelSource = source
 	return []usagestats.ModelStat{}, nil
 }
 
@@ -125,6 +141,30 @@ func TestDashboardModelStatsRequestTypePriority(t *testing.T) {
 	require.NotNil(t, repo.modelRequestType)
 	require.Equal(t, int16(service.RequestTypeSync), *repo.modelRequestType)
 	require.Nil(t, repo.modelStream)
+}
+
+func TestDashboardModelStatsDefaultsToUpstreamSource(t *testing.T) {
+	repo := &dashboardUsageRepoCapture{}
+	router := newDashboardRequestTypeTestRouter(repo)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/dashboard/models", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, usagestats.ModelSourceUpstream, repo.modelSource)
+}
+
+func TestDashboardModelStatsRequestedSourcePassesThrough(t *testing.T) {
+	repo := &dashboardUsageRepoCapture{}
+	router := newDashboardRequestTypeTestRouter(repo)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/dashboard/models?model_source=requested", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, usagestats.ModelSourceRequested, repo.modelSource)
 }
 
 func TestDashboardModelStatsInvalidRequestType(t *testing.T) {

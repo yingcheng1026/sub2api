@@ -82,6 +82,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	routingModel := resolveOpenAIChatCompletionsRoutingModel(apiKey, reqModel, channelMapping)
 
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
@@ -127,7 +128,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			apiKey.GroupID,
 			"",
 			sessionHash,
-			reqModel,
+			routingModel,
 			failedAccountIDs,
 			service.OpenAIUpstreamTransportAny,
 			false,
@@ -142,7 +143,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				if apiKey.Group != nil {
 					defaultModel = apiKey.Group.DefaultMappedModel
 				}
-				if defaultModel != "" && defaultModel != reqModel {
+				if defaultModel != "" && defaultModel != routingModel {
 					reqLog.Info("openai_chat_completions.fallback_to_default_model",
 						zap.String("default_mapped_model", defaultModel),
 					)
@@ -193,8 +194,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 		defaultMappedModel := resolveOpenAIForwardDefaultMappedModel(apiKey, c.GetString("openai_chat_completions_fallback_model"))
 		forwardBody := body
-		if channelMapping.Mapped {
-			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
+		if forwardModel := resolveOpenAIChatCompletionsForwardModel(reqModel, routingModel, channelMapping); forwardModel != "" {
+			forwardBody = h.gatewayService.ReplaceModelInBody(body, forwardModel)
 		}
 		result, err := h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
 
@@ -270,17 +271,20 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 		h.submitUsageRecordTask(func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-				Result:             result,
-				APIKey:             apiKey,
-				User:               apiKey.User,
-				Account:            account,
-				Subscription:       subscription,
-				InboundEndpoint:    GetInboundEndpoint(c),
-				UpstreamEndpoint:   GetUpstreamEndpoint(c, account.Platform),
-				UserAgent:          userAgent,
-				IPAddress:          clientIP,
-				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+				Result:           result,
+				APIKey:           apiKey,
+				User:             apiKey.User,
+				Account:          account,
+				Subscription:     subscription,
+				InboundEndpoint:  GetInboundEndpoint(c),
+				UpstreamEndpoint: GetUpstreamEndpoint(c, account.Platform),
+				UserAgent:        userAgent,
+				IPAddress:        clientIP,
+				APIKeyService:    h.apiKeyService,
+				ChannelUsageFields: preserveOpenAICompatSub2BillingSource(
+					channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					reqModel,
+				),
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.chat_completions"),

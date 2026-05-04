@@ -376,6 +376,59 @@ func TestResolveOpenAIForwardDefaultMappedModel(t *testing.T) {
 	})
 }
 
+func TestResolveOpenAIChatCompletionsRoutingModel(t *testing.T) {
+	t.Run("uses_channel_mapped_model_for_account_selection", func(t *testing.T) {
+		mapping := service.ChannelMappingResult{
+			Mapped:      true,
+			MappedModel: "gpt-5.4-mini",
+		}
+		require.Equal(t, "gpt-5.4-mini", resolveOpenAIChatCompletionsRoutingModel(nil, "claude-haiku-4-5", mapping))
+	})
+
+	t.Run("uses_messages_dispatch_mapping_when_channel_mapping_absent", func(t *testing.T) {
+		apiKey := &service.APIKey{
+			Group: &service.Group{
+				MessagesDispatchModelConfig: service.OpenAIMessagesDispatchModelConfig{
+					HaikuMappedModel: "gpt-5.4-mini",
+				},
+			},
+		}
+		require.Equal(t, "gpt-5.4-mini", resolveOpenAIChatCompletionsRoutingModel(apiKey, "claude-haiku-4-5", service.ChannelMappingResult{}))
+	})
+
+	t.Run("keeps_requested_model_without_mapping", func(t *testing.T) {
+		mapping := service.ChannelMappingResult{
+			MappedModel: "gpt-5.4",
+		}
+		require.Equal(t, "gpt-5.4", resolveOpenAIChatCompletionsRoutingModel(nil, "gpt-5.4", mapping))
+	})
+
+	t.Run("falls_back_to_requested_model_when_mapping_target_empty", func(t *testing.T) {
+		mapping := service.ChannelMappingResult{
+			Mapped: true,
+		}
+		require.Equal(t, "claude-haiku-4-5", resolveOpenAIChatCompletionsRoutingModel(nil, "claude-haiku-4-5", mapping))
+	})
+}
+
+func TestResolveOpenAIChatCompletionsForwardModel(t *testing.T) {
+	t.Run("channel_mapping_wins_for_forward_body", func(t *testing.T) {
+		mapping := service.ChannelMappingResult{
+			Mapped:      true,
+			MappedModel: "gpt-5.4",
+		}
+		require.Equal(t, "gpt-5.4", resolveOpenAIChatCompletionsForwardModel("claude-haiku-4-5", "gpt-5.4-mini", mapping))
+	})
+
+	t.Run("uses_dispatch_routing_model_when_channel_mapping_absent", func(t *testing.T) {
+		require.Equal(t, "gpt-5.4-mini", resolveOpenAIChatCompletionsForwardModel("claude-haiku-4-5", "gpt-5.4-mini", service.ChannelMappingResult{}))
+	})
+
+	t.Run("keeps_original_body_when_no_mapping_applies", func(t *testing.T) {
+		require.Empty(t, resolveOpenAIChatCompletionsForwardModel("gpt-5.4", "gpt-5.4", service.ChannelMappingResult{}))
+	})
+}
+
 func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 	t.Run("exact_claude_model_override_wins", func(t *testing.T) {
 		apiKey := &service.APIKey{
@@ -393,8 +446,8 @@ func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 
 	t.Run("uses_family_default_when_no_override", func(t *testing.T) {
 		apiKey := &service.APIKey{Group: &service.Group{}}
-		require.Equal(t, "gpt-5.4", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-opus-4-6"))
-		require.Equal(t, "gpt-5.3-codex", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-sonnet-4-5-20250929"))
+		require.Equal(t, "gpt-5.5", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-opus-4-6"))
+		require.Equal(t, "gpt-5.4", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-sonnet-4-5-20250929"))
 		require.Equal(t, "gpt-5.4-mini", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-haiku-4-5-20251001"))
 	})
 
@@ -411,7 +464,134 @@ func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 			},
 		}
 		require.Empty(t, resolveOpenAIMessagesDispatchMappedModel(apiKey, "gpt-5.4"))
-		require.Equal(t, "gpt-5.3-codex", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-sonnet-4-5-20250929"))
+		require.Equal(t, "gpt-5.4", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-sonnet-4-5-20250929"))
+	})
+}
+
+func TestOpenAIGatewayCountTokensReturnsLocalEstimate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{
+		"model":"claude-sonnet-4-5-20250929",
+		"system":"You are concise.",
+		"messages":[{"role":"user","content":"hello from claude code"}],
+		"tools":[{"name":"lookup","description":"search docs","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}]
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{
+			Platform:              service.PlatformOpenAI,
+			AllowMessagesDispatch: true,
+		},
+	})
+
+	(&OpenAIGatewayHandler{}).CountTokens(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Greater(t, body.InputTokens, 0)
+}
+
+func TestOpenAIGatewayCountTokensRequiresMessagesDispatchPermission(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{
+		"model":"claude-sonnet-4-5-20250929",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{Platform: service.PlatformOpenAI},
+	})
+
+	(&OpenAIGatewayHandler{}).CountTokens(c)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "does not allow /v1/messages dispatch")
+}
+
+func TestPreserveOpenAIMessagesDispatchSub2BillingSource(t *testing.T) {
+	t.Run("claude_dispatch_keeps_native_sub2_billing_basis", func(t *testing.T) {
+		fields := preserveOpenAIMessagesDispatchSub2BillingSource(service.ChannelUsageFields{}, "claude-opus-4-7", "gpt-5.5")
+		require.Empty(t, fields.BillingModelSource)
+		require.Empty(t, fields.OriginalModel)
+	})
+
+	t.Run("official_selector_keeps_channel_mapped_billing", func(t *testing.T) {
+		fields := preserveOpenAIMessagesDispatchSub2BillingSource(service.ChannelUsageFields{
+			OriginalModel:      "opus[1m]",
+			ChannelMappedModel: "opus[1m]",
+			BillingModelSource: service.BillingModelSourceChannelMapped,
+		}, "opus[1m]", "gpt-5.5")
+		require.Equal(t, service.BillingModelSourceChannelMapped, fields.BillingModelSource)
+		require.Equal(t, "opus[1m]", fields.OriginalModel)
+	})
+
+	t.Run("claude_dispatch_preserves_channel_mapped_default", func(t *testing.T) {
+		fields := preserveOpenAIMessagesDispatchSub2BillingSource(service.ChannelUsageFields{
+			BillingModelSource: service.BillingModelSourceChannelMapped,
+		}, "claude-opus-4-7", "gpt-5.5")
+		require.Equal(t, service.BillingModelSourceChannelMapped, fields.BillingModelSource)
+		require.Empty(t, fields.OriginalModel)
+	})
+
+	t.Run("claude_dispatch_preserves_explicit_upstream_billing_source", func(t *testing.T) {
+		fields := preserveOpenAIMessagesDispatchSub2BillingSource(service.ChannelUsageFields{
+			BillingModelSource: service.BillingModelSourceUpstream,
+		}, "claude-opus-4-7", "gpt-5.5")
+		require.Equal(t, service.BillingModelSourceUpstream, fields.BillingModelSource)
+		require.Empty(t, fields.OriginalModel)
+	})
+
+	t.Run("openai_native_model_keeps_default_billing", func(t *testing.T) {
+		fields := preserveOpenAIMessagesDispatchSub2BillingSource(service.ChannelUsageFields{}, "gpt-5.5", "gpt-5.5")
+		require.Empty(t, fields.BillingModelSource)
+	})
+
+	t.Run("responses_claude_alias_preserves_native_billing_source", func(t *testing.T) {
+		fields := preserveOpenAICompatSub2BillingSource(service.ChannelUsageFields{
+			BillingModelSource: service.BillingModelSourceChannelMapped,
+		}, "claude-opus-4-7")
+		require.Equal(t, service.BillingModelSourceChannelMapped, fields.BillingModelSource)
+		require.Empty(t, fields.OriginalModel)
+	})
+
+	t.Run("all_claude_compat_entries_preserve_existing_billing_model_source", func(t *testing.T) {
+		for _, tt := range []struct {
+			reqModel string
+		}{
+			{reqModel: "opus[1m]"},
+			{reqModel: "sonnet[1m]"},
+			{reqModel: "default"},
+			{reqModel: "haiku"},
+		} {
+			fields := preserveSub2NativeBillingSource(service.ChannelUsageFields{
+				OriginalModel:      tt.reqModel,
+				ChannelMappedModel: "gpt-5.5",
+				BillingModelSource: service.BillingModelSourceUpstream,
+			}, tt.reqModel)
+			require.Equal(t, service.BillingModelSourceUpstream, fields.BillingModelSource)
+			require.Equal(t, tt.reqModel, fields.OriginalModel)
+			require.Equal(t, "gpt-5.5", fields.ChannelMappedModel)
+		}
+	})
+
+	t.Run("native_openai_entries_are_not_reclassified_as_claude", func(t *testing.T) {
+		fields := preserveSub2NativeBillingSource(service.ChannelUsageFields{
+			OriginalModel:      "gpt-5.5",
+			ChannelMappedModel: "gpt-5.5",
+			BillingModelSource: service.BillingModelSourceUpstream,
+		}, "gpt-5.5")
+		require.Equal(t, service.BillingModelSourceUpstream, fields.BillingModelSource)
+		require.Equal(t, "gpt-5.5", fields.OriginalModel)
 	})
 }
 

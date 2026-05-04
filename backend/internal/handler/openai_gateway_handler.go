@@ -47,6 +47,29 @@ func resolveOpenAIForwardDefaultMappedModel(apiKey *service.APIKey, fallbackMode
 	return strings.TrimSpace(apiKey.Group.DefaultMappedModel)
 }
 
+func resolveOpenAIChatCompletionsRoutingModel(apiKey *service.APIKey, requestedModel string, channelMapping service.ChannelMappingResult) string {
+	if channelMapping.Mapped {
+		if mappedModel := strings.TrimSpace(channelMapping.MappedModel); mappedModel != "" {
+			return mappedModel
+		}
+	}
+	if mappedModel := resolveOpenAIMessagesDispatchMappedModel(apiKey, requestedModel); mappedModel != "" {
+		return mappedModel
+	}
+	return requestedModel
+}
+
+func resolveOpenAIChatCompletionsForwardModel(requestedModel, routingModel string, channelMapping service.ChannelMappingResult) string {
+	if channelMapping.Mapped {
+		return strings.TrimSpace(channelMapping.MappedModel)
+	}
+	routingModel = strings.TrimSpace(routingModel)
+	if routingModel != "" && routingModel != requestedModel {
+		return routingModel
+	}
+	return ""
+}
+
 func resolveOpenAIMessagesDispatchMappedModel(apiKey *service.APIKey, requestedModel string) string {
 	if apiKey == nil || apiKey.Group == nil {
 		return ""
@@ -408,7 +431,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+				ChannelUsageFields: preserveOpenAICompatSub2BillingSource(
+					channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					reqModel,
+				),
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.responses"),
@@ -768,7 +794,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)
 
+		dispatchMappedModel := effectiveMappedModel
 		h.submitUsageRecordTask(func(ctx context.Context) {
+			usageFields := channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel)
+			usageFields = preserveOpenAIMessagesDispatchSub2BillingSource(usageFields, reqModel, dispatchMappedModel)
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -781,7 +810,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel),
+				ChannelUsageFields: usageFields,
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.messages"),
@@ -1361,6 +1390,22 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 	if !started {
 		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", "Internal server error")
 	}
+}
+
+func preserveOpenAIMessagesDispatchSub2BillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
+	return preserveSub2NativeBillingSource(fields, reqModel)
+}
+
+func preserveOpenAICompatSub2BillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
+	return preserveSub2NativeBillingSource(fields, reqModel)
+}
+
+func preserveSub2NativeBillingSource(fields service.ChannelUsageFields, reqModel string) service.ChannelUsageFields {
+	// Billing must follow Sub2API's native channel/upstream basis. Claude
+	// compatibility model names are kept in ChannelUsageFields for audit, but
+	// they must not force requested-model billing when the request is mapped to
+	// a GPT/OpenAI upstream model.
+	return fields
 }
 
 func (h *OpenAIGatewayHandler) ensureResponsesDependencies(c *gin.Context, reqLog *zap.Logger) bool {

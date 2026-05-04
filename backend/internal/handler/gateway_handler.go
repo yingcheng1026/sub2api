@@ -512,7 +512,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					RequestPayloadHash: requestPayloadHash,
 					ForceCacheBilling:  fs.ForceCacheBilling,
 					APIKeyService:      h.apiKeyService,
-					ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					ChannelUsageFields: preserveSub2NativeBillingSource(
+						channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+						reqModel,
+					),
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.gateway.messages"),
@@ -900,7 +903,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					RequestPayloadHash: requestPayloadHash,
 					ForceCacheBilling:  fs.ForceCacheBilling,
 					APIKeyService:      h.apiKeyService,
-					ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+					ChannelUsageFields: preserveSub2NativeBillingSource(
+						channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
+						reqModel,
+					),
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.gateway.messages"),
@@ -938,29 +944,30 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		platform = forcedPlatform
 	}
 
+	userAgent := c.GetHeader("User-Agent")
+	if shouldHideGatewayModelListForClient(userAgent) {
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   []any{},
+		})
+		return
+	}
+
+	modelListPlatform := gatewayModelListPlatformForClient(platform, userAgent)
+
 	// Get available models from account configurations (without platform filter)
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, "")
 
 	if len(availableModels) > 0 {
-		// Build model list from whitelist
-		models := make([]claude.Model, 0, len(availableModels))
-		for _, modelID := range availableModels {
-			models = append(models, claude.Model{
-				ID:          modelID,
-				Type:        "model",
-				DisplayName: modelID,
-				CreatedAt:   "2024-01-01T00:00:00Z",
-			})
-		}
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
-			"data":   models,
+			"data":   buildGatewayModelListFromIDs(availableModels, modelListPlatform),
 		})
 		return
 	}
 
 	// Fallback to default models
-	if platform == "openai" {
+	if modelListPlatform == service.PlatformOpenAI {
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
 			"data":   openai.DefaultModels,
@@ -972,6 +979,59 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		"object": "list",
 		"data":   claude.DefaultModels,
 	})
+}
+
+func gatewayModelListPlatformForClient(platform, userAgent string) string {
+	if isClaudeCodeModelListClient(userAgent) {
+		return service.PlatformAnthropic
+	}
+	return platform
+}
+
+func shouldHideGatewayModelListForClient(userAgent string) bool {
+	return isClaudeCodeModelListClient(userAgent)
+}
+
+func isClaudeCodeModelListClient(userAgent string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(userAgent))
+	compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(normalized)
+	if compact == "claudecode" ||
+		compact == "claudecli" ||
+		strings.HasPrefix(compact, "claudecode/") ||
+		strings.HasPrefix(compact, "claudecli/") ||
+		strings.HasPrefix(compact, "claudecode(") ||
+		strings.HasPrefix(compact, "claudecli(") {
+		return true
+	}
+	return service.NewClaudeCodeValidator().ValidateUserAgent(userAgent)
+}
+
+func buildGatewayModelListFromIDs(modelIDs []string, platform string) any {
+	if platform == service.PlatformOpenAI {
+		models := make([]openai.Model, 0, len(modelIDs))
+		for _, modelID := range modelIDs {
+			models = append(models, openai.Model{
+				ID:          modelID,
+				Object:      "model",
+				Created:     1704067200,
+				OwnedBy:     "openai",
+				Type:        "model",
+				DisplayName: modelID,
+			})
+		}
+		return models
+	}
+
+	models := make([]claude.Model, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		models = append(models, claude.Model{
+			ID:          modelID,
+			Type:        "model",
+			DisplayName: modelID,
+			CreatedAt:   "2024-01-01T00:00:00Z",
+		})
+	}
+	return models
 }
 
 // AntigravityModels 返回 Antigravity 支持的全部模型

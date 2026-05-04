@@ -1032,6 +1032,96 @@ func TestOpenAIGatewayServiceRecordUsage_ChannelMappedOverridesBillingModelWhenM
 	require.True(t, usageRepo.lastLog.ActualCost > 0, "cost must not be zero")
 }
 
+func TestOpenAIGatewayServiceRecordUsage_ClaudeSelectorMappedToGPTBillsMappedModel(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
+	usage := OpenAIUsage{InputTokens: 20, OutputTokens: 10}
+
+	claudeCost, err := svc.billingService.CalculateCost("claude-opus-4-7", UsageTokens{
+		InputTokens:  20,
+		OutputTokens: 10,
+	}, 1.1)
+	require.NoError(t, err)
+	expectedGPTCost, err := svc.billingService.CalculateCost("gpt-5.5", UsageTokens{
+		InputTokens:  20,
+		OutputTokens: 10,
+	}, 1.1)
+	require.NoError(t, err)
+
+	err = svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_claude_selector_mapped_billing",
+			Model:         "opus[1m]",
+			BillingModel:  "gpt-5.5",
+			UpstreamModel: "gpt-5.5",
+			Usage:         usage,
+			Duration:      time.Second,
+		},
+		APIKey:  &APIKey{ID: 10},
+		User:    &User{ID: 20},
+		Account: &Account{ID: 30},
+		ChannelUsageFields: ChannelUsageFields{
+			OriginalModel:      "opus[1m]",
+			ChannelMappedModel: "gpt-5.5",
+			BillingModelSource: BillingModelSourceChannelMapped,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, "opus[1m]", usageRepo.lastLog.Model)
+	require.Equal(t, "opus[1m]", usageRepo.lastLog.RequestedModel)
+	require.InDelta(t, expectedGPTCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
+	require.NotEqual(t, claudeCost.ActualCost, usageRepo.lastLog.ActualCost)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_ClaudeSelectorRequestedSourceDoesNotOverrideMappedGPT(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
+	usage := OpenAIUsage{InputTokens: 18, OutputTokens: 11}
+
+	claudeCost, err := svc.billingService.CalculateCost("claude-haiku-4-5", UsageTokens{
+		InputTokens:  18,
+		OutputTokens: 11,
+	}, 1.1)
+	require.NoError(t, err)
+	expectedGPTCost, err := svc.billingService.CalculateCost("gpt-5.4-mini", UsageTokens{
+		InputTokens:  18,
+		OutputTokens: 11,
+	}, 1.1)
+	require.NoError(t, err)
+
+	err = svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_claude_requested_source_mapped_gpt",
+			Model:         "claude-haiku-4-5",
+			BillingModel:  "gpt-5.4-mini",
+			UpstreamModel: "gpt-5.4-mini",
+			Usage:         usage,
+			Duration:      time.Second,
+		},
+		APIKey:  &APIKey{ID: 10},
+		User:    &User{ID: 20},
+		Account: &Account{ID: 30},
+		ChannelUsageFields: ChannelUsageFields{
+			OriginalModel:      "claude-haiku-4-5",
+			ChannelMappedModel: "gpt-5.4-mini",
+			BillingModelSource: BillingModelSourceRequested,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, "claude-haiku-4-5", usageRepo.lastLog.Model)
+	require.Equal(t, "claude-haiku-4-5", usageRepo.lastLog.RequestedModel)
+	require.InDelta(t, expectedGPTCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
+	require.NotEqual(t, claudeCost.ActualCost, usageRepo.lastLog.ActualCost)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_SubscriptionBillingSetsSubscriptionFields(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}

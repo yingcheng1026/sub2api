@@ -191,7 +191,7 @@ func (s *BillingService) initFallbackPricing() {
 	// Claude 4.6 Opus (与4.5同价)
 	s.fallbackPrices["claude-opus-4.6"] = s.fallbackPrices["claude-opus-4.5"]
 
-	// Claude 4.7 Opus (暂与4.6同价，待官方定价更新)
+	// Claude 4.7 Opus (official API pricing matches the 4.6/4.5 Opus tier)
 	s.fallbackPrices["claude-opus-4.7"] = s.fallbackPrices["claude-opus-4.6"]
 
 	// Gemini 3.1 Pro

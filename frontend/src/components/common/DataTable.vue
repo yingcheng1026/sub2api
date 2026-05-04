@@ -66,8 +66,10 @@
     class="table-wrapper"
     :class="{
       'actions-expanded': actionsExpanded,
-      'is-scrollable': isScrollable
+      'is-scrollable': isScrollable,
+      'page-vertical-scroll': pageVerticalScroll
     }"
+    @wheel="handleWrapperWheel"
   >
     <table class="w-full min-w-max divide-y divide-gray-200 dark:divide-dark-700">
       <thead class="table-header bg-gray-50 dark:bg-dark-800">
@@ -217,12 +219,66 @@ const emit = defineEmits<{
 const tableWrapperRef = ref<HTMLElement | null>(null)
 const isScrollable = ref(false)
 const actionsColumnNeedsExpanding = ref(false)
+let tableMetricsFrame: number | null = null
 
 // 检查是否可滚动
 const checkScrollable = () => {
   if (tableWrapperRef.value) {
     isScrollable.value = tableWrapperRef.value.scrollWidth > tableWrapperRef.value.clientWidth
   }
+}
+
+const runTableMetricsCheck = () => {
+  checkScrollable()
+  checkActionsColumnWidth()
+}
+
+const scheduleTableMetricsCheck = () => {
+  if (typeof window === 'undefined') {
+    runTableMetricsCheck()
+    return
+  }
+  if (tableMetricsFrame !== null) {
+    window.cancelAnimationFrame(tableMetricsFrame)
+  }
+  tableMetricsFrame = window.requestAnimationFrame(() => {
+    tableMetricsFrame = null
+    runTableMetricsCheck()
+  })
+}
+
+const normalizeWheelDelta = (event: WheelEvent) => {
+  if (!tableWrapperRef.value) return event.deltaY
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return event.deltaY * 16
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) return event.deltaY * tableWrapperRef.value.clientHeight
+  return event.deltaY
+}
+
+const handleWrapperWheel = (event: WheelEvent) => {
+  if (props.pageVerticalScroll) return
+
+  const el = tableWrapperRef.value
+  if (!el || event.ctrlKey) return
+
+  const absX = Math.abs(event.deltaX)
+  const absY = Math.abs(event.deltaY)
+  if (absX === 0 || absY === 0) return
+
+  const verticalIntent = absY >= absX * 1.35
+  const canScrollVertically = el.scrollHeight > el.clientHeight
+  if (!verticalIntent || !canScrollVertically) return
+
+  const maxScrollTop = el.scrollHeight - el.clientHeight
+  const movingUp = event.deltaY < 0
+  const atTop = el.scrollTop <= 0
+  const atBottom = el.scrollTop >= maxScrollTop - 1
+  if ((movingUp && atTop) || (!movingUp && atBottom)) return
+
+  const previousScrollLeft = el.scrollLeft
+  const nextScrollTop = Math.max(0, Math.min(maxScrollTop, el.scrollTop + normalizeWheelDelta(event)))
+  event.preventDefault()
+  el.scrollTop = nextScrollTop
+  el.scrollLeft = previousScrollLeft
 }
 
 // 检查操作列是否需要展开
@@ -278,6 +334,10 @@ let desktopViewportMediaQuery: MediaQueryList | null = null
 let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = null
 
 const detachDesktopTableTracking = () => {
+  if (tableMetricsFrame !== null && typeof window !== 'undefined') {
+    window.cancelAnimationFrame(tableMetricsFrame)
+    tableMetricsFrame = null
+  }
   resizeObserver?.disconnect()
   resizeObserver = null
   if (resizeHandler) {
@@ -287,19 +347,16 @@ const detachDesktopTableTracking = () => {
 }
 
 const attachDesktopTableTracking = () => {
-  checkScrollable()
-  checkActionsColumnWidth()
+  scheduleTableMetricsCheck()
   if (tableWrapperRef.value && typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
-      checkScrollable()
-      checkActionsColumnWidth()
+      scheduleTableMetricsCheck()
     })
     resizeObserver.observe(tableWrapperRef.value)
   } else {
     // 降级方案：不支持 ResizeObserver 时使用 window resize
     resizeHandler = () => {
-      checkScrollable()
-      checkActionsColumnWidth()
+      scheduleTableMetricsCheck()
     }
     window.addEventListener('resize', resizeHandler)
   }
@@ -361,6 +418,11 @@ interface Props {
   estimateRowHeight?: number
   /** Number of rows to render beyond the visible area (default 5) */
   overscan?: number
+  /**
+   * Let vertical wheel gestures bubble to the document for long pages that
+   * embed a table below charts/filters instead of using a fixed-height table shell.
+   */
+  pageVerticalScroll?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -524,8 +586,7 @@ watch(
   [() => props.data.length, columnsSignature],
   async () => {
     await nextTick()
-    checkScrollable()
-    checkActionsColumnWidth()
+    scheduleTableMetricsCheck()
   },
   { flush: 'post' }
 )
@@ -714,6 +775,12 @@ defineExpose({
   flex: 1;
   min-height: 0;
   isolation: isolate;
+  overscroll-behavior: contain;
+}
+
+.table-wrapper.page-vertical-scroll {
+  overflow: visible;
+  overscroll-behavior: auto;
 }
 
 /* 表头容器，确保在滚动时覆盖表体内容 */

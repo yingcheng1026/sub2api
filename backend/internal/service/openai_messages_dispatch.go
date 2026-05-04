@@ -3,8 +3,8 @@ package service
 import "strings"
 
 const (
-	defaultOpenAIMessagesDispatchOpusMappedModel   = "gpt-5.4"
-	defaultOpenAIMessagesDispatchSonnetMappedModel = "gpt-5.3-codex"
+	defaultOpenAIMessagesDispatchOpusMappedModel   = "gpt-5.5"
+	defaultOpenAIMessagesDispatchSonnetMappedModel = "gpt-5.4"
 	defaultOpenAIMessagesDispatchHaikuMappedModel  = "gpt-5.4-mini"
 )
 
@@ -40,9 +40,23 @@ func normalizeOpenAIMessagesDispatchModelConfig(cfg OpenAIMessagesDispatchModelC
 
 func claudeMessagesDispatchFamily(model string) string {
 	normalized := strings.ToLower(strings.TrimSpace(model))
-	if !strings.HasPrefix(normalized, "claude") {
+	if normalized == "" {
 		return ""
 	}
+	if strings.Contains(normalized, "/") {
+		parts := strings.Split(normalized, "/")
+		normalized = strings.TrimSpace(parts[len(parts)-1])
+	}
+
+	switch normalized {
+	case "opus", "opus[1m]":
+		return "opus"
+	case "sonnet", "sonnet[1m]", "default":
+		return "sonnet"
+	case "haiku":
+		return "haiku"
+	}
+
 	switch {
 	case strings.Contains(normalized, "opus"):
 		return "opus"

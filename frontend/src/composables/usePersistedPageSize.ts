@@ -5,6 +5,12 @@ const STORAGE_KEY = 'table-page-size'
 export function getPersistedPageSize(fallback = getConfiguredTableDefaultPageSize()): number {
   if (typeof window !== 'undefined') {
     try {
+      if (window.localStorage.getItem('table-page-size-source') !== null) {
+        window.localStorage.removeItem('table-page-size')
+        window.localStorage.removeItem('table-page-size-source')
+        return normalizeTablePageSize(getConfiguredTableDefaultPageSize() || fallback)
+      }
+
       const stored = window.localStorage.getItem(STORAGE_KEY)
       if (stored !== null) {
         const parsed = Number(stored)
