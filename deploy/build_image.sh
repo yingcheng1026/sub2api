@@ -136,7 +136,7 @@ main() {
         read -r repository tag < <(parse_image_ref "${image}")
     fi
 
-    docker build -t "${image}" \
+    SUB2API_BUILD_IMAGE_SH=1 docker build -t "${image}" \
         --build-arg GOPROXY=https://goproxy.cn,direct \
         --build-arg GOSUMDB=sum.golang.google.cn \
         "$@" \

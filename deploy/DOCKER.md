@@ -91,6 +91,19 @@ SUB2API_BUILDER_KEEP_STORAGE=8GB ./deploy/build_image.sh "hfc/sub2api:chat-routi
 SUB2API_BUILDER_GC=0 ./deploy/build_image.sh "hfc/sub2api:manual-test-$(date +%Y%m%d-%H%M%S)"
 ```
 
+## Production Build Guard
+
+Production hosts can install `deploy/docker_build_guard.sh` as a Docker CLI
+wrapper, for example at `/usr/local/bin/docker` when `/usr/bin/docker` is the
+real binary. The guard refuses direct `docker build` / `docker buildx build`
+commands for `hfc/sub2api:*` and refuses `docker compose ... --build` inside the
+production Sub2API checkouts. `deploy/build_image.sh` sets
+`SUB2API_BUILD_IMAGE_SH=1` for its own build command, so the approved path keeps
+working while accidental direct production builds are blocked.
+
+Emergency bypass is `SUB2API_DOCKER_BUILD_GUARD_BYPASS=1`, but it must be paired
+with equivalent same-feature image cleanup and builder-cache GC in the same task.
+
 ## Links
 
 - [GitHub Repository](https://github.com/weishaw/sub2api)
