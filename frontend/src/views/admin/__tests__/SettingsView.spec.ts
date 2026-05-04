@@ -157,6 +157,7 @@ vi.mock("vue-i18n", async () => {
     "admin.settings.openaiExperimentalScheduler.description": "默认关闭。开启后仅影响本网关在 OpenAI 账号间的实验性调度选择逻辑，不代表上游 OpenAI 官方能力。",
     "admin.settings.site.uploadImage": "上传图片",
     "admin.settings.site.remove": "移除",
+    "admin.settings.site.logoHint": "PNG、JPG 或 SVG 格式，最大 1MB。建议：80x80px 正方形图片。",
   };
   return {
     ...actual,
@@ -256,6 +257,14 @@ const ImageUploadStub = defineComponent({
       type: String,
       default: "",
     },
+    hint: {
+      type: String,
+      default: "",
+    },
+    maxSize: {
+      type: Number,
+      default: undefined,
+    },
     placeholder: {
       type: String,
       default: "",
@@ -268,6 +277,9 @@ const ImageUploadStub = defineComponent({
         "data-model-value": props.modelValue,
         "data-upload-label": props.uploadLabel,
         "data-remove-label": props.removeLabel,
+        "data-hint": props.hint,
+        "data-max-size":
+          props.maxSize === undefined ? "" : String(props.maxSize),
         "data-placeholder": props.placeholder,
       });
   },
@@ -661,6 +673,21 @@ describe("admin SettingsView payment visible method controls", () => {
       "默认关闭。开启后仅影响本网关在 OpenAI 账号间的实验性调度选择逻辑",
     );
     expect(wrapper.text()).not.toContain("OpenAI 高级调度器");
+  });
+
+  it("allows site logo uploads up to 1MB", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+
+    const siteLogoUpload = wrapper
+      .findAll(".image-upload-stub")
+      .find((node) => node.attributes("data-hint")?.includes("最大 1MB"));
+
+    expect(siteLogoUpload).toBeDefined();
+    expect(siteLogoUpload?.attributes("data-max-size")).toBe(
+      String(1024 * 1024),
+    );
   });
 
   it("passes translated upload and remove labels to the payment help image uploader", async () => {

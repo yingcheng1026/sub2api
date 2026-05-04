@@ -3835,7 +3835,7 @@
                   :upload-label="t('admin.settings.site.uploadImage')"
                   :remove-label="t('admin.settings.site.remove')"
                   :hint="t('admin.settings.site.logoHint')"
-                  :max-size="300 * 1024"
+                  :max-size="SITE_LOGO_MAX_SIZE"
                 />
               </div>
 
@@ -5539,6 +5539,7 @@ import {
 const { t, locale } = useI18n();
 const appStore = useAppStore();
 const adminSettingsStore = useAdminSettingsStore();
+const SITE_LOGO_MAX_SIZE = 1024 * 1024;
 
 function localText(zh: string, en: string): string {
   return locale.value.startsWith("zh") ? zh : en;
