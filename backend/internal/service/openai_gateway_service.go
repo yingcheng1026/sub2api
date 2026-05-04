@@ -5180,7 +5180,11 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		billingModel = input.ChannelMappedModel
 	}
 	if input.BillingModelSource == BillingModelSourceRequested && input.OriginalModel != "" {
-		billingModel = input.OriginalModel
+		if mappedBillingModel := mappedBillingModelOverRequested(input.OriginalModel, result.BillingModel, input.ChannelMappedModel, result.UpstreamModel, billingModel); mappedBillingModel != "" {
+			billingModel = mappedBillingModel
+		} else {
+			billingModel = input.OriginalModel
+		}
 	}
 	serviceTier := ""
 	if result.ServiceTier != nil {
