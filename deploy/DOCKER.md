@@ -70,6 +70,24 @@ volumes:
 - `x.y` - Latest patch of minor version
 - `x` - Latest minor of major version
 
+## Building Feature Images
+
+Use `deploy/build_image.sh` for production-style feature tags so old images from
+the same feature line are removed after a successful build:
+
+```bash
+./deploy/build_image.sh "hfc/sub2api:chat-routing-$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d-%H%M%S)"
+```
+
+By default the script keeps the newest 3 local tags with the same feature prefix,
+for example `chat-routing-*`, and removes older tags with `docker image rm`
+without `--force`. Override with:
+
+```bash
+SUB2API_IMAGE_KEEP=5 ./deploy/build_image.sh "hfc/sub2api:chat-routing-$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d-%H%M%S)"
+SUB2API_IMAGE_CLEANUP=0 ./deploy/build_image.sh "hfc/sub2api:manual-test-$(date +%Y%m%d-%H%M%S)"
+```
+
 ## Links
 
 - [GitHub Repository](https://github.com/weishaw/sub2api)
