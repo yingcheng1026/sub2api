@@ -5,10 +5,12 @@ package repository
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/migrations"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
@@ -364,4 +366,108 @@ func TestUsageBillingRepositoryApply_DeduplicatesAgainstArchivedKey(t *testing.T
 	var balance float64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
 	require.InDelta(t, 98.75, balance, 0.000001)
+}
+
+func TestUsageLogInsert_WritesBillingUsageLedgerEntry(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-ledger-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-ledger-" + uuid.NewString(),
+		Name:   "billing-ledger",
+	})
+	account := mustCreateAccount(t, client, &service.Account{
+		Name: "usage-ledger-account-" + uuid.NewString(),
+		Type: service.AccountTypeAPIKey,
+	})
+
+	var usageLogID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		INSERT INTO usage_logs (
+			user_id, api_key_id, account_id, request_id, model,
+			input_tokens, output_tokens, total_cost, actual_cost, billing_type, created_at
+		)
+		VALUES ($1, $2, $3, $4, 'gpt-5.4-mini', 12, 4, 1.25, 0.75, $5, NOW())
+		RETURNING id
+	`, user.ID, apiKey.ID, account.ID, "usage-ledger-"+uuid.NewString(), service.BillingTypeBalance).Scan(&usageLogID))
+
+	var (
+		ledgerUserID     int64
+		ledgerAPIKeyID   int64
+		ledgerType       int16
+		ledgerApplied    bool
+		ledgerDeltaUSD   float64
+		ledgerEntryCount int
+	)
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT user_id, api_key_id, billing_type, applied, delta_usd::double precision
+		FROM billing_usage_entries
+		WHERE usage_log_id = $1
+	`, usageLogID).Scan(&ledgerUserID, &ledgerAPIKeyID, &ledgerType, &ledgerApplied, &ledgerDeltaUSD))
+	require.Equal(t, user.ID, ledgerUserID)
+	require.Equal(t, apiKey.ID, ledgerAPIKeyID)
+	require.Equal(t, int16(service.BillingTypeBalance), ledgerType)
+	require.True(t, ledgerApplied)
+	require.InDelta(t, 0.75, ledgerDeltaUSD, 0.000001)
+
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM billing_usage_entries WHERE usage_log_id = $1
+	`, usageLogID).Scan(&ledgerEntryCount))
+	require.Equal(t, 1, ledgerEntryCount)
+}
+
+func TestUsageBillingLedgerMigration_BackfillsMissingEntryIdempotently(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-ledger-backfill-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-ledger-backfill-" + uuid.NewString(),
+		Name:   "billing-ledger-backfill",
+	})
+	account := mustCreateAccount(t, client, &service.Account{
+		Name: "usage-ledger-backfill-account-" + uuid.NewString(),
+		Type: service.AccountTypeAPIKey,
+	})
+
+	var usageLogID int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		INSERT INTO usage_logs (
+			user_id, api_key_id, account_id, request_id, model,
+			input_tokens, output_tokens, total_cost, actual_cost, billing_type, created_at
+		)
+		VALUES ($1, $2, $3, $4, 'gpt-5.4-mini', 12, 4, 1.25, 0.75, $5, NOW())
+		RETURNING id
+	`, user.ID, apiKey.ID, account.ID, "usage-ledger-backfill-"+uuid.NewString(), service.BillingTypeBalance).Scan(&usageLogID))
+
+	_, err := integrationDB.ExecContext(ctx, "DELETE FROM billing_usage_entries WHERE usage_log_id = $1", usageLogID)
+	require.NoError(t, err)
+
+	migrationSQL, err := fs.ReadFile(migrations.FS, "134_usage_billing_ledger_trigger.sql")
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, string(migrationSQL))
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, string(migrationSQL))
+	require.NoError(t, err)
+
+	var (
+		ledgerEntryCount int
+		ledgerDeltaUSD   float64
+	)
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(delta_usd), 0)::double precision
+		FROM billing_usage_entries
+		WHERE usage_log_id = $1
+	`, usageLogID).Scan(&ledgerEntryCount, &ledgerDeltaUSD))
+	require.Equal(t, 1, ledgerEntryCount)
+	require.InDelta(t, 0.75, ledgerDeltaUSD, 0.000001)
 }
