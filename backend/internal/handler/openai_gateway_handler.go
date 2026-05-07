@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -558,6 +559,24 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	if len(body) == 0 {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
+	}
+
+	// Strip placeholder empty-thinking blocks before any further processing.
+	// On the OpenAI translation path the existing Anthropic→Responses converter
+	// already discards thinking content, but doing the scrub here keeps the
+	// ops_error_logs body sample, claude-code-validator, and any failover that
+	// pivots back to a native Anthropic upstream all working off the same clean
+	// payload. See apicompat/sanitize.go.
+	if cleaned, removed, sanErr := apicompat.SanitizeAnthropicRequestBody(body); removed > 0 {
+		body = cleaned
+		reqLog.Info("sanitized empty thinking blocks before upstream forward",
+			zap.Int("removed", removed),
+			zap.String("path", "openai_translation"),
+		)
+	} else if sanErr != nil {
+		reqLog.Debug("sanitize anthropic body parse error (non-fatal)",
+			zap.Error(sanErr),
+		)
 	}
 
 	if !gjson.ValidBytes(body) {
