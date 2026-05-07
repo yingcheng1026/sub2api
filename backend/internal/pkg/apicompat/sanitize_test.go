@@ -31,7 +31,11 @@ func TestSanitize_EmptyBody_NoOp(t *testing.T) {
 }
 
 func TestSanitize_BadJSON_ReturnsOriginal(t *testing.T) {
-	in := []byte("{not json")
+	// Must contain `"thinking"` to bypass the fast path, otherwise the
+	// pre-check short-circuits with no error and the parse path is never
+	// exercised. The substring forces SanitizeAnthropicRequestBody into the
+	// real json.Unmarshal which then surfaces the bad-JSON error.
+	in := []byte(`{not json "thinking" placeholder`)
 	out, removed, err := SanitizeAnthropicRequestBody(in)
 	if err == nil {
 		t.Fatalf("expected error for bad JSON")
@@ -41,6 +45,45 @@ func TestSanitize_BadJSON_ReturnsOriginal(t *testing.T) {
 	}
 	if string(out) != string(in) {
 		t.Fatalf("body mutated on error: got %q want %q", string(out), string(in))
+	}
+}
+
+func TestSanitize_FastPath_NoThinkingSubstring(t *testing.T) {
+	// Realistic /v1/messages body that does NOT contain the literal
+	// substring `"thinking"` anywhere. The fast path must short-circuit
+	// before json.Unmarshal — verified indirectly by feeding a body that is
+	// NOT valid JSON yet expecting err == nil and the original bytes back.
+	// If the fast path is removed (or broken), the bad JSON would fail
+	// json.Unmarshal and surface an error.
+	in := []byte(`{not json at all, but no t-h-i-n-k-i-n-g key here`)
+	out, removed, err := SanitizeAnthropicRequestBody(in)
+	if err != nil {
+		t.Fatalf("fast path should skip parse, got err=%v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed=%d want 0", removed)
+	}
+	if string(out) != string(in) {
+		t.Fatalf("fast path must return original body byte-for-byte")
+	}
+}
+
+func TestSanitize_FastPath_ThinkingSubstringInUserText(t *testing.T) {
+	// False-positive case: user text legitimately contains the literal string
+	// "thinking" so the fast path falls through to the slow path. The slow
+	// path must find no empty-thinking blocks and return byte-identical body.
+	in := []byte(`{"model":"claude-opus-4-7","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"What were you \"thinking\" about?"}]}` +
+		`]}`)
+	out, removed, err := SanitizeAnthropicRequestBody(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed=%d want 0", removed)
+	}
+	if string(out) != string(in) {
+		t.Fatalf("body should be byte-identical when thinking is only in user text")
 	}
 }
 

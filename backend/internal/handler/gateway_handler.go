@@ -160,8 +160,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			zap.String("path", "anthropic_native"),
 		)
 	} else if sanErr != nil {
-		reqLog.Debug("sanitize anthropic body parse error (non-fatal)",
+		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
 			zap.Error(sanErr),
+			zap.String("path", "anthropic_native"),
 		)
 	}
 
@@ -1516,8 +1517,9 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 			zap.String("path", "anthropic_native"),
 		)
 	} else if sanErr != nil {
-		reqLog.Debug("sanitize anthropic body parse error (non-fatal)",
+		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
 			zap.Error(sanErr),
+			zap.String("path", "anthropic_native"),
 		)
 	}
 

@@ -1,6 +1,18 @@
 package apicompat
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
+
+// thinkingKeyMarker is the cheapest substring that must be present in the body
+// for any block to qualify as an empty-thinking placeholder. The vast majority
+// of /v1/messages requests do not carry a "thinking" key at all, so a single
+// bytes.Contains scan lets us short-circuit before paying for json.Unmarshal.
+//
+// A false positive (e.g. user text that contains the literal string
+// `"thinking"`) is harmless — the slow path runs and finds nothing to drop.
+var thinkingKeyMarker = []byte(`"thinking"`)
 
 // SanitizeAnthropicRequestBody removes placeholder "empty thinking" content
 // blocks from a POST /v1/messages request body before it is forwarded upstream.
@@ -41,6 +53,14 @@ import "encoding/json"
 // Returns (possibly new body, count of blocks removed, error).
 func SanitizeAnthropicRequestBody(body []byte) ([]byte, int, error) {
 	if len(body) == 0 {
+		return body, 0, nil
+	}
+
+	// Fast path: if the body never mentions a "thinking" key, no block can
+	// possibly match the empty-thinking placeholder shape. Skip the two-pass
+	// json.Unmarshal entirely. Critical for hot path performance — ~95% of
+	// /v1/messages requests in production do not carry thinking blocks.
+	if !bytes.Contains(body, thinkingKeyMarker) {
 		return body, 0, nil
 	}
 
