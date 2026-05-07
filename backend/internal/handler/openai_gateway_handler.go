@@ -574,8 +574,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			zap.String("path", "openai_translation"),
 		)
 	} else if sanErr != nil {
-		reqLog.Debug("sanitize anthropic body parse error (non-fatal)",
+		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
 			zap.Error(sanErr),
+			zap.String("path", "openai_translation"),
 		)
 	}
 
