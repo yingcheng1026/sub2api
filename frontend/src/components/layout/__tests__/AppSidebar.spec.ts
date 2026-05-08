@@ -30,3 +30,13 @@ describe('AppSidebar header styles', () => {
     expect(sidebarBrandBlockMatch?.[0]).not.toContain('overflow: hidden;')
   })
 })
+
+describe('AppSidebar admin simple mode navigation', () => {
+  it('does not filter admin management links when run_mode changes to simple', () => {
+    expect(componentSource).toContain('const adminNavItems = computed')
+    expect(componentSource).toContain('path: \'/admin/groups\'')
+    expect(componentSource).toContain('path: \'/admin/channels\'')
+    expect(componentSource).toContain('path: \'/admin/subscriptions\'')
+    expect(componentSource).not.toContain('const filtered = visible.filter(item => !item.hideInSimpleMode)')
+  })
+})

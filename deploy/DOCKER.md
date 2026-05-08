@@ -70,6 +70,40 @@ volumes:
 - `x.y` - Latest patch of minor version
 - `x` - Latest minor of major version
 
+## Building Feature Images
+
+Use `deploy/build_image.sh` for production-style feature tags so old images from
+the same feature line are removed after a successful build:
+
+```bash
+./deploy/build_image.sh "hfc/sub2api:chat-routing-$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d-%H%M%S)"
+```
+
+By default the script keeps the newest 3 local tags with the same feature prefix,
+for example `chat-routing-*`, removes older tags with `docker image rm` without
+`--force`, and prunes Docker build cache with a 5GB cache limit using the
+builder-prune size flag supported by the local Docker version. Override with:
+
+```bash
+SUB2API_IMAGE_KEEP=5 ./deploy/build_image.sh "hfc/sub2api:chat-routing-$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d-%H%M%S)"
+SUB2API_IMAGE_CLEANUP=0 ./deploy/build_image.sh "hfc/sub2api:manual-test-$(date +%Y%m%d-%H%M%S)"
+SUB2API_BUILDER_KEEP_STORAGE=8GB ./deploy/build_image.sh "hfc/sub2api:chat-routing-$(git rev-parse --short=12 HEAD)-$(date +%Y%m%d-%H%M%S)"
+SUB2API_BUILDER_GC=0 ./deploy/build_image.sh "hfc/sub2api:manual-test-$(date +%Y%m%d-%H%M%S)"
+```
+
+## Production Build Guard
+
+Production hosts can install `deploy/docker_build_guard.sh` as a Docker CLI
+wrapper, for example at `/usr/local/bin/docker` when `/usr/bin/docker` is the
+real binary. The guard refuses direct `docker build` / `docker buildx build`
+commands for `hfc/sub2api:*` and refuses `docker compose ... --build` inside the
+production Sub2API checkouts. `deploy/build_image.sh` sets
+`SUB2API_BUILD_IMAGE_SH=1` for its own build command, so the approved path keeps
+working while accidental direct production builds are blocked.
+
+Emergency bypass is `SUB2API_DOCKER_BUILD_GUARD_BYPASS=1`, but it must be paired
+with equivalent same-feature image cleanup and builder-cache GC in the same task.
+
 ## Links
 
 - [GitHub Repository](https://github.com/weishaw/sub2api)
