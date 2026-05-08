@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkgerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -145,6 +146,24 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	if len(body) == 0 {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
+	}
+
+	// Strip placeholder empty-thinking blocks emitted by buggy CC clients before
+	// forwarding upstream. Anthropic /v1/messages rejects {"type":"thinking",
+	// "thinking":""} with a 400 schema error which surfaces to customers as a
+	// mid-task abort. Real signed thinking continuations are preserved. See
+	// apicompat/sanitize.go for the full rationale.
+	if cleaned, removed, sanErr := apicompat.SanitizeAnthropicRequestBody(body); removed > 0 {
+		body = cleaned
+		reqLog.Info("sanitized empty thinking blocks before upstream forward",
+			zap.Int("removed", removed),
+			zap.String("path", "anthropic_native"),
+		)
+	} else if sanErr != nil {
+		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
+			zap.Error(sanErr),
+			zap.String("path", "anthropic_native"),
+		)
 	}
 
 	setOpsRequestContext(c, "", false, body)
@@ -1484,6 +1503,24 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	if len(body) == 0 {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
+	}
+
+	// Strip placeholder empty-thinking blocks emitted by buggy CC clients before
+	// forwarding upstream. Anthropic /v1/messages rejects {"type":"thinking",
+	// "thinking":""} with a 400 schema error which surfaces to customers as a
+	// mid-task abort. Real signed thinking continuations are preserved. See
+	// apicompat/sanitize.go for the full rationale.
+	if cleaned, removed, sanErr := apicompat.SanitizeAnthropicRequestBody(body); removed > 0 {
+		body = cleaned
+		reqLog.Info("sanitized empty thinking blocks before upstream forward",
+			zap.Int("removed", removed),
+			zap.String("path", "anthropic_native"),
+		)
+	} else if sanErr != nil {
+		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
+			zap.Error(sanErr),
+			zap.String("path", "anthropic_native"),
+		)
 	}
 
 	setOpsRequestContext(c, "", false, body)

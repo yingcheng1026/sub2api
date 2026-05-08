@@ -1357,7 +1357,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 	// 4. 设置粘性会话绑定
 	// Set sticky session binding
 	if sessionHash != "" {
-		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, selected.ID, openaiStickySessionTTL)
+		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, selected.ID, s.openAIWSSessionStickyTTL())
 	}
 
 	return s.hydrateSelectedAccount(ctx, selected)
@@ -1416,7 +1416,7 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 
 	// 刷新会话 TTL 并返回账号
 	// Refresh session TTL and return account
-	_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
+	_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, s.openAIWSSessionStickyTTL())
 	return account
 }
 
@@ -1462,15 +1462,11 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			}
 		}
 
-		// 选择优先级最高且最久未使用的账号
-		// Select highest priority and least recently used
 		if selected == nil {
 			selected = fresh
 			selectedCompactTier = compactTier
 			continue
 		}
-
-		// compact 模式下高 tier 优先；同 tier 内才比较 priority/LRU。
 		if requireCompact && compactTier != selectedCompactTier {
 			if compactTier > selectedCompactTier {
 				selected = fresh
@@ -1478,7 +1474,6 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			}
 			continue
 		}
-
 		if s.isBetterAccount(fresh, selected) {
 			selected = fresh
 			selectedCompactTier = compactTier
@@ -1519,6 +1514,96 @@ func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool
 		// 都使用过，选择最久未使用的
 		return candidate.LastUsedAt.Before(*current.LastUsedAt)
 	}
+}
+
+// weightedShuffleByLoadFactorWithinSortGroups 对已经按 (Priority, LoadRate) 排过序的
+// accountWithLoad 切片进行原地加权洗牌：
+//   - 分组键只用 Priority，不再绑定 LoadRate 或 LastUsedAt。LoadRate>=100 的满载
+//     账号已在上层过滤；剩余健康账号应由 LoadFactor 决定长期容量占比；
+//   - 每组内做加权 Fisher–Yates，权重取 account.EffectiveLoadFactor()。
+//
+// 选第一位的概率 ≈ w_i / Σw_j（与号池其它账号一致），用于多账号场景下的「按容量分流」。
+// 该函数仅在 OpenAI 选号路径中调用，不影响其它平台的 shuffleWithinSortGroups 行为。
+func weightedShuffleByLoadFactorWithinSortGroups(accounts []accountWithLoad) {
+	if len(accounts) <= 1 {
+		return
+	}
+	i := 0
+	for i < len(accounts) {
+		j := i + 1
+		for j < len(accounts) && samePriorityAndLoadRateGroup(accounts[i], accounts[j]) {
+			j++
+		}
+		if j-i > 1 {
+			weightedShuffleSegmentByLoadFactor(accounts[i:j])
+		}
+		i = j
+	}
+}
+
+func samePriorityAndLoadRateGroup(a, b accountWithLoad) bool {
+	if a.account.Priority != b.account.Priority {
+		return false
+	}
+	return true
+}
+
+// weightedShuffleSegmentByLoadFactor 在 seg 上做加权 Fisher–Yates：
+// 每轮从 seg[i:] 中按 EffectiveLoadFactor 抽 1 个，交换到位置 i。
+// 池规模通常 < 100，O(n^2) 完全够用。
+//
+// 当所有账号的 EffectiveLoadFactor 都相等（典型的旧部署：全部 LoadFactor=nil 且
+// Concurrency 相同）时，回退到 shuffleWithinSortGroups 的旧逻辑——按 LastUsedAt
+// 子组打散，保留 LRU/never-used 优先的语义；仅在权重存在差异时才用加权抽样。
+func weightedShuffleSegmentByLoadFactor(seg []accountWithLoad) {
+	if !hasNonUniformLoadFactor(seg) {
+		shuffleWithinSortGroups(seg)
+		return
+	}
+	n := len(seg)
+	for i := 0; i < n-1; i++ {
+		var sumW float64
+		for k := i; k < n; k++ {
+			w := float64(seg[k].account.EffectiveLoadFactor())
+			if w <= 0 {
+				w = 1
+			}
+			sumW += w
+		}
+		if sumW <= 0 {
+			return
+		}
+		r := rand.Float64() * sumW
+		var cum float64
+		chosen := n - 1
+		for k := i; k < n; k++ {
+			w := float64(seg[k].account.EffectiveLoadFactor())
+			if w <= 0 {
+				w = 1
+			}
+			cum += w
+			if r < cum {
+				chosen = k
+				break
+			}
+		}
+		if chosen != i {
+			seg[i], seg[chosen] = seg[chosen], seg[i]
+		}
+	}
+}
+
+func hasNonUniformLoadFactor(seg []accountWithLoad) bool {
+	if len(seg) <= 1 {
+		return false
+	}
+	first := seg[0].account.EffectiveLoadFactor()
+	for k := 1; k < len(seg); k++ {
+		if seg[k].account.EffectiveLoadFactor() != first {
+			return true
+		}
+	}
+	return false
 }
 
 // SelectAccountWithLoadAwareness selects an account with load-awareness and wait plan.
@@ -1605,7 +1690,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					} else {
 						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 						if err == nil && result.Acquired {
-							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
+							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, s.openAIWSSessionStickyTTL())
 							return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
 						}
 
@@ -1682,7 +1767,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
 			if err == nil && result.Acquired {
 				if sessionHash != "" {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, s.openAIWSSessionStickyTTL())
 				}
 				return s.newSelectionResult(ctx, fresh, true, result.ReleaseFunc, nil)
 			}
@@ -1722,7 +1807,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					return a.account.LastUsedAt.Before(*b.account.LastUsedAt)
 				}
 			})
-			shuffleWithinSortGroups(available)
+			// loadfactor-v3: OpenAI 路径下用按 EffectiveLoadFactor 加权的 Fisher–Yates，
+			// 让 Pro 20x（load_factor=15）按比例占 ≈15/(15+9) ≈62.5% 流量；
+			// 不再让 LastUsedAt（LRU）和 0% LoadRate 平均化把高容量账号拉回 1/N 份额。
+			weightedShuffleByLoadFactorWithinSortGroups(available)
 
 			selectionOrder := make([]accountWithLoad, 0, len(available))
 			if requireCompact {
@@ -1758,7 +1846,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
 				if err == nil && result.Acquired {
 					if sessionHash != "" {
-						_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+						_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, s.openAIWSSessionStickyTTL())
 					}
 					return s.newSelectionResult(ctx, fresh, true, result.ReleaseFunc, nil)
 				}
@@ -5482,7 +5570,11 @@ func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, acc
 	go func() {
 		updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
+		if err := s.accountRepo.UpdateExtra(updateCtx, accountID, updates); err != nil {
+			slog.Warn("openai_codex_snapshot_update_extra_failed", "account_id", accountID, "error", err)
+			return
+		}
+		applyOpenAIQuotaGuardFromUpdates(updateCtx, s.accountRepo, accountID, updates, now)
 	}()
 }
 

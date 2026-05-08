@@ -1424,3 +1424,91 @@ func TestDefaultOpenAIAccountScheduler_IsAccountTransportCompatible_Branches(t *
 func int64PtrForTest(v int64) *int64 {
 	return &v
 }
+
+// TestBuildOpenAIWeightedSelectionOrder_LoadFactorWeighting 验证当多个账号
+// 评分相同时，buildOpenAIWeightedSelectionOrder 会按 account.EffectiveLoadFactor()
+// 比例分配选中概率（Pro 20x 类大号 LoadFactor=15 配 9 个 Plus LoadFactor=1，
+// 期望 Pro 占比 ≈ 15/24 ≈ 62.5%，每个 Plus ≈ 4.17%）。
+func TestBuildOpenAIWeightedSelectionOrder_LoadFactorWeighting(t *testing.T) {
+	const (
+		proID         = int64(12)
+		proLoadFactor = 15
+		plusCount     = 9
+		iterations    = 5000
+	)
+
+	candidates := []openAIAccountCandidateScore{
+		{
+			account:  &Account{ID: proID, LoadFactor: intPtrForTest(proLoadFactor)},
+			loadInfo: &AccountLoadInfo{LoadRate: 10, WaitingCount: 0},
+			score:    1.0,
+		},
+	}
+	for i := 0; i < plusCount; i++ {
+		candidates = append(candidates, openAIAccountCandidateScore{
+			account:  &Account{ID: int64(100 + i), LoadFactor: intPtrForTest(1)},
+			loadInfo: &AccountLoadInfo{LoadRate: 10, WaitingCount: 0},
+			score:    1.0,
+		})
+	}
+
+	hits := make(map[int64]int, len(candidates))
+	for i := 0; i < iterations; i++ {
+		req := OpenAIAccountScheduleRequest{
+			SessionHash:    fmt.Sprintf("loadfactor_test_%d", i),
+			RequestedModel: "gpt-5.1",
+		}
+		order := buildOpenAIWeightedSelectionOrder(candidates, req)
+		require.Len(t, order, len(candidates))
+		hits[order[0].account.ID]++
+	}
+
+	totalWeight := float64(proLoadFactor + plusCount)
+	expectedProRatio := float64(proLoadFactor) / totalWeight
+	expectedPlusRatio := 1.0 / totalWeight
+
+	proRatio := float64(hits[proID]) / float64(iterations)
+	require.InDelta(t, expectedProRatio, proRatio, 0.05,
+		"Pro 20x (LoadFactor=%d) 实际占比 %.2f%% 与期望 %.2f%% 偏差超过 5%%",
+		proLoadFactor, proRatio*100, expectedProRatio*100)
+
+	for i := 0; i < plusCount; i++ {
+		plusID := int64(100 + i)
+		plusRatio := float64(hits[plusID]) / float64(iterations)
+		require.InDelta(t, expectedPlusRatio, plusRatio, 0.03,
+			"Plus 号 id=%d 实际占比 %.2f%% 与期望 %.2f%% 偏差超过 3%%",
+			plusID, plusRatio*100, expectedPlusRatio*100)
+	}
+}
+
+// TestBuildOpenAIWeightedSelectionOrder_LoadFactorNilFallsBackToConcurrency 验证
+// LoadFactor=nil 的旧账号会 fallback 到 Concurrency，不会被当作权重 0 而抽不到。
+func TestBuildOpenAIWeightedSelectionOrder_LoadFactorNilFallsBackToConcurrency(t *testing.T) {
+	candidates := []openAIAccountCandidateScore{
+		{
+			account:  &Account{ID: 201, LoadFactor: nil, Concurrency: 5},
+			loadInfo: &AccountLoadInfo{LoadRate: 10, WaitingCount: 0},
+			score:    1.0,
+		},
+		{
+			account:  &Account{ID: 202, LoadFactor: nil, Concurrency: 5},
+			loadInfo: &AccountLoadInfo{LoadRate: 10, WaitingCount: 0},
+			score:    1.0,
+		},
+	}
+
+	hits := make(map[int64]int)
+	for i := 0; i < 1000; i++ {
+		req := OpenAIAccountScheduleRequest{
+			SessionHash:    fmt.Sprintf("nil_loadfactor_%d", i),
+			RequestedModel: "gpt-5.1",
+		}
+		order := buildOpenAIWeightedSelectionOrder(candidates, req)
+		require.Len(t, order, len(candidates))
+		hits[order[0].account.ID]++
+	}
+
+	// LoadFactor=nil 但 Concurrency 相等，应该接近 50:50。
+	require.InDelta(t, 0.5, float64(hits[201])/1000.0, 0.07)
+	require.InDelta(t, 0.5, float64(hits[202])/1000.0, 0.07)
+}

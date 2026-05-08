@@ -200,7 +200,7 @@ func (h *DashboardHandler) buildSnapshotV2Response(
 			filters.APIKeyID,
 			filters.AccountID,
 			filters.GroupID,
-			usagestats.ModelSourceRequested,
+			usagestats.ModelSourceUpstream,
 			filters.RequestType,
 			filters.Stream,
 			filters.BillingType,

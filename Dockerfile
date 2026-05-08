@@ -29,7 +29,8 @@ RUN pnpm install --frozen-lockfile
 
 # Copy frontend source and build
 COPY frontend/ ./
-RUN pnpm run build
+# 在低内存环境（≤2GB）显式提高 Node 堆限制，避免 vite build 的 OOM。
+RUN NODE_OPTIONS="--max-old-space-size=3072" pnpm run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder

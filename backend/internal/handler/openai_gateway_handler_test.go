@@ -415,6 +415,25 @@ func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 	})
 }
 
+func TestApplyOpenAIMessagesDispatchBillingSource(t *testing.T) {
+	t.Run("claude_dispatch_bills_requested_model", func(t *testing.T) {
+		fields := applyOpenAIMessagesDispatchBillingSource(service.ChannelUsageFields{}, "claude-opus-4-7", "gpt-5.5")
+		require.Equal(t, service.BillingModelSourceRequested, fields.BillingModelSource)
+	})
+
+	t.Run("preserves_explicit_channel_billing_source", func(t *testing.T) {
+		fields := applyOpenAIMessagesDispatchBillingSource(service.ChannelUsageFields{
+			BillingModelSource: service.BillingModelSourceChannelMapped,
+		}, "claude-opus-4-7", "gpt-5.5")
+		require.Equal(t, service.BillingModelSourceChannelMapped, fields.BillingModelSource)
+	})
+
+	t.Run("openai_native_model_keeps_default_billing", func(t *testing.T) {
+		fields := applyOpenAIMessagesDispatchBillingSource(service.ChannelUsageFields{}, "gpt-5.5", "gpt-5.5")
+		require.Empty(t, fields.BillingModelSource)
+	})
+}
+
 func TestOpenAIResponses_MissingDependencies_ReturnsServiceUnavailable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
