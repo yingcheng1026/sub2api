@@ -601,6 +601,28 @@ export default {
     quickActions: '快捷操作',
     createApiKey: '创建 API 密钥',
     generateNewKey: '生成新的 API 密钥',
+    openChat: '网页 AI',
+    openChatHint: '聊天和生图都可以直接打开',
+    chatModeLabel: '选择入口',
+    chatModeChat: '聊天',
+    chatModeImage: '生图',
+    chatModelLabel: '选择聊天模型',
+    imageModelLabel: '选择生图模型',
+    chatOpenButton: '打开',
+    chatOpening: '打开中',
+    chatModels: {
+      gpt55: '默认推荐，综合体验最好',
+      claudeOpus47: '适合复杂推理和长文写作',
+      claudeSonnet46: '适合日常工作，稳定均衡',
+      gemini31Pro: '适合长内容和多模态任务',
+      gpt54Mini: '速度快，成本更低'
+    },
+    imageModels: {
+      gptImage2: '默认推荐，画质最好',
+      gptImage15: '速度快，适合反复改图',
+      gptImage1: '稳定通用',
+      dalle3: '经典文生图'
+    },
     viewUsage: '查看使用记录',
     checkDetailedLogs: '查看详细的使用日志',
     redeemCode: '兑换码',

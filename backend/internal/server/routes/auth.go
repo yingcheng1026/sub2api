@@ -184,4 +184,20 @@ func RegisterAuthRoutes(
 		authenticated.POST("/auth/revoke-all-sessions", h.Auth.RevokeAllSessions)
 		authenticated.POST("/auth/oauth/bind-token", h.Auth.PrepareOAuthBindAccessTokenCookie)
 	}
+
+	// Chat 子域一次性登录桥接。创建短码需要用户登录；兑换短码由 chat 服务端调用，不依赖 admin 子域 localStorage。
+	chatBridge := v1.Group("/chat/bridge")
+	{
+		chatBridge.POST("/exchange", rateLimiter.LimitWithOptions("chat-bridge-exchange", 60, time.Minute, middleware.RateLimitOptions{
+			FailureMode: middleware.RateLimitFailClose,
+		}), h.Auth.ExchangeChatBridgeCode)
+	}
+
+	authenticatedChatBridge := v1.Group("/chat/bridge")
+	authenticatedChatBridge.Use(gin.HandlerFunc(jwtAuth))
+	{
+		authenticatedChatBridge.POST("/code", rateLimiter.LimitWithOptions("chat-bridge-code", 30, time.Minute, middleware.RateLimitOptions{
+			FailureMode: middleware.RateLimitFailClose,
+		}), h.Auth.CreateChatBridgeCode)
+	}
 }
