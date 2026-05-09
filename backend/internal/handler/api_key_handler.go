@@ -3,6 +3,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -106,6 +107,27 @@ func (h *APIKeyHandler) List(c *gin.Context) {
 		out = append(out, *dto.APIKeyFromService(&keys[i]))
 	}
 	response.Paginated(c, out, result.Total, page, pageSize)
+}
+
+// GetChatDefaultAPIKey returns the active API key used by chat.handsfreeclub.com.
+func (h *APIKeyHandler) GetChatDefaultAPIKey(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		c.JSON(401, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	key, err := h.apiKeyService.DefaultChatAPIKey(c.Request.Context(), subject.UserID)
+	if err != nil {
+		if errors.Is(err, service.ErrAPIKeyNotFound) {
+			c.JSON(404, gin.H{"error": "default api key not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"api_key": key})
 }
 
 // GetByID handles getting a single API key

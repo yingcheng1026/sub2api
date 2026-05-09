@@ -18,6 +18,7 @@ import (
 
 type authRepoStub struct {
 	getByKeyForAuth   func(ctx context.Context, key string) (*APIKey, error)
+	listByUserID      func(ctx context.Context, userID int64, params pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error)
 	listKeysByUserID  func(ctx context.Context, userID int64) ([]string, error)
 	listKeysByGroupID func(ctx context.Context, groupID int64) ([]string, error)
 }
@@ -54,7 +55,10 @@ func (s *authRepoStub) Delete(ctx context.Context, id int64) error {
 }
 
 func (s *authRepoStub) ListByUserID(ctx context.Context, userID int64, params pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error) {
-	panic("unexpected ListByUserID call")
+	if s.listByUserID == nil {
+		panic("unexpected ListByUserID call")
+	}
+	return s.listByUserID(ctx, userID, params, filters)
 }
 
 func (s *authRepoStub) VerifyOwnership(ctx context.Context, userID int64, apiKeyIDs []int64) ([]int64, error) {

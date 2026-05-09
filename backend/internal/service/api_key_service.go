@@ -436,6 +436,30 @@ func (s *APIKeyService) List(ctx context.Context, userID int64, params paginatio
 	return keys, pagination, nil
 }
 
+// DefaultChatAPIKey returns the newest usable active key for a user.
+func (s *APIKeyService) DefaultChatAPIKey(ctx context.Context, userID int64) (string, error) {
+	keys, _, err := s.List(ctx, userID, pagination.PaginationParams{
+		Page:      1,
+		PageSize:  10,
+		SortBy:    "created_at",
+		SortOrder: "desc",
+	}, APIKeyListFilters{Status: StatusAPIKeyActive})
+	if err != nil {
+		return "", err
+	}
+	for i := range keys {
+		key := &keys[i]
+		if key.IsExpired() || key.IsQuotaExhausted() {
+			continue
+		}
+		if strings.TrimSpace(key.Key) == "" {
+			continue
+		}
+		return key.Key, nil
+	}
+	return "", ErrAPIKeyNotFound
+}
+
 func (s *APIKeyService) VerifyOwnership(ctx context.Context, userID int64, apiKeyIDs []int64) ([]int64, error) {
 	if len(apiKeyIDs) == 0 {
 		return []int64{}, nil

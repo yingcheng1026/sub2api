@@ -242,6 +242,16 @@ export interface AuthResponse {
   user: User & { run_mode?: 'standard' | 'simple' }
 }
 
+export interface ChatBridgeCodeRequest {
+  redirect_path?: string
+}
+
+export interface ChatBridgeCodeResponse {
+  code: string
+  chat_url?: string
+  expires_in: number
+}
+
 export interface CurrentUserResponse extends User {
   run_mode?: 'standard' | 'simple'
 }
