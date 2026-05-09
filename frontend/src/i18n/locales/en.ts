@@ -602,6 +602,28 @@ export default {
     quickActions: 'Quick Actions',
     createApiKey: 'Create API Key',
     generateNewKey: 'Generate a new API key',
+    openChat: 'Web AI',
+    openChatHint: 'Open chat or image generation directly',
+    chatModeLabel: 'Launch',
+    chatModeChat: 'Chat',
+    chatModeImage: 'Image',
+    chatModelLabel: 'Chat model',
+    imageModelLabel: 'Image model',
+    chatOpenButton: 'Open',
+    chatOpening: 'Opening',
+    chatModels: {
+      gpt55: 'Default pick, best overall experience',
+      claudeOpus47: 'For deep reasoning and long writing',
+      claudeSonnet46: 'Stable and balanced for daily work',
+      gemini31Pro: 'For long content and multimodal tasks',
+      gpt54Mini: 'Fast and economical'
+    },
+    imageModels: {
+      gptImage2: 'Default pick, best image quality',
+      gptImage15: 'Fast iteration and edits',
+      gptImage1: 'Stable general image generation',
+      dalle3: 'Classic text-to-image'
+    },
     viewUsage: 'View Usage',
     checkDetailedLogs: 'Check detailed usage logs',
     redeemCode: 'Redeem Code',

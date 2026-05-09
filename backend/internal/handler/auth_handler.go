@@ -20,6 +20,7 @@ import (
 type AuthHandler struct {
 	cfg           *config.Config
 	authService   *service.AuthService
+	chatBridgeSvc chatBridgeService
 	userService   *service.UserService
 	settingSvc    *service.SettingService
 	promoService  *service.PromoService
@@ -32,6 +33,7 @@ func NewAuthHandler(cfg *config.Config, authService *service.AuthService, userSe
 	return &AuthHandler{
 		cfg:           cfg,
 		authService:   authService,
+		chatBridgeSvc: service.NewChatBridgeService(authService),
 		userService:   userService,
 		settingSvc:    settingService,
 		promoService:  promoService,
