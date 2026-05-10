@@ -1913,6 +1913,15 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
+	// Handle Kiro accounts: the sidecar accepts these logical model aliases.
+	if account.Platform == service.PlatformKiro {
+		response.Success(c, []claude.Model{
+			{ID: "kiro", Type: "model", DisplayName: "Kiro", CreatedAt: ""},
+			{ID: "kiro-coding", Type: "model", DisplayName: "Kiro Coding", CreatedAt: ""},
+		})
+		return
+	}
+
 	// Handle Claude/Anthropic accounts
 	// For OAuth and Setup-Token accounts: return default models
 	if account.IsOAuth() {

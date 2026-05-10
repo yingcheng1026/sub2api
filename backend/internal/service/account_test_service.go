@@ -13,7 +13,9 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 )
 
 // sseDataPrefix matches SSE data lines with optional whitespace after colon.
@@ -189,6 +192,10 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 
 	if account.Platform == PlatformAntigravity {
 		return s.routeAntigravityTest(c, account, modelID, prompt)
+	}
+
+	if account.Platform == PlatformKiro {
+		return s.testKiroAccountConnection(c, account, modelID, prompt)
 	}
 
 	return s.testClaudeAccountConnection(c, account, modelID)
@@ -898,6 +905,117 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
+}
+
+func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
+	ctx := c.Request.Context()
+	testModelID := strings.TrimSpace(modelID)
+	if testModelID == "" {
+		testModelID = "kiro"
+	}
+	testPrompt := strings.TrimSpace(prompt)
+	if testPrompt == "" {
+		testPrompt = "hi"
+	}
+
+	sidecarURL, err := s.buildKiroSidecarEndpoint("/v1/messages")
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	apiKey := strings.TrimSpace(account.GetCredential("api_key"))
+	if apiKey == "" {
+		return s.sendErrorAndEnd(c, "No Kiro API key available")
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	payload := map[string]any{
+		"model": testModelID,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": testPrompt},
+				},
+			},
+		},
+		"max_tokens": 256,
+		"stream":     false,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecarURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Kiro sidecar request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kiro-API-Key", apiKey)
+	req.Header.Set("X-Kiro-Account-ID", strconv.FormatInt(account.ID, 10))
+
+	timeout := 90 * time.Second
+	if s.cfg != nil && s.cfg.Kiro.RequestTimeoutSeconds > 0 {
+		timeout = time.Duration(s.cfg.Kiro.RequestTimeoutSeconds) * time.Second
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Kiro sidecar request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Kiro sidecar returned %d: %s", resp.StatusCode, string(body)))
+	}
+
+	text := extractKiroTestText(body)
+	if text == "" {
+		text = string(body)
+	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: text})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
+func (s *AccountTestService) buildKiroSidecarEndpoint(path string) (string, error) {
+	if s.cfg == nil || strings.TrimSpace(s.cfg.Kiro.SidecarURL) == "" {
+		return "", fmt.Errorf("Kiro sidecar is not configured")
+	}
+	raw := strings.TrimSpace(s.cfg.Kiro.SidecarURL)
+	if err := config.ValidateAbsoluteHTTPURL(raw); err != nil {
+		return "", fmt.Errorf("Invalid Kiro sidecar URL: %s", err.Error())
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("Invalid Kiro sidecar URL: %s", err.Error())
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("Invalid Kiro sidecar URL: must not include userinfo or query")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func extractKiroTestText(body []byte) string {
+	for _, path := range []string{
+		"content.0.text",
+		"choices.0.message.content",
+		"output.0.content.0.text",
+		"output_text",
+		"text",
+	} {
+		if text := strings.TrimSpace(gjson.GetBytes(body, path).String()); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // buildGeminiAPIKeyRequest builds request for Gemini API Key accounts

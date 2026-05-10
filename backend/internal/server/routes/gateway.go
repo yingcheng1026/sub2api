@@ -221,10 +221,10 @@ func RegisterGatewayRoutes(
 		kiroV1.Use(requireGroupAnthropic)
 		kiroV1.Use(requireKiroGroup())
 		{
-			kiroV1.GET("/models", kiroBridgeUnavailableHandler(cfg))
-			kiroV1.POST("/messages", kiroBridgeUnavailableHandler(cfg))
-			kiroV1.POST("/responses", kiroBridgeUnavailableHandler(cfg))
-			kiroV1.POST("/chat/completions", kiroBridgeUnavailableHandler(cfg))
+			kiroV1.GET("/models", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroModels))
+			kiroV1.POST("/messages", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroMessages))
+			kiroV1.POST("/responses", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroResponses))
+			kiroV1.POST("/chat/completions", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroChatCompletions))
 		}
 	}
 
@@ -266,7 +266,7 @@ func rejectKiroAutoRoute(c *gin.Context, cfg *config.Config) bool {
 			c,
 			http.StatusNotImplemented,
 			"api_error",
-			"Kiro /v1 auto routing is not implemented in this build; use /kiro/v1 after the sidecar bridge lands",
+			"Kiro /v1 auto routing is not enabled; use the dedicated /kiro/v1 endpoint",
 		)
 		return true
 	}
@@ -295,7 +295,7 @@ func requireKiroGroup() gin.HandlerFunc {
 	}
 }
 
-func kiroBridgeUnavailableHandler(cfg *config.Config) gin.HandlerFunc {
+func kiroBridgeConfiguredHandler(cfg *config.Config, next gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if cfg == nil || cfg.Kiro.SidecarURL == "" {
 			writeKiroRouteError(
@@ -306,12 +306,7 @@ func kiroBridgeUnavailableHandler(cfg *config.Config) gin.HandlerFunc {
 			)
 			return
 		}
-		writeKiroRouteError(
-			c,
-			http.StatusNotImplemented,
-			"api_error",
-			"Kiro sidecar bridge is not implemented in this build",
-		)
+		next(c)
 	}
 }
 

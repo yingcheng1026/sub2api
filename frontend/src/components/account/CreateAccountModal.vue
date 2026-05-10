@@ -3219,14 +3219,14 @@ const oauthStepTitle = computed(() => {
 const baseUrlHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
-  if (form.platform === 'kiro') return 'Kiro sidecar URL, for example http://127.0.0.1:8787'
+  if (form.platform === 'kiro') return 'Optional local sidecar note; production forwarding uses backend kiro.sidecar_url.'
   return t('admin.accounts.baseUrlHint')
 })
 
 const apiKeyHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.apiKeyHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.apiKeyHint')
-  if (form.platform === 'kiro') return 'Stored for the Kiro sidecar bridge; the route remains disabled until backend kiro flags are enabled.'
+  if (form.platform === 'kiro') return 'Kiro upstream API key; Sub2API forwards it only to the configured Kiro sidecar.'
   return t('admin.accounts.apiKeyHint')
 })
 
