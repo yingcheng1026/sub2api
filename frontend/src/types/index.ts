@@ -1443,7 +1443,9 @@ export interface ChangePasswordRequest {
 export interface UserSubscription {
   id: number
   user_id: number
-  group_id: number
+  // 钱包模式 (v4) 下 group_id 为 null（订阅跨 group 共享一个钱包）；
+  // 老的单 group 订阅 (v3) 下必填。
+  group_id: number | null
   status: 'active' | 'expired' | 'revoked'
   daily_usage_usd: number
   weekly_usage_usd: number
@@ -1451,6 +1453,9 @@ export interface UserSubscription {
   daily_window_start: string | null
   weekly_window_start: string | null
   monthly_window_start: string | null
+  // 钱包模式字段；老订阅为 undefined / null。
+  wallet_balance_usd?: number | null
+  wallet_initial_usd?: number | null
   created_at: string
   updated_at: string
   expires_at: string | null

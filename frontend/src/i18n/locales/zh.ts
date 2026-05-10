@@ -6401,7 +6401,20 @@ export default {
     expiresOn: '{date} 到期',
     resetIn: '{time} 后重置',
     windowNotActive: '等待首次使用',
-    usageOf: '已用 {used} / {limit}'
+    usageOf: '已用 {used} / {limit}',
+    wallet: {
+      title: '钱包余额',
+      subtitle: '所有 group 共享一笔额度，按倍率扣费',
+      remaining: '剩余余额',
+      usedPercent: '已用',
+      lowWarning: '余额仅剩 ${amount}，建议尽快续费',
+      exhausted: '余额已耗尽，请续费后继续使用',
+      rateListTitle: '各 group 倍率',
+      rateListDesc: '不同 group 倍率不同，倍率越高扣费越快',
+      rateListEmpty: '暂无可用 group',
+      userOverride: '专属',
+      userOverrideHint: '管理员为您设置了专属倍率（基础倍率 ×{base}）'
+    }
   },
 
   // Onboarding Tour

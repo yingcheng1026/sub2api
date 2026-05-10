@@ -6243,7 +6243,20 @@ export default {
     expiresOn: 'Expires on {date}',
     resetIn: 'Resets in {time}',
     windowNotActive: 'Awaiting first use',
-    usageOf: '{used} of {limit}'
+    usageOf: '{used} of {limit}',
+    wallet: {
+      title: 'Wallet Balance',
+      subtitle: 'Shared across all groups, charged by rate multiplier',
+      remaining: 'Remaining',
+      usedPercent: 'Used',
+      lowWarning: 'Only ${amount} left — consider renewing soon',
+      exhausted: 'Wallet exhausted — please renew to keep using',
+      rateListTitle: 'Group Rate Multipliers',
+      rateListDesc: 'Higher multiplier groups burn the wallet faster',
+      rateListEmpty: 'No groups available',
+      userOverride: 'Custom',
+      userOverrideHint: 'Admin set a custom multiplier for you (base ×{base})'
+    }
   },
 
   // Onboarding Tour
