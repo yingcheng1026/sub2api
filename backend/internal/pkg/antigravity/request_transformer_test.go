@@ -451,6 +451,10 @@ func TestTransformClaudeToGeminiWithOptions_SessionIDUsesCacheControlSystemBlock
 	require.NoError(t, json.Unmarshal(body2, &req2))
 	require.NotEmpty(t, req1.Request.SessionID)
 	require.Equal(t, req1.Request.SessionID, req2.Request.SessionID)
+	require.NotEmpty(t, req1.Request.Contents)
+	require.NotEmpty(t, req1.Request.Contents[0].Parts)
+	require.Contains(t, req1.Request.Contents[0].Parts[0].Text, "stable Claude Code system prompt")
+	require.Contains(t, req1.Request.Contents[0].Parts[1].Text, "dynamic user turn one")
 }
 
 func TestTransformClaudeToGeminiWithOptions_MetadataUserIDOverridesCacheSessionSeed(t *testing.T) {

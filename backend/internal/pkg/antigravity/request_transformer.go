@@ -99,6 +99,49 @@ func extractAnthropicCacheableSeed(claudeReq *ClaudeRequest) string {
 	return builder.String()
 }
 
+func extractAnthropicSystemCacheableText(claudeReq *ClaudeRequest) string {
+	if claudeReq == nil || len(claudeReq.System) == 0 {
+		return ""
+	}
+
+	var sysBlocks []SystemBlock
+	if err := json.Unmarshal(claudeReq.System, &sysBlocks); err != nil {
+		return ""
+	}
+
+	var builder strings.Builder
+	for _, block := range sysBlocks {
+		if block.Type == "text" && isEphemeralCacheControl(block.CacheControl) && strings.TrimSpace(block.Text) != "" {
+			if builder.Len() > 0 {
+				_, _ = builder.WriteString("\n\n")
+			}
+			_, _ = builder.WriteString(block.Text)
+		}
+	}
+	return builder.String()
+}
+
+func prependCacheableSystemContent(contents []GeminiContent, text string) []GeminiContent {
+	if strings.TrimSpace(text) == "" {
+		return contents
+	}
+
+	part := GeminiPart{Text: text}
+	out := make([]GeminiContent, len(contents))
+	copy(out, contents)
+	for i := range out {
+		if out[i].Role == "user" {
+			parts := make([]GeminiPart, 0, len(out[i].Parts)+1)
+			parts = append(parts, part)
+			parts = append(parts, out[i].Parts...)
+			out[i].Parts = parts
+			return out
+		}
+	}
+
+	return append([]GeminiContent{{Role: "user", Parts: []GeminiPart{part}}}, out...)
+}
+
 func isEphemeralCacheControl(cacheControl *CacheControl) bool {
 	return cacheControl != nil && strings.EqualFold(cacheControl.Type, "ephemeral")
 }
@@ -175,6 +218,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	if err != nil {
 		return nil, fmt.Errorf("build contents: %w", err)
 	}
+	contents = prependCacheableSystemContent(contents, extractAnthropicSystemCacheableText(claudeReq))
 
 	// 2. 构建 systemInstruction（使用 targetModel 而非原始请求模型，确保身份注入基于最终模型）
 	systemInstruction := buildSystemInstruction(claudeReq.System, targetModel, opts, claudeReq.Tools)
