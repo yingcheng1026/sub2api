@@ -125,6 +125,16 @@ func MonthlyUsageUsd(v float64) predicate.UserSubscription {
 	return predicate.UserSubscription(sql.FieldEQ(FieldMonthlyUsageUsd, v))
 }
 
+// WalletBalanceUsd applies equality check predicate on the "wallet_balance_usd" field. It's identical to WalletBalanceUsdEQ.
+func WalletBalanceUsd(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldEQ(FieldWalletBalanceUsd, v))
+}
+
+// WalletInitialUsd applies equality check predicate on the "wallet_initial_usd" field. It's identical to WalletInitialUsdEQ.
+func WalletInitialUsd(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldEQ(FieldWalletInitialUsd, v))
+}
+
 // AssignedBy applies equality check predicate on the "assigned_by" field. It's identical to AssignedByEQ.
 func AssignedBy(v int64) predicate.UserSubscription {
 	return predicate.UserSubscription(sql.FieldEQ(FieldAssignedBy, v))
@@ -308,6 +318,16 @@ func GroupIDIn(vs ...int64) predicate.UserSubscription {
 // GroupIDNotIn applies the NotIn predicate on the "group_id" field.
 func GroupIDNotIn(vs ...int64) predicate.UserSubscription {
 	return predicate.UserSubscription(sql.FieldNotIn(FieldGroupID, vs...))
+}
+
+// GroupIDIsNil applies the IsNil predicate on the "group_id" field.
+func GroupIDIsNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldIsNull(FieldGroupID))
+}
+
+// GroupIDNotNil applies the NotNil predicate on the "group_id" field.
+func GroupIDNotNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNotNull(FieldGroupID))
 }
 
 // StartsAtEQ applies the EQ predicate on the "starts_at" field.
@@ -725,6 +745,106 @@ func MonthlyUsageUsdLTE(v float64) predicate.UserSubscription {
 	return predicate.UserSubscription(sql.FieldLTE(FieldMonthlyUsageUsd, v))
 }
 
+// WalletBalanceUsdEQ applies the EQ predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdEQ(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldEQ(FieldWalletBalanceUsd, v))
+}
+
+// WalletBalanceUsdNEQ applies the NEQ predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdNEQ(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNEQ(FieldWalletBalanceUsd, v))
+}
+
+// WalletBalanceUsdIn applies the In predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdIn(vs ...float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldIn(FieldWalletBalanceUsd, vs...))
+}
+
+// WalletBalanceUsdNotIn applies the NotIn predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdNotIn(vs ...float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNotIn(FieldWalletBalanceUsd, vs...))
+}
+
+// WalletBalanceUsdGT applies the GT predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdGT(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldGT(FieldWalletBalanceUsd, v))
+}
+
+// WalletBalanceUsdGTE applies the GTE predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdGTE(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldGTE(FieldWalletBalanceUsd, v))
+}
+
+// WalletBalanceUsdLT applies the LT predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdLT(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldLT(FieldWalletBalanceUsd, v))
+}
+
+// WalletBalanceUsdLTE applies the LTE predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdLTE(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldLTE(FieldWalletBalanceUsd, v))
+}
+
+// WalletBalanceUsdIsNil applies the IsNil predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdIsNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldIsNull(FieldWalletBalanceUsd))
+}
+
+// WalletBalanceUsdNotNil applies the NotNil predicate on the "wallet_balance_usd" field.
+func WalletBalanceUsdNotNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNotNull(FieldWalletBalanceUsd))
+}
+
+// WalletInitialUsdEQ applies the EQ predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdEQ(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldEQ(FieldWalletInitialUsd, v))
+}
+
+// WalletInitialUsdNEQ applies the NEQ predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdNEQ(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNEQ(FieldWalletInitialUsd, v))
+}
+
+// WalletInitialUsdIn applies the In predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdIn(vs ...float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldIn(FieldWalletInitialUsd, vs...))
+}
+
+// WalletInitialUsdNotIn applies the NotIn predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdNotIn(vs ...float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNotIn(FieldWalletInitialUsd, vs...))
+}
+
+// WalletInitialUsdGT applies the GT predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdGT(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldGT(FieldWalletInitialUsd, v))
+}
+
+// WalletInitialUsdGTE applies the GTE predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdGTE(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldGTE(FieldWalletInitialUsd, v))
+}
+
+// WalletInitialUsdLT applies the LT predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdLT(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldLT(FieldWalletInitialUsd, v))
+}
+
+// WalletInitialUsdLTE applies the LTE predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdLTE(v float64) predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldLTE(FieldWalletInitialUsd, v))
+}
+
+// WalletInitialUsdIsNil applies the IsNil predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdIsNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldIsNull(FieldWalletInitialUsd))
+}
+
+// WalletInitialUsdNotNil applies the NotNil predicate on the "wallet_initial_usd" field.
+func WalletInitialUsdNotNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNotNull(FieldWalletInitialUsd))
+}
+
 // AssignedByEQ applies the EQ predicate on the "assigned_by" field.
 func AssignedByEQ(v int64) predicate.UserSubscription {
 	return predicate.UserSubscription(sql.FieldEQ(FieldAssignedBy, v))
@@ -954,6 +1074,29 @@ func HasUsageLogs() predicate.UserSubscription {
 func HasUsageLogsWith(preds ...predicate.UsageLog) predicate.UserSubscription {
 	return predicate.UserSubscription(func(s *sql.Selector) {
 		step := newUsageLogsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasWalletLedgerEntries applies the HasEdge predicate on the "wallet_ledger_entries" edge.
+func HasWalletLedgerEntries() predicate.UserSubscription {
+	return predicate.UserSubscription(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, WalletLedgerEntriesTable, WalletLedgerEntriesColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasWalletLedgerEntriesWith applies the HasEdge predicate on the "wallet_ledger_entries" edge with a given conditions (other predicates).
+func HasWalletLedgerEntriesWith(preds ...predicate.SubscriptionWalletLedger) predicate.UserSubscription {
+	return predicate.UserSubscription(func(s *sql.Selector) {
+		step := newWalletLedgerEntriesStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/pendingauthsession"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionwalletledger"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
@@ -397,6 +398,21 @@ func (_c *UserCreate) AddAssignedSubscriptions(v ...*UserSubscription) *UserCrea
 		ids[i] = v[i].ID
 	}
 	return _c.AddAssignedSubscriptionIDs(ids...)
+}
+
+// AddWalletLedgerOperationIDs adds the "wallet_ledger_operations" edge to the SubscriptionWalletLedger entity by IDs.
+func (_c *UserCreate) AddWalletLedgerOperationIDs(ids ...int64) *UserCreate {
+	_c.mutation.AddWalletLedgerOperationIDs(ids...)
+	return _c
+}
+
+// AddWalletLedgerOperations adds the "wallet_ledger_operations" edges to the SubscriptionWalletLedger entity.
+func (_c *UserCreate) AddWalletLedgerOperations(v ...*SubscriptionWalletLedger) *UserCreate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddWalletLedgerOperationIDs(ids...)
 }
 
 // AddAnnouncementReadIDs adds the "announcement_reads" edge to the AnnouncementRead entity by IDs.
@@ -884,6 +900,22 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usersubscription.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.WalletLedgerOperationsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.WalletLedgerOperationsTable,
+			Columns: []string{user.WalletLedgerOperationsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

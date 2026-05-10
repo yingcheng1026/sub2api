@@ -85,9 +85,13 @@ func (s *PaymentConfigService) GetGroupInfoMap(ctx context.Context, plans []*dbe
 	ids := make([]int64, 0, len(plans))
 	seen := make(map[int64]bool)
 	for _, p := range plans {
-		if !seen[p.GroupID] {
-			seen[p.GroupID] = true
-			ids = append(ids, p.GroupID)
+		// 钱包模式 plan (v4) GroupID 为 nil, 不参与单 group 信息聚合
+		if p.GroupID == nil {
+			continue
+		}
+		if !seen[*p.GroupID] {
+			seen[*p.GroupID] = true
+			ids = append(ids, *p.GroupID)
 		}
 	}
 	if len(ids) == 0 {

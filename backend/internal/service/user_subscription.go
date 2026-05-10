@@ -3,9 +3,11 @@ package service
 import "time"
 
 type UserSubscription struct {
-	ID      int64
-	UserID  int64
-	GroupID int64
+	ID     int64
+	UserID int64
+	// GroupID 钱包模式 (v4) 下为 nil；老的单 group 订阅 (v3) 下必填。
+	// 详见 ai-relay-infra/docs/plans/2026-05-10-wallet-mode-design.md §1.3
+	GroupID *int64
 
 	StartsAt  time.Time
 	ExpiresAt time.Time
@@ -19,6 +21,10 @@ type UserSubscription struct {
 	WeeklyUsageUSD  float64
 	MonthlyUsageUSD float64
 
+	// WalletBalanceUSD / WalletInitialUSD 钱包模式 (v4) 字段；nil = 老 group 订阅。
+	WalletBalanceUSD *float64
+	WalletInitialUSD *float64
+
 	AssignedBy *int64
 	AssignedAt time.Time
 	Notes      string
@@ -29,6 +35,11 @@ type UserSubscription struct {
 	User           *User
 	Group          *Group
 	AssignedByUser *User
+}
+
+// IsWalletMode 钱包模式订阅判别。
+func (s *UserSubscription) IsWalletMode() bool {
+	return s.WalletBalanceUSD != nil
 }
 
 func (s *UserSubscription) IsActive() bool {

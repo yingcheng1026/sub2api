@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
 )
 
 const (
@@ -15,6 +16,8 @@ const (
 	FieldID = "id"
 	// FieldGroupID holds the string denoting the group_id field in the database.
 	FieldGroupID = "group_id"
+	// FieldWalletQuotaUsd holds the string denoting the wallet_quota_usd field in the database.
+	FieldWalletQuotaUsd = "wallet_quota_usd"
 	// FieldName holds the string denoting the name field in the database.
 	FieldName = "name"
 	// FieldDescription holds the string denoting the description field in the database.
@@ -39,14 +42,24 @@ const (
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
 	FieldUpdatedAt = "updated_at"
+	// EdgePlanGroups holds the string denoting the plan_groups edge name in mutations.
+	EdgePlanGroups = "plan_groups"
 	// Table holds the table name of the subscriptionplan in the database.
 	Table = "subscription_plans"
+	// PlanGroupsTable is the table that holds the plan_groups relation/edge.
+	PlanGroupsTable = "subscription_plan_groups"
+	// PlanGroupsInverseTable is the table name for the SubscriptionPlanGroup entity.
+	// It exists in this package in order to avoid circular dependency with the "subscriptionplangroup" package.
+	PlanGroupsInverseTable = "subscription_plan_groups"
+	// PlanGroupsColumn is the table column denoting the plan_groups relation/edge.
+	PlanGroupsColumn = "plan_id"
 )
 
 // Columns holds all SQL columns for subscriptionplan fields.
 var Columns = []string{
 	FieldID,
 	FieldGroupID,
+	FieldWalletQuotaUsd,
 	FieldName,
 	FieldDescription,
 	FieldPrice,
@@ -113,6 +126,11 @@ func ByGroupID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGroupID, opts...).ToFunc()
 }
 
+// ByWalletQuotaUsd orders the results by the wallet_quota_usd field.
+func ByWalletQuotaUsd(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWalletQuotaUsd, opts...).ToFunc()
+}
+
 // ByName orders the results by the name field.
 func ByName(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldName, opts...).ToFunc()
@@ -171,4 +189,25 @@ func ByCreatedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdatedAt orders the results by the updated_at field.
 func ByUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdatedAt, opts...).ToFunc()
+}
+
+// ByPlanGroupsCount orders the results by plan_groups count.
+func ByPlanGroupsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newPlanGroupsStep(), opts...)
+	}
+}
+
+// ByPlanGroups orders the results by plan_groups terms.
+func ByPlanGroups(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newPlanGroupsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
+func newPlanGroupsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(PlanGroupsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, PlanGroupsTable, PlanGroupsColumn),
+	)
 }

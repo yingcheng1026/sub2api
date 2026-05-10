@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/group"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionwalletledger"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
@@ -76,6 +77,14 @@ func (_c *UserSubscriptionCreate) SetUserID(v int64) *UserSubscriptionCreate {
 // SetGroupID sets the "group_id" field.
 func (_c *UserSubscriptionCreate) SetGroupID(v int64) *UserSubscriptionCreate {
 	_c.mutation.SetGroupID(v)
+	return _c
+}
+
+// SetNillableGroupID sets the "group_id" field if the given value is not nil.
+func (_c *UserSubscriptionCreate) SetNillableGroupID(v *int64) *UserSubscriptionCreate {
+	if v != nil {
+		_c.SetGroupID(*v)
+	}
 	return _c
 }
 
@@ -189,6 +198,34 @@ func (_c *UserSubscriptionCreate) SetNillableMonthlyUsageUsd(v *float64) *UserSu
 	return _c
 }
 
+// SetWalletBalanceUsd sets the "wallet_balance_usd" field.
+func (_c *UserSubscriptionCreate) SetWalletBalanceUsd(v float64) *UserSubscriptionCreate {
+	_c.mutation.SetWalletBalanceUsd(v)
+	return _c
+}
+
+// SetNillableWalletBalanceUsd sets the "wallet_balance_usd" field if the given value is not nil.
+func (_c *UserSubscriptionCreate) SetNillableWalletBalanceUsd(v *float64) *UserSubscriptionCreate {
+	if v != nil {
+		_c.SetWalletBalanceUsd(*v)
+	}
+	return _c
+}
+
+// SetWalletInitialUsd sets the "wallet_initial_usd" field.
+func (_c *UserSubscriptionCreate) SetWalletInitialUsd(v float64) *UserSubscriptionCreate {
+	_c.mutation.SetWalletInitialUsd(v)
+	return _c
+}
+
+// SetNillableWalletInitialUsd sets the "wallet_initial_usd" field if the given value is not nil.
+func (_c *UserSubscriptionCreate) SetNillableWalletInitialUsd(v *float64) *UserSubscriptionCreate {
+	if v != nil {
+		_c.SetWalletInitialUsd(*v)
+	}
+	return _c
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (_c *UserSubscriptionCreate) SetAssignedBy(v int64) *UserSubscriptionCreate {
 	_c.mutation.SetAssignedBy(v)
@@ -273,6 +310,21 @@ func (_c *UserSubscriptionCreate) AddUsageLogs(v ...*UsageLog) *UserSubscription
 		ids[i] = v[i].ID
 	}
 	return _c.AddUsageLogIDs(ids...)
+}
+
+// AddWalletLedgerEntryIDs adds the "wallet_ledger_entries" edge to the SubscriptionWalletLedger entity by IDs.
+func (_c *UserSubscriptionCreate) AddWalletLedgerEntryIDs(ids ...int64) *UserSubscriptionCreate {
+	_c.mutation.AddWalletLedgerEntryIDs(ids...)
+	return _c
+}
+
+// AddWalletLedgerEntries adds the "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_c *UserSubscriptionCreate) AddWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UserSubscriptionCreate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddWalletLedgerEntryIDs(ids...)
 }
 
 // Mutation returns the UserSubscriptionMutation object of the builder.
@@ -363,9 +415,6 @@ func (_c *UserSubscriptionCreate) check() error {
 	if _, ok := _c.mutation.UserID(); !ok {
 		return &ValidationError{Name: "user_id", err: errors.New(`ent: missing required field "UserSubscription.user_id"`)}
 	}
-	if _, ok := _c.mutation.GroupID(); !ok {
-		return &ValidationError{Name: "group_id", err: errors.New(`ent: missing required field "UserSubscription.group_id"`)}
-	}
 	if _, ok := _c.mutation.StartsAt(); !ok {
 		return &ValidationError{Name: "starts_at", err: errors.New(`ent: missing required field "UserSubscription.starts_at"`)}
 	}
@@ -394,9 +443,6 @@ func (_c *UserSubscriptionCreate) check() error {
 	}
 	if len(_c.mutation.UserIDs()) == 0 {
 		return &ValidationError{Name: "user", err: errors.New(`ent: missing required edge "UserSubscription.user"`)}
-	}
-	if len(_c.mutation.GroupIDs()) == 0 {
-		return &ValidationError{Name: "group", err: errors.New(`ent: missing required edge "UserSubscription.group"`)}
 	}
 	return nil
 }
@@ -473,6 +519,14 @@ func (_c *UserSubscriptionCreate) createSpec() (*UserSubscription, *sqlgraph.Cre
 		_spec.SetField(usersubscription.FieldMonthlyUsageUsd, field.TypeFloat64, value)
 		_node.MonthlyUsageUsd = value
 	}
+	if value, ok := _c.mutation.WalletBalanceUsd(); ok {
+		_spec.SetField(usersubscription.FieldWalletBalanceUsd, field.TypeFloat64, value)
+		_node.WalletBalanceUsd = &value
+	}
+	if value, ok := _c.mutation.WalletInitialUsd(); ok {
+		_spec.SetField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64, value)
+		_node.WalletInitialUsd = &value
+	}
 	if value, ok := _c.mutation.AssignedAt(); ok {
 		_spec.SetField(usersubscription.FieldAssignedAt, field.TypeTime, value)
 		_node.AssignedAt = value
@@ -512,7 +566,7 @@ func (_c *UserSubscriptionCreate) createSpec() (*UserSubscription, *sqlgraph.Cre
 		for _, k := range nodes {
 			edge.Target.Nodes = append(edge.Target.Nodes, k)
 		}
-		_node.GroupID = nodes[0]
+		_node.GroupID = &nodes[0]
 		_spec.Edges = append(_spec.Edges, edge)
 	}
 	if nodes := _c.mutation.AssignedByUserIDs(); len(nodes) > 0 {
@@ -541,6 +595,22 @@ func (_c *UserSubscriptionCreate) createSpec() (*UserSubscription, *sqlgraph.Cre
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usagelog.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.WalletLedgerEntriesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usersubscription.WalletLedgerEntriesTable,
+			Columns: []string{usersubscription.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {
@@ -651,6 +721,12 @@ func (u *UserSubscriptionUpsert) SetGroupID(v int64) *UserSubscriptionUpsert {
 // UpdateGroupID sets the "group_id" field to the value that was provided on create.
 func (u *UserSubscriptionUpsert) UpdateGroupID() *UserSubscriptionUpsert {
 	u.SetExcluded(usersubscription.FieldGroupID)
+	return u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *UserSubscriptionUpsert) ClearGroupID() *UserSubscriptionUpsert {
+	u.SetNull(usersubscription.FieldGroupID)
 	return u
 }
 
@@ -795,6 +871,54 @@ func (u *UserSubscriptionUpsert) UpdateMonthlyUsageUsd() *UserSubscriptionUpsert
 // AddMonthlyUsageUsd adds v to the "monthly_usage_usd" field.
 func (u *UserSubscriptionUpsert) AddMonthlyUsageUsd(v float64) *UserSubscriptionUpsert {
 	u.Add(usersubscription.FieldMonthlyUsageUsd, v)
+	return u
+}
+
+// SetWalletBalanceUsd sets the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsert) SetWalletBalanceUsd(v float64) *UserSubscriptionUpsert {
+	u.Set(usersubscription.FieldWalletBalanceUsd, v)
+	return u
+}
+
+// UpdateWalletBalanceUsd sets the "wallet_balance_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsert) UpdateWalletBalanceUsd() *UserSubscriptionUpsert {
+	u.SetExcluded(usersubscription.FieldWalletBalanceUsd)
+	return u
+}
+
+// AddWalletBalanceUsd adds v to the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsert) AddWalletBalanceUsd(v float64) *UserSubscriptionUpsert {
+	u.Add(usersubscription.FieldWalletBalanceUsd, v)
+	return u
+}
+
+// ClearWalletBalanceUsd clears the value of the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsert) ClearWalletBalanceUsd() *UserSubscriptionUpsert {
+	u.SetNull(usersubscription.FieldWalletBalanceUsd)
+	return u
+}
+
+// SetWalletInitialUsd sets the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsert) SetWalletInitialUsd(v float64) *UserSubscriptionUpsert {
+	u.Set(usersubscription.FieldWalletInitialUsd, v)
+	return u
+}
+
+// UpdateWalletInitialUsd sets the "wallet_initial_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsert) UpdateWalletInitialUsd() *UserSubscriptionUpsert {
+	u.SetExcluded(usersubscription.FieldWalletInitialUsd)
+	return u
+}
+
+// AddWalletInitialUsd adds v to the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsert) AddWalletInitialUsd(v float64) *UserSubscriptionUpsert {
+	u.Add(usersubscription.FieldWalletInitialUsd, v)
+	return u
+}
+
+// ClearWalletInitialUsd clears the value of the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsert) ClearWalletInitialUsd() *UserSubscriptionUpsert {
+	u.SetNull(usersubscription.FieldWalletInitialUsd)
 	return u
 }
 
@@ -951,6 +1075,13 @@ func (u *UserSubscriptionUpsertOne) SetGroupID(v int64) *UserSubscriptionUpsertO
 func (u *UserSubscriptionUpsertOne) UpdateGroupID() *UserSubscriptionUpsertOne {
 	return u.Update(func(s *UserSubscriptionUpsert) {
 		s.UpdateGroupID()
+	})
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *UserSubscriptionUpsertOne) ClearGroupID() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearGroupID()
 	})
 }
 
@@ -1119,6 +1250,62 @@ func (u *UserSubscriptionUpsertOne) AddMonthlyUsageUsd(v float64) *UserSubscript
 func (u *UserSubscriptionUpsertOne) UpdateMonthlyUsageUsd() *UserSubscriptionUpsertOne {
 	return u.Update(func(s *UserSubscriptionUpsert) {
 		s.UpdateMonthlyUsageUsd()
+	})
+}
+
+// SetWalletBalanceUsd sets the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsertOne) SetWalletBalanceUsd(v float64) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetWalletBalanceUsd(v)
+	})
+}
+
+// AddWalletBalanceUsd adds v to the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsertOne) AddWalletBalanceUsd(v float64) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.AddWalletBalanceUsd(v)
+	})
+}
+
+// UpdateWalletBalanceUsd sets the "wallet_balance_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertOne) UpdateWalletBalanceUsd() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateWalletBalanceUsd()
+	})
+}
+
+// ClearWalletBalanceUsd clears the value of the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsertOne) ClearWalletBalanceUsd() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearWalletBalanceUsd()
+	})
+}
+
+// SetWalletInitialUsd sets the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsertOne) SetWalletInitialUsd(v float64) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetWalletInitialUsd(v)
+	})
+}
+
+// AddWalletInitialUsd adds v to the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsertOne) AddWalletInitialUsd(v float64) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.AddWalletInitialUsd(v)
+	})
+}
+
+// UpdateWalletInitialUsd sets the "wallet_initial_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertOne) UpdateWalletInitialUsd() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateWalletInitialUsd()
+	})
+}
+
+// ClearWalletInitialUsd clears the value of the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsertOne) ClearWalletInitialUsd() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearWalletInitialUsd()
 	})
 }
 
@@ -1452,6 +1639,13 @@ func (u *UserSubscriptionUpsertBulk) UpdateGroupID() *UserSubscriptionUpsertBulk
 	})
 }
 
+// ClearGroupID clears the value of the "group_id" field.
+func (u *UserSubscriptionUpsertBulk) ClearGroupID() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearGroupID()
+	})
+}
+
 // SetStartsAt sets the "starts_at" field.
 func (u *UserSubscriptionUpsertBulk) SetStartsAt(v time.Time) *UserSubscriptionUpsertBulk {
 	return u.Update(func(s *UserSubscriptionUpsert) {
@@ -1617,6 +1811,62 @@ func (u *UserSubscriptionUpsertBulk) AddMonthlyUsageUsd(v float64) *UserSubscrip
 func (u *UserSubscriptionUpsertBulk) UpdateMonthlyUsageUsd() *UserSubscriptionUpsertBulk {
 	return u.Update(func(s *UserSubscriptionUpsert) {
 		s.UpdateMonthlyUsageUsd()
+	})
+}
+
+// SetWalletBalanceUsd sets the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsertBulk) SetWalletBalanceUsd(v float64) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetWalletBalanceUsd(v)
+	})
+}
+
+// AddWalletBalanceUsd adds v to the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsertBulk) AddWalletBalanceUsd(v float64) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.AddWalletBalanceUsd(v)
+	})
+}
+
+// UpdateWalletBalanceUsd sets the "wallet_balance_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertBulk) UpdateWalletBalanceUsd() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateWalletBalanceUsd()
+	})
+}
+
+// ClearWalletBalanceUsd clears the value of the "wallet_balance_usd" field.
+func (u *UserSubscriptionUpsertBulk) ClearWalletBalanceUsd() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearWalletBalanceUsd()
+	})
+}
+
+// SetWalletInitialUsd sets the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsertBulk) SetWalletInitialUsd(v float64) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetWalletInitialUsd(v)
+	})
+}
+
+// AddWalletInitialUsd adds v to the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsertBulk) AddWalletInitialUsd(v float64) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.AddWalletInitialUsd(v)
+	})
+}
+
+// UpdateWalletInitialUsd sets the "wallet_initial_usd" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertBulk) UpdateWalletInitialUsd() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateWalletInitialUsd()
+	})
+}
+
+// ClearWalletInitialUsd clears the value of the "wallet_initial_usd" field.
+func (u *UserSubscriptionUpsertBulk) ClearWalletInitialUsd() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearWalletInitialUsd()
 	})
 }
 

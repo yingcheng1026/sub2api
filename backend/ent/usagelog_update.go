@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionwalletledger"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
@@ -778,6 +779,21 @@ func (_u *UsageLogUpdate) SetSubscription(v *UserSubscription) *UsageLogUpdate {
 	return _u.SetSubscriptionID(v.ID)
 }
 
+// AddWalletLedgerEntryIDs adds the "wallet_ledger_entries" edge to the SubscriptionWalletLedger entity by IDs.
+func (_u *UsageLogUpdate) AddWalletLedgerEntryIDs(ids ...int64) *UsageLogUpdate {
+	_u.mutation.AddWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// AddWalletLedgerEntries adds the "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UsageLogUpdate) AddWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UsageLogUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWalletLedgerEntryIDs(ids...)
+}
+
 // Mutation returns the UsageLogMutation object of the builder.
 func (_u *UsageLogUpdate) Mutation() *UsageLogMutation {
 	return _u.mutation
@@ -811,6 +827,27 @@ func (_u *UsageLogUpdate) ClearGroup() *UsageLogUpdate {
 func (_u *UsageLogUpdate) ClearSubscription() *UsageLogUpdate {
 	_u.mutation.ClearSubscription()
 	return _u
+}
+
+// ClearWalletLedgerEntries clears all "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UsageLogUpdate) ClearWalletLedgerEntries() *UsageLogUpdate {
+	_u.mutation.ClearWalletLedgerEntries()
+	return _u
+}
+
+// RemoveWalletLedgerEntryIDs removes the "wallet_ledger_entries" edge to SubscriptionWalletLedger entities by IDs.
+func (_u *UsageLogUpdate) RemoveWalletLedgerEntryIDs(ids ...int64) *UsageLogUpdate {
+	_u.mutation.RemoveWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// RemoveWalletLedgerEntries removes "wallet_ledger_entries" edges to SubscriptionWalletLedger entities.
+func (_u *UsageLogUpdate) RemoveWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UsageLogUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWalletLedgerEntryIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -1240,6 +1277,51 @@ func (_u *UsageLogUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usersubscription.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usagelog.WalletLedgerEntriesTable,
+			Columns: []string{usagelog.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWalletLedgerEntriesIDs(); len(nodes) > 0 && !_u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usagelog.WalletLedgerEntriesTable,
+			Columns: []string{usagelog.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WalletLedgerEntriesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usagelog.WalletLedgerEntriesTable,
+			Columns: []string{usagelog.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {
@@ -2013,6 +2095,21 @@ func (_u *UsageLogUpdateOne) SetSubscription(v *UserSubscription) *UsageLogUpdat
 	return _u.SetSubscriptionID(v.ID)
 }
 
+// AddWalletLedgerEntryIDs adds the "wallet_ledger_entries" edge to the SubscriptionWalletLedger entity by IDs.
+func (_u *UsageLogUpdateOne) AddWalletLedgerEntryIDs(ids ...int64) *UsageLogUpdateOne {
+	_u.mutation.AddWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// AddWalletLedgerEntries adds the "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UsageLogUpdateOne) AddWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UsageLogUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWalletLedgerEntryIDs(ids...)
+}
+
 // Mutation returns the UsageLogMutation object of the builder.
 func (_u *UsageLogUpdateOne) Mutation() *UsageLogMutation {
 	return _u.mutation
@@ -2046,6 +2143,27 @@ func (_u *UsageLogUpdateOne) ClearGroup() *UsageLogUpdateOne {
 func (_u *UsageLogUpdateOne) ClearSubscription() *UsageLogUpdateOne {
 	_u.mutation.ClearSubscription()
 	return _u
+}
+
+// ClearWalletLedgerEntries clears all "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UsageLogUpdateOne) ClearWalletLedgerEntries() *UsageLogUpdateOne {
+	_u.mutation.ClearWalletLedgerEntries()
+	return _u
+}
+
+// RemoveWalletLedgerEntryIDs removes the "wallet_ledger_entries" edge to SubscriptionWalletLedger entities by IDs.
+func (_u *UsageLogUpdateOne) RemoveWalletLedgerEntryIDs(ids ...int64) *UsageLogUpdateOne {
+	_u.mutation.RemoveWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// RemoveWalletLedgerEntries removes "wallet_ledger_entries" edges to SubscriptionWalletLedger entities.
+func (_u *UsageLogUpdateOne) RemoveWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UsageLogUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWalletLedgerEntryIDs(ids...)
 }
 
 // Where appends a list predicates to the UsageLogUpdate builder.
@@ -2505,6 +2623,51 @@ func (_u *UsageLogUpdateOne) sqlSave(ctx context.Context) (_node *UsageLog, err 
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usersubscription.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usagelog.WalletLedgerEntriesTable,
+			Columns: []string{usagelog.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWalletLedgerEntriesIDs(); len(nodes) > 0 && !_u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usagelog.WalletLedgerEntriesTable,
+			Columns: []string{usagelog.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WalletLedgerEntriesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usagelog.WalletLedgerEntriesTable,
+			Columns: []string{usagelog.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

@@ -69,6 +69,8 @@ const (
 	EdgeSubscriptions = "subscriptions"
 	// EdgeAssignedSubscriptions holds the string denoting the assigned_subscriptions edge name in mutations.
 	EdgeAssignedSubscriptions = "assigned_subscriptions"
+	// EdgeWalletLedgerOperations holds the string denoting the wallet_ledger_operations edge name in mutations.
+	EdgeWalletLedgerOperations = "wallet_ledger_operations"
 	// EdgeAnnouncementReads holds the string denoting the announcement_reads edge name in mutations.
 	EdgeAnnouncementReads = "announcement_reads"
 	// EdgeAllowedGroups holds the string denoting the allowed_groups edge name in mutations.
@@ -117,6 +119,13 @@ const (
 	AssignedSubscriptionsInverseTable = "user_subscriptions"
 	// AssignedSubscriptionsColumn is the table column denoting the assigned_subscriptions relation/edge.
 	AssignedSubscriptionsColumn = "assigned_by"
+	// WalletLedgerOperationsTable is the table that holds the wallet_ledger_operations relation/edge.
+	WalletLedgerOperationsTable = "subscription_wallet_ledger"
+	// WalletLedgerOperationsInverseTable is the table name for the SubscriptionWalletLedger entity.
+	// It exists in this package in order to avoid circular dependency with the "subscriptionwalletledger" package.
+	WalletLedgerOperationsInverseTable = "subscription_wallet_ledger"
+	// WalletLedgerOperationsColumn is the table column denoting the wallet_ledger_operations relation/edge.
+	WalletLedgerOperationsColumn = "operator_id"
 	// AnnouncementReadsTable is the table that holds the announcement_reads relation/edge.
 	AnnouncementReadsTable = "announcement_reads"
 	// AnnouncementReadsInverseTable is the table name for the AnnouncementRead entity.
@@ -457,6 +466,20 @@ func ByAssignedSubscriptions(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOp
 	}
 }
 
+// ByWalletLedgerOperationsCount orders the results by wallet_ledger_operations count.
+func ByWalletLedgerOperationsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newWalletLedgerOperationsStep(), opts...)
+	}
+}
+
+// ByWalletLedgerOperations orders the results by wallet_ledger_operations terms.
+func ByWalletLedgerOperations(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newWalletLedgerOperationsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
+
 // ByAnnouncementReadsCount orders the results by announcement_reads count.
 func ByAnnouncementReadsCount(opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -608,6 +631,13 @@ func newAssignedSubscriptionsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(AssignedSubscriptionsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, AssignedSubscriptionsTable, AssignedSubscriptionsColumn),
+	)
+}
+func newWalletLedgerOperationsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(WalletLedgerOperationsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, WalletLedgerOperationsTable, WalletLedgerOperationsColumn),
 	)
 }
 func newAnnouncementReadsStep() *sqlgraph.Step {

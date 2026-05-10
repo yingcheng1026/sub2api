@@ -491,9 +491,10 @@ type Setting struct {
 }
 
 type UserSubscription struct {
-	ID      int64 `json:"id"`
-	UserID  int64 `json:"user_id"`
-	GroupID int64 `json:"group_id"`
+	ID     int64  `json:"id"`
+	UserID int64  `json:"user_id"`
+	// GroupID 钱包模式 (v4) 下为 nil；老的单 group 订阅 (v3) 下必填。
+	GroupID *int64 `json:"group_id"`
 
 	StartsAt  time.Time `json:"starts_at"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -506,6 +507,10 @@ type UserSubscription struct {
 	DailyUsageUSD   float64 `json:"daily_usage_usd"`
 	WeeklyUsageUSD  float64 `json:"weekly_usage_usd"`
 	MonthlyUsageUSD float64 `json:"monthly_usage_usd"`
+
+	// WalletBalanceUSD / WalletInitialUSD 钱包模式 (v4) 字段；nil = 老 group 订阅。
+	WalletBalanceUSD *float64 `json:"wallet_balance_usd,omitempty"`
+	WalletInitialUSD *float64 `json:"wallet_initial_usd,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

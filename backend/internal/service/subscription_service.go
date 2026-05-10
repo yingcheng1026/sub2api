@@ -300,9 +300,10 @@ func (s *SubscriptionService) createSubscription(ctx context.Context, input *Ass
 		expiresAt = MaxExpiresAt
 	}
 
+	groupID := input.GroupID
 	sub := &UserSubscription{
 		UserID:     input.UserID,
-		GroupID:    input.GroupID,
+		GroupID:    &groupID,
 		StartsAt:   now,
 		ExpiresAt:  expiresAt,
 		Status:     SubscriptionStatusActive,
@@ -474,15 +475,17 @@ func (s *SubscriptionService) RevokeSubscription(ctx context.Context, subscripti
 		return err
 	}
 
-	// 失效订阅缓存
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
-	if s.billingCacheService != nil {
-		userID, groupID := sub.UserID, sub.GroupID
-		go func() {
-			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-		}()
+	// 失效订阅缓存（钱包模式 sub.GroupID == nil，跳过 group 维度缓存）
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+		if s.billingCacheService != nil {
+			userID, groupID := sub.UserID, *sub.GroupID
+			go func() {
+				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
+			}()
+		}
 	}
 
 	return nil
@@ -541,15 +544,17 @@ func (s *SubscriptionService) ExtendSubscription(ctx context.Context, subscripti
 		}
 	}
 
-	// 失效订阅缓存
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
-	if s.billingCacheService != nil {
-		userID, groupID := sub.UserID, sub.GroupID
-		go func() {
-			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-		}()
+	// 失效订阅缓存（钱包模式 sub.GroupID == nil，跳过 group 维度缓存）
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+		if s.billingCacheService != nil {
+			userID, groupID := sub.UserID, *sub.GroupID
+			go func() {
+				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
+			}()
+		}
 	}
 
 	return s.userSubRepo.GetByID(ctx, subscriptionID)
@@ -725,12 +730,15 @@ func (s *SubscriptionService) AdminResetQuota(ctx context.Context, subscriptionI
 	// Invalidate L1 ristretto cache. Ristretto's Del() is asynchronous by design,
 	// so call Wait() immediately after to flush pending operations and guarantee
 	// the deleted key is not returned on the very next Get() call.
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
-	if s.subCacheL1 != nil {
-		s.subCacheL1.Wait()
-	}
-	if s.billingCacheService != nil {
-		_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, sub.GroupID)
+	// 钱包模式 sub.GroupID == nil，跳过 group 维度缓存
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+		if s.subCacheL1 != nil {
+			s.subCacheL1.Wait()
+		}
+		if s.billingCacheService != nil {
+			_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, *sub.GroupID)
+		}
 	}
 	// Return the refreshed subscription from DB
 	return s.userSubRepo.GetByID(ctx, subscriptionID)
@@ -772,11 +780,11 @@ func (s *SubscriptionService) CheckAndResetWindows(ctx context.Context, sub *Use
 		needsInvalidateCache = true
 	}
 
-	// 如果有窗口被重置，失效缓存以保持一致性
-	if needsInvalidateCache {
-		s.InvalidateSubCache(sub.UserID, sub.GroupID)
+	// 如果有窗口被重置，失效缓存以保持一致性（钱包模式 sub.GroupID == nil，跳过 group 维度缓存）
+	if needsInvalidateCache && sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
 		if s.billingCacheService != nil {
-			_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, sub.GroupID)
+			_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, *sub.GroupID)
 		}
 	}
 
@@ -883,8 +891,10 @@ func (s *SubscriptionService) doWindowMaintenance(sub *UserSubscription) {
 		log.Printf("Failed to reset subscription windows: %v", err)
 	}
 
-	// 失效 L1 缓存，确保后续请求拿到更新后的数据
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
+	// 失效 L1 缓存（钱包模式 sub.GroupID == nil，跳过）
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+	}
 }
 
 // RecordUsage 记录使用量到订阅
@@ -921,9 +931,14 @@ func (s *SubscriptionService) GetSubscriptionProgress(ctx context.Context, subsc
 		return nil, ErrSubscriptionNotFound
 	}
 
+	// 钱包模式 (v4) 没有单 group 概念，进度需另算（暂不支持，A2 阶段补全）
+	if sub.GroupID == nil {
+		return nil, infraerrors.BadRequest("WALLET_MODE_NOT_SUPPORTED", "wallet-mode subscription progress not yet implemented")
+	}
+
 	group := sub.Group
 	if group == nil {
-		group, err = s.groupRepo.GetByID(ctx, sub.GroupID)
+		group, err = s.groupRepo.GetByID(ctx, *sub.GroupID)
 		if err != nil {
 			return nil, err
 		}

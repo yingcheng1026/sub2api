@@ -36,7 +36,11 @@ func (UserSubscription) Mixin() []ent.Mixin {
 func (UserSubscription) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("user_id"),
-		field.Int64("group_id"),
+		// group_id 钱包模式（v4）下为 NULL；老的单 group 订阅模式（v3）下必填。
+		// 互斥约束由 SQL CHECK chk_user_subscriptions_mode 保证（migration 151）。
+		field.Int64("group_id").
+			Optional().
+			Nillable(),
 
 		field.Time("starts_at").
 			SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
@@ -69,6 +73,18 @@ func (UserSubscription) Fields() []ent.Field {
 			SchemaType(map[string]string{dialect.Postgres: "decimal(20,10)"}).
 			Default(0),
 
+		// 钱包模式（v4）字段；NULL = 走老的单 group 订阅（v3）。详见 migration 151。
+		field.Float("wallet_balance_usd").
+			SchemaType(map[string]string{dialect.Postgres: "decimal(20,10)"}).
+			Optional().
+			Nillable().
+			Comment("钱包模式当前余额（USD，含倍率扣减）。NULL = 老 group 订阅模式"),
+		field.Float("wallet_initial_usd").
+			SchemaType(map[string]string{dialect.Postgres: "decimal(20,10)"}).
+			Optional().
+			Nillable().
+			Comment("钱包模式激活时的总额度（用于 UI 进度条）"),
+
 		field.Int64("assigned_by").
 			Optional().
 			Nillable(),
@@ -89,16 +105,17 @@ func (UserSubscription) Edges() []ent.Edge {
 			Field("user_id").
 			Unique().
 			Required(),
+		// group 在钱包模式下可为空（v4），单 group 订阅模式下必填（v3）。
 		edge.From("group", Group.Type).
 			Ref("subscriptions").
 			Field("group_id").
-			Unique().
-			Required(),
+			Unique(),
 		edge.From("assigned_by_user", User.Type).
 			Ref("assigned_subscriptions").
 			Field("assigned_by").
 			Unique(),
 		edge.To("usage_logs", UsageLog.Type),
+		edge.To("wallet_ledger_entries", SubscriptionWalletLedger.Type),
 	}
 }
 

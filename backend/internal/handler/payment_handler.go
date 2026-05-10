@@ -52,27 +52,33 @@ func (h *PaymentHandler) GetPlans(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	// Enrich plans with group platform for frontend color coding
+	// Enrich plans with group platform for frontend color coding.
+	// 钱包模式 (v4) plan: group_id=null, 前端按 wallet_quota_usd 渲染。
 	type planWithPlatform struct {
-		ID            int64    `json:"id"`
-		GroupID       int64    `json:"group_id"`
-		GroupPlatform string   `json:"group_platform"`
-		Name          string   `json:"name"`
-		Description   string   `json:"description"`
-		Price         float64  `json:"price"`
-		OriginalPrice *float64 `json:"original_price,omitempty"`
-		ValidityDays  int      `json:"validity_days"`
-		ValidityUnit  string   `json:"validity_unit"`
-		Features      string   `json:"features"`
-		ProductName   string   `json:"product_name"`
-		ForSale       bool     `json:"for_sale"`
-		SortOrder     int      `json:"sort_order"`
+		ID             int64    `json:"id"`
+		GroupID        *int64   `json:"group_id"`
+		GroupPlatform  string   `json:"group_platform"`
+		WalletQuotaUSD *float64 `json:"wallet_quota_usd,omitempty"`
+		Name           string   `json:"name"`
+		Description    string   `json:"description"`
+		Price          float64  `json:"price"`
+		OriginalPrice  *float64 `json:"original_price,omitempty"`
+		ValidityDays   int      `json:"validity_days"`
+		ValidityUnit   string   `json:"validity_unit"`
+		Features       string   `json:"features"`
+		ProductName    string   `json:"product_name"`
+		ForSale        bool     `json:"for_sale"`
+		SortOrder      int      `json:"sort_order"`
 	}
 	platformMap := h.configService.GetGroupPlatformMap(c.Request.Context(), plans)
 	result := make([]planWithPlatform, 0, len(plans))
 	for _, p := range plans {
+		platform := ""
+		if p.GroupID != nil {
+			platform = platformMap[*p.GroupID]
+		}
 		result = append(result, planWithPlatform{
-			ID: int64(p.ID), GroupID: p.GroupID, GroupPlatform: platformMap[p.GroupID],
+			ID: int64(p.ID), GroupID: p.GroupID, GroupPlatform: platform, WalletQuotaUSD: p.WalletQuotaUsd,
 			Name: p.Name, Description: p.Description, Price: p.Price, OriginalPrice: p.OriginalPrice,
 			ValidityDays: p.ValidityDays, ValidityUnit: p.ValidityUnit, Features: p.Features,
 			ProductName: p.ProductName, ForSale: p.ForSale, SortOrder: p.SortOrder,
@@ -117,9 +123,13 @@ func (h *PaymentHandler) GetCheckoutInfo(c *gin.Context) {
 	groupInfo := h.configService.GetGroupInfoMap(ctx, plans)
 	planList := make([]checkoutPlan, 0, len(plans))
 	for _, p := range plans {
-		gi := groupInfo[p.GroupID]
+		// 钱包模式 (v4) plan: GroupID=nil, 单 group 信息留空, 前端走 WalletQuotaUSD 渲染。
+		var gi service.PlanGroupInfo
+		if p.GroupID != nil {
+			gi = groupInfo[*p.GroupID]
+		}
 		planList = append(planList, checkoutPlan{
-			ID: int64(p.ID), GroupID: p.GroupID,
+			ID: int64(p.ID), GroupID: p.GroupID, WalletQuotaUSD: p.WalletQuotaUsd,
 			GroupPlatform: gi.Platform, GroupName: gi.Name,
 			RateMultiplier: gi.RateMultiplier, DailyLimitUSD: gi.DailyLimitUSD,
 			WeeklyLimitUSD: gi.WeeklyLimitUSD, MonthlyLimitUSD: gi.MonthlyLimitUSD,
@@ -159,7 +169,8 @@ type checkoutInfoResponse struct {
 
 type checkoutPlan struct {
 	ID              int64    `json:"id"`
-	GroupID         int64    `json:"group_id"`
+	GroupID         *int64   `json:"group_id"`
+	WalletQuotaUSD  *float64 `json:"wallet_quota_usd,omitempty"`
 	GroupPlatform   string   `json:"group_platform"`
 	GroupName       string   `json:"group_name"`
 	RateMultiplier  float64  `json:"rate_multiplier"`

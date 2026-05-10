@@ -2065,6 +2065,29 @@ func HasSubscriptionWith(preds ...predicate.UserSubscription) predicate.UsageLog
 	})
 }
 
+// HasWalletLedgerEntries applies the HasEdge predicate on the "wallet_ledger_entries" edge.
+func HasWalletLedgerEntries() predicate.UsageLog {
+	return predicate.UsageLog(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, WalletLedgerEntriesTable, WalletLedgerEntriesColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasWalletLedgerEntriesWith applies the HasEdge predicate on the "wallet_ledger_entries" edge with a given conditions (other predicates).
+func HasWalletLedgerEntriesWith(preds ...predicate.SubscriptionWalletLedger) predicate.UsageLog {
+	return predicate.UsageLog(func(s *sql.Selector) {
+		step := newWalletLedgerEntriesStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // And groups predicates with the AND operator between them.
 func And(predicates ...predicate.UsageLog) predicate.UsageLog {
 	return predicate.UsageLog(sql.AndPredicates(predicates...))

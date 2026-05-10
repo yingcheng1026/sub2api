@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 )
 
 // SubscriptionPlanUpdate is the builder for updating SubscriptionPlan entities.
@@ -46,6 +47,39 @@ func (_u *SubscriptionPlanUpdate) SetNillableGroupID(v *int64) *SubscriptionPlan
 // AddGroupID adds value to the "group_id" field.
 func (_u *SubscriptionPlanUpdate) AddGroupID(v int64) *SubscriptionPlanUpdate {
 	_u.mutation.AddGroupID(v)
+	return _u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (_u *SubscriptionPlanUpdate) ClearGroupID() *SubscriptionPlanUpdate {
+	_u.mutation.ClearGroupID()
+	return _u
+}
+
+// SetWalletQuotaUsd sets the "wallet_quota_usd" field.
+func (_u *SubscriptionPlanUpdate) SetWalletQuotaUsd(v float64) *SubscriptionPlanUpdate {
+	_u.mutation.ResetWalletQuotaUsd()
+	_u.mutation.SetWalletQuotaUsd(v)
+	return _u
+}
+
+// SetNillableWalletQuotaUsd sets the "wallet_quota_usd" field if the given value is not nil.
+func (_u *SubscriptionPlanUpdate) SetNillableWalletQuotaUsd(v *float64) *SubscriptionPlanUpdate {
+	if v != nil {
+		_u.SetWalletQuotaUsd(*v)
+	}
+	return _u
+}
+
+// AddWalletQuotaUsd adds value to the "wallet_quota_usd" field.
+func (_u *SubscriptionPlanUpdate) AddWalletQuotaUsd(v float64) *SubscriptionPlanUpdate {
+	_u.mutation.AddWalletQuotaUsd(v)
+	return _u
+}
+
+// ClearWalletQuotaUsd clears the value of the "wallet_quota_usd" field.
+func (_u *SubscriptionPlanUpdate) ClearWalletQuotaUsd() *SubscriptionPlanUpdate {
+	_u.mutation.ClearWalletQuotaUsd()
 	return _u
 }
 
@@ -229,9 +263,45 @@ func (_u *SubscriptionPlanUpdate) SetUpdatedAt(v time.Time) *SubscriptionPlanUpd
 	return _u
 }
 
+// AddPlanGroupIDs adds the "plan_groups" edge to the SubscriptionPlanGroup entity by IDs.
+func (_u *SubscriptionPlanUpdate) AddPlanGroupIDs(ids ...int64) *SubscriptionPlanUpdate {
+	_u.mutation.AddPlanGroupIDs(ids...)
+	return _u
+}
+
+// AddPlanGroups adds the "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *SubscriptionPlanUpdate) AddPlanGroups(v ...*SubscriptionPlanGroup) *SubscriptionPlanUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddPlanGroupIDs(ids...)
+}
+
 // Mutation returns the SubscriptionPlanMutation object of the builder.
 func (_u *SubscriptionPlanUpdate) Mutation() *SubscriptionPlanMutation {
 	return _u.mutation
+}
+
+// ClearPlanGroups clears all "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *SubscriptionPlanUpdate) ClearPlanGroups() *SubscriptionPlanUpdate {
+	_u.mutation.ClearPlanGroups()
+	return _u
+}
+
+// RemovePlanGroupIDs removes the "plan_groups" edge to SubscriptionPlanGroup entities by IDs.
+func (_u *SubscriptionPlanUpdate) RemovePlanGroupIDs(ids ...int64) *SubscriptionPlanUpdate {
+	_u.mutation.RemovePlanGroupIDs(ids...)
+	return _u
+}
+
+// RemovePlanGroups removes "plan_groups" edges to SubscriptionPlanGroup entities.
+func (_u *SubscriptionPlanUpdate) RemovePlanGroups(v ...*SubscriptionPlanGroup) *SubscriptionPlanUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemovePlanGroupIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -308,6 +378,18 @@ func (_u *SubscriptionPlanUpdate) sqlSave(ctx context.Context) (_node int, err e
 	if value, ok := _u.mutation.AddedGroupID(); ok {
 		_spec.AddField(subscriptionplan.FieldGroupID, field.TypeInt64, value)
 	}
+	if _u.mutation.GroupIDCleared() {
+		_spec.ClearField(subscriptionplan.FieldGroupID, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.WalletQuotaUsd(); ok {
+		_spec.SetField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedWalletQuotaUsd(); ok {
+		_spec.AddField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.WalletQuotaUsdCleared() {
+		_spec.ClearField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64)
+	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(subscriptionplan.FieldName, field.TypeString, value)
 	}
@@ -356,6 +438,51 @@ func (_u *SubscriptionPlanUpdate) sqlSave(ctx context.Context) (_node int, err e
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(subscriptionplan.FieldUpdatedAt, field.TypeTime, value)
 	}
+	if _u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   subscriptionplan.PlanGroupsTable,
+			Columns: []string{subscriptionplan.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedPlanGroupsIDs(); len(nodes) > 0 && !_u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   subscriptionplan.PlanGroupsTable,
+			Columns: []string{subscriptionplan.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.PlanGroupsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   subscriptionplan.PlanGroupsTable,
+			Columns: []string{subscriptionplan.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{subscriptionplan.Label}
@@ -394,6 +521,39 @@ func (_u *SubscriptionPlanUpdateOne) SetNillableGroupID(v *int64) *SubscriptionP
 // AddGroupID adds value to the "group_id" field.
 func (_u *SubscriptionPlanUpdateOne) AddGroupID(v int64) *SubscriptionPlanUpdateOne {
 	_u.mutation.AddGroupID(v)
+	return _u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (_u *SubscriptionPlanUpdateOne) ClearGroupID() *SubscriptionPlanUpdateOne {
+	_u.mutation.ClearGroupID()
+	return _u
+}
+
+// SetWalletQuotaUsd sets the "wallet_quota_usd" field.
+func (_u *SubscriptionPlanUpdateOne) SetWalletQuotaUsd(v float64) *SubscriptionPlanUpdateOne {
+	_u.mutation.ResetWalletQuotaUsd()
+	_u.mutation.SetWalletQuotaUsd(v)
+	return _u
+}
+
+// SetNillableWalletQuotaUsd sets the "wallet_quota_usd" field if the given value is not nil.
+func (_u *SubscriptionPlanUpdateOne) SetNillableWalletQuotaUsd(v *float64) *SubscriptionPlanUpdateOne {
+	if v != nil {
+		_u.SetWalletQuotaUsd(*v)
+	}
+	return _u
+}
+
+// AddWalletQuotaUsd adds value to the "wallet_quota_usd" field.
+func (_u *SubscriptionPlanUpdateOne) AddWalletQuotaUsd(v float64) *SubscriptionPlanUpdateOne {
+	_u.mutation.AddWalletQuotaUsd(v)
+	return _u
+}
+
+// ClearWalletQuotaUsd clears the value of the "wallet_quota_usd" field.
+func (_u *SubscriptionPlanUpdateOne) ClearWalletQuotaUsd() *SubscriptionPlanUpdateOne {
+	_u.mutation.ClearWalletQuotaUsd()
 	return _u
 }
 
@@ -577,9 +737,45 @@ func (_u *SubscriptionPlanUpdateOne) SetUpdatedAt(v time.Time) *SubscriptionPlan
 	return _u
 }
 
+// AddPlanGroupIDs adds the "plan_groups" edge to the SubscriptionPlanGroup entity by IDs.
+func (_u *SubscriptionPlanUpdateOne) AddPlanGroupIDs(ids ...int64) *SubscriptionPlanUpdateOne {
+	_u.mutation.AddPlanGroupIDs(ids...)
+	return _u
+}
+
+// AddPlanGroups adds the "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *SubscriptionPlanUpdateOne) AddPlanGroups(v ...*SubscriptionPlanGroup) *SubscriptionPlanUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddPlanGroupIDs(ids...)
+}
+
 // Mutation returns the SubscriptionPlanMutation object of the builder.
 func (_u *SubscriptionPlanUpdateOne) Mutation() *SubscriptionPlanMutation {
 	return _u.mutation
+}
+
+// ClearPlanGroups clears all "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *SubscriptionPlanUpdateOne) ClearPlanGroups() *SubscriptionPlanUpdateOne {
+	_u.mutation.ClearPlanGroups()
+	return _u
+}
+
+// RemovePlanGroupIDs removes the "plan_groups" edge to SubscriptionPlanGroup entities by IDs.
+func (_u *SubscriptionPlanUpdateOne) RemovePlanGroupIDs(ids ...int64) *SubscriptionPlanUpdateOne {
+	_u.mutation.RemovePlanGroupIDs(ids...)
+	return _u
+}
+
+// RemovePlanGroups removes "plan_groups" edges to SubscriptionPlanGroup entities.
+func (_u *SubscriptionPlanUpdateOne) RemovePlanGroups(v ...*SubscriptionPlanGroup) *SubscriptionPlanUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemovePlanGroupIDs(ids...)
 }
 
 // Where appends a list predicates to the SubscriptionPlanUpdate builder.
@@ -686,6 +882,18 @@ func (_u *SubscriptionPlanUpdateOne) sqlSave(ctx context.Context) (_node *Subscr
 	if value, ok := _u.mutation.AddedGroupID(); ok {
 		_spec.AddField(subscriptionplan.FieldGroupID, field.TypeInt64, value)
 	}
+	if _u.mutation.GroupIDCleared() {
+		_spec.ClearField(subscriptionplan.FieldGroupID, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.WalletQuotaUsd(); ok {
+		_spec.SetField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedWalletQuotaUsd(); ok {
+		_spec.AddField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.WalletQuotaUsdCleared() {
+		_spec.ClearField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64)
+	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(subscriptionplan.FieldName, field.TypeString, value)
 	}
@@ -733,6 +941,51 @@ func (_u *SubscriptionPlanUpdateOne) sqlSave(ctx context.Context) (_node *Subscr
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(subscriptionplan.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   subscriptionplan.PlanGroupsTable,
+			Columns: []string{subscriptionplan.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedPlanGroupsIDs(); len(nodes) > 0 && !_u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   subscriptionplan.PlanGroupsTable,
+			Columns: []string{subscriptionplan.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.PlanGroupsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   subscriptionplan.PlanGroupsTable,
+			Columns: []string{subscriptionplan.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
 	_node = &SubscriptionPlan{config: _u.config}
 	_spec.Assign = _node.assignValues
