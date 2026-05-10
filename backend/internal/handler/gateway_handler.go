@@ -1795,6 +1795,12 @@ func billingErrorDetails(err error) (status int, code, message string, retryAfte
 		retrySeconds := 60 - int(time.Now().Unix()%60)
 		return http.StatusTooManyRequests, "rate_limit_exceeded", msg, retrySeconds
 	}
+	// 钱包模式 (v4) 余额耗尽 → HTTP 402 Payment Required，让 SDK / 前端
+	// 区分「续费」与一般 billing 错误。
+	if errors.Is(err, service.ErrWalletInsufficient) {
+		msg := pkgerrors.Message(err)
+		return http.StatusPaymentRequired, "wallet_insufficient", msg, 0
+	}
 	msg := pkgerrors.Message(err)
 	if msg == "" {
 		logger.L().With(

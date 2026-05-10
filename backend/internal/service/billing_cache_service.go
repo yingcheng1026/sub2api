@@ -675,7 +675,13 @@ func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user 
 	isSubscriptionMode := group != nil && group.IsSubscriptionType() && subscription != nil
 
 	if isSubscriptionMode {
-		if err := s.checkSubscriptionEligibility(ctx, user.ID, group, subscription); err != nil {
+		// v4 钱包模式优先：subscription.wallet_balance_usd != NULL → 走钱包预检，
+		// 跳过 group 维度的 daily/weekly/monthly cap 校验（钱包共享，不绑 group）。
+		if subscription.IsWalletMode() {
+			if err := s.checkWalletEligibility(subscription); err != nil {
+				return err
+			}
+		} else if err := s.checkSubscriptionEligibility(ctx, user.ID, group, subscription); err != nil {
 			return err
 		}
 	} else {
@@ -801,6 +807,23 @@ func (s *BillingCacheService) checkBalanceEligibility(ctx context.Context, userI
 		return ErrInsufficientBalance
 	}
 
+	return nil
+}
+
+// checkWalletEligibility 钱包模式 (v4) 预检：余额 ≤ 0 直接 402，避免 race
+// 让请求服务后才发现钱包扣不动。直接读 subscription.WalletBalanceUSD（auth
+// snapshot 已带最新值），不查 Redis 也不进 circuit breaker。
+//
+// 注：与 v3 不同，钱包模式不查 group 维度的 daily/weekly/monthly cap —— 钱包
+// 是跨 group 共享的一笔额度，cap 由 wallet_balance_usd 自身承担。
+func (s *BillingCacheService) checkWalletEligibility(subscription *UserSubscription) error {
+	if subscription == nil || subscription.WalletBalanceUSD == nil {
+		// 调用方已保证 IsWalletMode()，但 defensive：理论不可达。
+		return nil
+	}
+	if *subscription.WalletBalanceUSD <= 0 {
+		return ErrWalletInsufficient
+	}
 	return nil
 }
 
