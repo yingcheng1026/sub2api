@@ -1850,6 +1850,9 @@ func (stubUserSubscriptionRepo) GetByUserIDAndGroupID(ctx context.Context, userI
 func (stubUserSubscriptionRepo) GetActiveByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
 	return nil, errors.New("not implemented")
 }
+func (stubUserSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
+	return nil, service.ErrSubscriptionNotFound
+}
 func (stubUserSubscriptionRepo) Update(ctx context.Context, sub *service.UserSubscription) error {
 	return errors.New("not implemented")
 }

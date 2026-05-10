@@ -605,6 +605,18 @@ func (s *SubscriptionService) GetActiveSubscription(ctx context.Context, userID,
 	return &cp, nil
 }
 
+// GetActiveWalletSubscription 查找用户当前 active 钱包订阅 (v4)。
+// 钱包订阅独立于 api_key.group_id：用户只要持有一条 wallet_balance_usd != NULL
+// 的 active 订阅，所有 group 请求都走钱包扣费。schema 上有 partial unique
+// index 保证最多一条，repo 直接 Only() 即可。
+//
+// 不命中 L1 缓存：钱包订阅频率低（一用户最多一条）且扣款会在事务里 FOR UPDATE
+// 重新查，缓存收益有限。返回 ErrSubscriptionNotFound 表示用户没钱包订阅，
+// 调用方应回退到 (user, group) 老路径或主余额检查。
+func (s *SubscriptionService) GetActiveWalletSubscription(ctx context.Context, userID int64) (*UserSubscription, error) {
+	return s.userSubRepo.GetActiveWalletByUserID(ctx, userID)
+}
+
 // ListUserSubscriptions 获取用户的所有订阅
 func (s *SubscriptionService) ListUserSubscriptions(ctx context.Context, userID int64) ([]UserSubscription, error) {
 	subs, err := s.userSubRepo.ListByUserID(ctx, userID)

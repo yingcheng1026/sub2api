@@ -132,7 +132,22 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		var subscription *service.UserSubscription
 		isSubscriptionType := apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
 
-		if isSubscriptionType && subscriptionService != nil {
+		// 钱包模式 (v4) 优先：钱包订阅独立于 api_key.group_id，只要用户持有
+		// active 钱包订阅，所有 group（包括 standard 类型）都走钱包扣费。
+		// 命中后跳过 (user, group) 老路径，由 BillingCacheService 走钱包预检。
+		if subscriptionService != nil {
+			walletSub, walletErr := subscriptionService.GetActiveWalletSubscription(
+				c.Request.Context(),
+				apiKey.User.ID,
+			)
+			if walletErr == nil && walletSub != nil {
+				subscription = walletSub
+			}
+		}
+
+		// 钱包未命中且 group 是 subscription 类型 → 走 v3 老订阅 lookup。
+		// 钱包命中时跳过此分支：钱包订阅是用户级，不需要再按 group 找一遍。
+		if subscription == nil && isSubscriptionType && subscriptionService != nil {
 			sub, subErr := subscriptionService.GetActiveSubscription(
 				c.Request.Context(),
 				apiKey.User.ID,
@@ -174,24 +189,35 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 
 			// 订阅模式：验证订阅限额
 			if subscription != nil {
-				needsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
-				if validateErr != nil {
-					code := "SUBSCRIPTION_INVALID"
-					status := 403
-					if errors.Is(validateErr, service.ErrDailyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrWeeklyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrMonthlyLimitExceeded) {
-						code = "USAGE_LIMIT_EXCEEDED"
-						status = 429
+				// 钱包模式 (v4) 跳过 group 维度 daily/weekly/monthly 限额检查 +
+				// 窗口维护：钱包是用户级共享额度，不绑 group 限额。余额检查由
+				// BillingCacheService.checkWalletEligibility 处理（→ 402）。
+				// IsExpired 检查仍要做，避免过期钱包订阅继续扣款。
+				if subscription.IsWalletMode() {
+					if subscription.IsExpired() {
+						AbortWithError(c, 403, "SUBSCRIPTION_EXPIRED", "Wallet subscription has expired")
+						return
 					}
-					AbortWithError(c, status, code, validateErr.Error())
-					return
-				}
+				} else {
+					needsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
+					if validateErr != nil {
+						code := "SUBSCRIPTION_INVALID"
+						status := 403
+						if errors.Is(validateErr, service.ErrDailyLimitExceeded) ||
+							errors.Is(validateErr, service.ErrWeeklyLimitExceeded) ||
+							errors.Is(validateErr, service.ErrMonthlyLimitExceeded) {
+							code = "USAGE_LIMIT_EXCEEDED"
+							status = 429
+						}
+						AbortWithError(c, status, code, validateErr.Error())
+						return
+					}
 
-				// 窗口维护异步化（不阻塞请求）
-				if needsMaintenance {
-					maintenanceCopy := *subscription
-					subscriptionService.DoWindowMaintenance(&maintenanceCopy)
+					// 窗口维护异步化（不阻塞请求）
+					if needsMaintenance {
+						maintenanceCopy := *subscription
+						subscriptionService.DoWindowMaintenance(&maintenanceCopy)
+					}
 				}
 			} else {
 				// 非订阅模式 或 订阅模式但 subscriptionService 未注入：回退到余额检查

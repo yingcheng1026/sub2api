@@ -12,6 +12,9 @@ type UserSubscriptionRepository interface {
 	GetByID(ctx context.Context, id int64) (*UserSubscription, error)
 	GetByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (*UserSubscription, error)
 	GetActiveByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (*UserSubscription, error)
+	// 钱包模式 (v4)：用户最多一条 active 钱包订阅（unique partial index 保证），
+	// 与具体 group 解耦，gateway 中间件先 lookup 钱包再 fallback (user, group)。
+	GetActiveWalletByUserID(ctx context.Context, userID int64) (*UserSubscription, error)
 	Update(ctx context.Context, sub *UserSubscription) error
 	Delete(ctx context.Context, id int64) error
 
