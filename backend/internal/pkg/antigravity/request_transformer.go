@@ -20,15 +20,19 @@ var (
 	sessionRandMutex sync.Mutex
 )
 
+func stableSessionIDFromText(text string) string {
+	h := sha256.Sum256([]byte(text))
+	n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+	return "-" + strconv.FormatInt(n, 10)
+}
+
 // generateStableSessionID 基于用户消息内容生成稳定的 session ID
 func generateStableSessionID(contents []GeminiContent) string {
 	// 查找第一个 user 消息的文本
 	for _, content := range contents {
 		if content.Role == "user" && len(content.Parts) > 0 {
 			if text := content.Parts[0].Text; text != "" {
-				h := sha256.Sum256([]byte(text))
-				n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
-				return "-" + strconv.FormatInt(n, 10)
+				return stableSessionIDFromText(text)
 			}
 		}
 	}
@@ -37,6 +41,66 @@ func generateStableSessionID(contents []GeminiContent) string {
 	n := sessionRand.Int63n(9_000_000_000_000_000_000)
 	sessionRandMutex.Unlock()
 	return "-" + strconv.FormatInt(n, 10)
+}
+
+func generateAntigravitySessionID(claudeReq *ClaudeRequest, contents []GeminiContent) string {
+	if claudeReq != nil && claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
+		return claudeReq.Metadata.UserID
+	}
+	if seed := extractAnthropicCacheableSeed(claudeReq); seed != "" {
+		return stableSessionIDFromText("anthropic-cache-control-v1\n" + seed)
+	}
+	return generateStableSessionID(contents)
+}
+
+func extractAnthropicCacheableSeed(claudeReq *ClaudeRequest) string {
+	if claudeReq == nil {
+		return ""
+	}
+
+	var builder strings.Builder
+	cacheableFound := false
+	_, _ = builder.WriteString("model:")
+	_, _ = builder.WriteString(claudeReq.Model)
+	_, _ = builder.WriteString("\n")
+
+	if len(claudeReq.System) > 0 {
+		var sysBlocks []SystemBlock
+		if err := json.Unmarshal(claudeReq.System, &sysBlocks); err == nil {
+			for _, block := range sysBlocks {
+				if block.Type == "text" && isEphemeralCacheControl(block.CacheControl) && strings.TrimSpace(block.Text) != "" {
+					cacheableFound = true
+					_, _ = builder.WriteString("system:")
+					_, _ = builder.WriteString(block.Text)
+					_, _ = builder.WriteString("\n")
+				}
+			}
+		}
+	}
+
+	for _, msg := range claudeReq.Messages {
+		var blocks []ContentBlock
+		if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+			continue
+		}
+		for _, block := range blocks {
+			if block.Type == "text" && isEphemeralCacheControl(block.CacheControl) && strings.TrimSpace(block.Text) != "" {
+				cacheableFound = true
+				_, _ = builder.WriteString("message:")
+				_, _ = builder.WriteString(block.Text)
+				_, _ = builder.WriteString("\n")
+			}
+		}
+	}
+
+	if !cacheableFound {
+		return ""
+	}
+	return builder.String()
+}
+
+func isEphemeralCacheControl(cacheControl *CacheControl) bool {
+	return cacheControl != nil && strings.EqualFold(cacheControl.Type, "ephemeral")
 }
 
 type TransformOptions struct {
@@ -143,8 +207,8 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 				Mode: "VALIDATED",
 			},
 		},
-		// 总是生成 sessionId，基于用户消息内容
-		SessionID: generateStableSessionID(contents),
+		// 总是生成 sessionId；优先使用 Anthropic cache_control 标记的稳定块，提升长上下文缓存命中率。
+		SessionID: generateAntigravitySessionID(claudeReq, contents),
 	}
 
 	if systemInstruction != nil {
@@ -155,11 +219,6 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	}
 	if len(tools) > 0 {
 		innerRequest.Tools = tools
-	}
-
-	// 如果提供了 metadata.user_id，优先使用
-	if claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
-		innerRequest.SessionID = claudeReq.Metadata.UserID
 	}
 
 	// 6. 包装为 v1internal 请求
