@@ -83,7 +83,7 @@ export const buildChatRedirectPath = (choice: ChatModelChoice) => {
   const params = new URLSearchParams()
   params.set('hfc_model', choice.model)
   params.set('hfc_provider', choice.provider)
-  return `/agent/inbox?${params.toString()}`
+  return `/?${params.toString()}`
 }
 
 export const buildChatFallbackURL = (code: string, choice: ChatModelChoice) => {
@@ -98,7 +98,7 @@ export const buildImageRedirectPath = (choice: ChatModelChoice) => {
   params.set('hfc_launch', 'image')
   params.set('hfc_image_model', choice.model)
   params.set('hfc_image_provider', choice.provider)
-  return `/image?${params.toString()}`
+  return `/?${params.toString()}`
 }
 
 export const buildImageFallbackURL = (code: string, choice: ChatModelChoice) => {

@@ -184,9 +184,15 @@ import TotpLoginModal from '@/components/auth/TotpLoginModal.vue'
 import Icon from '@/components/icons/Icon.vue'
 import TurnstileWidget from '@/components/TurnstileWidget.vue'
 import { useAuthStore, useAppStore } from '@/stores'
-import { getPublicSettings, isTotp2FARequired, isWeChatWebOAuthEnabled } from '@/api/auth'
+import {
+  createChatBridgeCode,
+  getPublicSettings,
+  isTotp2FARequired,
+  isWeChatWebOAuthEnabled
+} from '@/api/auth'
 import type { TotpLoginResponse } from '@/types'
 import { clearAllAffiliateReferralCodes } from '@/utils/oauthAffiliate'
+import { buildChatBridgeFallbackUrl, resolveChatReturn } from './chatReturn'
 
 const { t } = useI18n()
 
@@ -359,6 +365,10 @@ async function handleLogin(): Promise<void> {
     clearAllAffiliateReferralCodes()
     appStore.showSuccess(t('auth.loginSuccess'))
 
+    if (await redirectToChatReturn()) {
+      return
+    }
+
     // Redirect to dashboard or intended route
     const redirectTo = (router.currentRoute.value.query.redirect as string) || '/dashboard'
     await router.push(redirectTo)
@@ -402,6 +412,10 @@ async function handle2FAVerify(code: string): Promise<void> {
     clearAllAffiliateReferralCodes()
     appStore.showSuccess(t('auth.loginSuccess'))
 
+    if (await redirectToChatReturn()) {
+      return
+    }
+
     // Redirect to dashboard or intended route
     const redirectTo = (router.currentRoute.value.query.redirect as string) || '/dashboard'
     await router.push(redirectTo)
@@ -420,6 +434,18 @@ function handle2FACancel(): void {
   show2FAModal.value = false
   totpTempToken.value = ''
   totpUserEmailMasked.value = ''
+}
+
+async function redirectToChatReturn(): Promise<boolean> {
+  const chatReturn = resolveChatReturn(router.currentRoute.value.query.return)
+  if (!chatReturn) {
+    return false
+  }
+
+  const result = await createChatBridgeCode({ redirect_path: chatReturn.redirectPath })
+  window.location.href =
+    result.chat_url || buildChatBridgeFallbackUrl(result.code, chatReturn.redirectPath)
+  return true
 }
 </script>
 

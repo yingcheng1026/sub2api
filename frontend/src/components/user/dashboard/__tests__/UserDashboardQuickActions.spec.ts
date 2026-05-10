@@ -108,7 +108,7 @@ describe('UserDashboardQuickActions', () => {
     await wrapper.findAll('button').find((button) => button.text().includes('打开'))?.trigger('click')
 
     expect(createChatBridgeCode).toHaveBeenCalledWith({
-      redirect_path: '/agent/inbox?hfc_model=claude-opus-4-7&hfc_provider=openai'
+      redirect_path: '/?hfc_model=claude-opus-4-7&hfc_provider=openai'
     })
   })
 
@@ -122,7 +122,7 @@ describe('UserDashboardQuickActions', () => {
 
     expect(createChatBridgeCode).toHaveBeenCalledWith({
       redirect_path:
-        '/image?hfc_launch=image&hfc_image_model=gpt-image-1.5&hfc_image_provider=openai'
+        '/?hfc_launch=image&hfc_image_model=gpt-image-1.5&hfc_image_provider=openai'
     })
   })
 })

@@ -33,7 +33,7 @@ describe('chat model presets', () => {
       tagline: 'Deep reasoning'
     })
 
-    expect(path).toBe('/agent/inbox?hfc_model=claude-opus-4-7&hfc_provider=openai')
+    expect(path).toBe('/?hfc_model=claude-opus-4-7&hfc_provider=openai')
   })
 
   it('keeps the selected model when falling back to a locally built chat URL', () => {
@@ -47,7 +47,7 @@ describe('chat model presets', () => {
     )
 
     expect(url.origin).toBe('https://chat.handsfreeclub.com')
-    expect(url.pathname).toBe('/agent/inbox')
+    expect(url.pathname).toBe('/')
     expect(url.searchParams.get('hfc_chat_code')).toBe('code-123')
     expect(url.searchParams.get('hfc_model')).toBe('gemini-3.1-pro-preview')
     expect(url.searchParams.get('hfc_provider')).toBe('openai')
@@ -68,9 +68,7 @@ describe('chat model presets', () => {
       tagline: 'Best image quality'
     })
 
-    expect(path).toBe(
-      '/image?hfc_launch=image&hfc_image_model=gpt-image-2&hfc_image_provider=openai'
-    )
+    expect(path).toBe('/?hfc_launch=image&hfc_image_model=gpt-image-2&hfc_image_provider=openai')
   })
 
   it('keeps the selected image model when falling back to a locally built image URL', () => {
@@ -84,7 +82,7 @@ describe('chat model presets', () => {
     )
 
     expect(url.origin).toBe('https://chat.handsfreeclub.com')
-    expect(url.pathname).toBe('/image')
+    expect(url.pathname).toBe('/')
     expect(url.searchParams.get('hfc_chat_code')).toBe('code-123')
     expect(url.searchParams.get('hfc_launch')).toBe('image')
     expect(url.searchParams.get('hfc_image_model')).toBe('gpt-image-1.5')

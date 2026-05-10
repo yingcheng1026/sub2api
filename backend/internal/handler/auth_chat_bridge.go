@@ -14,7 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const defaultChatBridgeRedirectPath = "/agent/inbox"
+const defaultChatBridgeRedirectPath = "/"
 
 type chatBridgeService interface {
 	CreateLoginCode(ctx context.Context, userID int64) (*service.ChatBridgeLoginCode, error)
@@ -147,7 +147,7 @@ func sanitizeChatBridgeRedirectPath(raw string) string {
 		return defaultChatBridgeRedirectPath
 	}
 	parsed.Fragment = ""
-	if parsed.Path == "" {
+	if parsed.Path == "" || parsed.Path != defaultChatBridgeRedirectPath {
 		parsed.Path = defaultChatBridgeRedirectPath
 	}
 	return parsed.String()

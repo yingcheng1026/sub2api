@@ -182,7 +182,7 @@ export async function logout(): Promise<void> {
  * Create a one-time login bridge code for chat.handsfreeclub.com.
  */
 export async function createChatBridgeCode(
-  request: ChatBridgeCodeRequest = { redirect_path: '/agent/inbox' }
+  request: ChatBridgeCodeRequest = { redirect_path: '/' }
 ): Promise<ChatBridgeCodeResponse> {
   const { data } = await apiClient.post<ChatBridgeCodeResponse>('/chat/bridge/code', request)
   return data

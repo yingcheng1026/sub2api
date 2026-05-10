@@ -48,7 +48,7 @@ func TestAuthHandlerCreateChatBridgeCodeReturnsChatURL(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/chat/bridge/code", strings.NewReader(`{"redirect_path":"/agent/inbox"}`))
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/chat/bridge/code", strings.NewReader(`{"redirect_path":"/?hfc_model=gpt-5.4-mini"}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 42})
 
@@ -74,8 +74,9 @@ func TestAuthHandlerCreateChatBridgeCodeReturnsChatURL(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "https", chatURL.Scheme)
 	require.Equal(t, "chat.handsfreeclub.com", chatURL.Host)
-	require.Equal(t, "/agent/inbox", chatURL.Path)
+	require.Equal(t, "/", chatURL.Path)
 	require.Equal(t, "code-123", chatURL.Query().Get("hfc_chat_code"))
+	require.Equal(t, "gpt-5.4-mini", chatURL.Query().Get("hfc_model"))
 }
 
 func TestAuthHandlerExchangeChatBridgeCodeReturnsToken(t *testing.T) {
@@ -113,4 +114,10 @@ func TestAuthHandlerExchangeChatBridgeCodeReturnsToken(t *testing.T) {
 	require.Equal(t, "user-jwt", resp.Data.AccessToken)
 	require.Equal(t, 3600, resp.Data.ExpiresIn)
 	require.Equal(t, "Bearer", resp.Data.TokenType)
+}
+
+func TestSanitizeChatBridgeRedirectPathNormalizesNextChatUnsupportedPaths(t *testing.T) {
+	require.Equal(t, "/?hfc_model=gpt-5.4-mini", sanitizeChatBridgeRedirectPath("/agent/inbox?hfc_model=gpt-5.4-mini"))
+	require.Equal(t, "/?hfc_launch=image", sanitizeChatBridgeRedirectPath("/image?hfc_launch=image"))
+	require.Equal(t, "/", sanitizeChatBridgeRedirectPath("https://evil.example.com/"))
 }
