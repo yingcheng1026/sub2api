@@ -32,6 +32,9 @@ func RegisterGatewayRoutes(
 	requireGroupGoogle := middleware.RequireGroupAssignment(settingService, middleware.GoogleErrorWriter)
 
 	anthropicMessagesHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
 			h.OpenAIGateway.Messages(c)
 			return
@@ -39,6 +42,9 @@ func RegisterGatewayRoutes(
 		h.Gateway.Messages(c)
 	}
 	anthropicCountTokensHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
 			h.OpenAIGateway.CountTokens(c)
 			return
@@ -46,13 +52,25 @@ func RegisterGatewayRoutes(
 		h.Gateway.CountTokens(c)
 	}
 	responsesHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
 			h.OpenAIGateway.Responses(c)
 			return
 		}
 		h.Gateway.Responses(c)
 	}
+	responsesWebSocketHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
+		h.OpenAIGateway.ResponsesWebSocket(c)
+	}
 	chatCompletionsHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
 			h.OpenAIGateway.ChatCompletions(c)
 			return
@@ -60,6 +78,9 @@ func RegisterGatewayRoutes(
 		h.Gateway.ChatCompletions(c)
 	}
 	imagesHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
 		if getGroupPlatform(c) != service.PlatformOpenAI {
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": gin.H{
@@ -70,6 +91,18 @@ func RegisterGatewayRoutes(
 			return
 		}
 		h.OpenAIGateway.Images(c)
+	}
+	modelsHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
+		h.Gateway.Models(c)
+	}
+	usageHandler := func(c *gin.Context) {
+		if rejectKiroAutoRoute(c, cfg) {
+			return
+		}
+		h.Gateway.Usage(c)
 	}
 
 	// API网关（Claude API兼容）
@@ -84,12 +117,12 @@ func RegisterGatewayRoutes(
 		// /v1/messages: auto-route based on group platform
 		gateway.POST("/messages", anthropicMessagesHandler)
 		gateway.POST("/messages/count_tokens", anthropicCountTokensHandler)
-		gateway.GET("/models", h.Gateway.Models)
-		gateway.GET("/usage", h.Gateway.Usage)
+		gateway.GET("/models", modelsHandler)
+		gateway.GET("/usage", usageHandler)
 		// OpenAI Responses API: auto-route based on group platform
 		gateway.POST("/responses", responsesHandler)
 		gateway.POST("/responses/*subpath", responsesHandler)
-		gateway.GET("/responses", h.OpenAIGateway.ResponsesWebSocket)
+		gateway.GET("/responses", responsesWebSocketHandler)
 		// OpenAI Chat Completions API: auto-route based on group platform
 		gateway.POST("/chat/completions", chatCompletionsHandler)
 		gateway.POST("/images/generations", imagesHandler)
@@ -107,8 +140,8 @@ func RegisterGatewayRoutes(
 	{
 		anthropicGateway.POST("/messages", anthropicMessagesHandler)
 		anthropicGateway.POST("/messages/count_tokens", anthropicCountTokensHandler)
-		anthropicGateway.GET("/models", h.Gateway.Models)
-		anthropicGateway.GET("/usage", h.Gateway.Usage)
+		anthropicGateway.GET("/models", modelsHandler)
+		anthropicGateway.GET("/usage", usageHandler)
 	}
 
 	// OpenAI 显式前缀别名，适配 OpenClaw / Hermes 等按 OpenAI SDK 约定拼 /v1 的平台。
@@ -120,11 +153,11 @@ func RegisterGatewayRoutes(
 	openAIGateway.Use(gin.HandlerFunc(apiKeyAuth))
 	openAIGateway.Use(requireGroupAnthropic)
 	{
-		openAIGateway.GET("/models", h.Gateway.Models)
+		openAIGateway.GET("/models", modelsHandler)
 		openAIGateway.POST("/chat/completions", chatCompletionsHandler)
 		openAIGateway.POST("/responses", responsesHandler)
 		openAIGateway.POST("/responses/*subpath", responsesHandler)
-		openAIGateway.GET("/responses", h.OpenAIGateway.ResponsesWebSocket)
+		openAIGateway.GET("/responses", responsesWebSocketHandler)
 		openAIGateway.POST("/images/generations", imagesHandler)
 		openAIGateway.POST("/images/edits", imagesHandler)
 	}
@@ -146,13 +179,13 @@ func RegisterGatewayRoutes(
 
 	r.POST("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesHandler)
 	r.POST("/responses/*subpath", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesHandler)
-	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.OpenAIGateway.ResponsesWebSocket)
+	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesWebSocketHandler)
 	codexDirect := r.Group("/backend-api/codex")
 	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic)
 	{
 		codexDirect.POST("/responses", responsesHandler)
 		codexDirect.POST("/responses/*subpath", responsesHandler)
-		codexDirect.GET("/responses", h.OpenAIGateway.ResponsesWebSocket)
+		codexDirect.GET("/responses", responsesWebSocketHandler)
 	}
 	// OpenAI Chat Completions API（不带v1前缀的别名）— auto-route based on group platform
 	r.POST("/chat/completions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, chatCompletionsHandler)
@@ -178,6 +211,23 @@ func RegisterGatewayRoutes(
 		antigravityV1.GET("/usage", h.Gateway.Usage)
 	}
 
+	if isKiroRouteEnabled(cfg) {
+		kiroV1 := r.Group("/kiro/v1")
+		kiroV1.Use(bodyLimit)
+		kiroV1.Use(clientRequestID)
+		kiroV1.Use(opsErrorLogger)
+		kiroV1.Use(endpointNorm)
+		kiroV1.Use(gin.HandlerFunc(apiKeyAuth))
+		kiroV1.Use(requireGroupAnthropic)
+		kiroV1.Use(requireKiroGroup())
+		{
+			kiroV1.GET("/models", kiroBridgeUnavailableHandler(cfg))
+			kiroV1.POST("/messages", kiroBridgeUnavailableHandler(cfg))
+			kiroV1.POST("/responses", kiroBridgeUnavailableHandler(cfg))
+			kiroV1.POST("/chat/completions", kiroBridgeUnavailableHandler(cfg))
+		}
+	}
+
 	antigravityV1Beta := r.Group("/antigravity/v1beta")
 	antigravityV1Beta.Use(bodyLimit)
 	antigravityV1Beta.Use(clientRequestID)
@@ -201,4 +251,76 @@ func getGroupPlatform(c *gin.Context) string {
 		return ""
 	}
 	return apiKey.Group.Platform
+}
+
+func isKiroRouteEnabled(cfg *config.Config) bool {
+	return cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.RouteEnabled
+}
+
+func rejectKiroAutoRoute(c *gin.Context, cfg *config.Config) bool {
+	if getGroupPlatform(c) != service.PlatformKiro {
+		return false
+	}
+	if cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.AutoRouteOnV1 {
+		writeKiroRouteError(
+			c,
+			http.StatusNotImplemented,
+			"api_error",
+			"Kiro /v1 auto routing is not implemented in this build; use /kiro/v1 after the sidecar bridge lands",
+		)
+		return true
+	}
+	writeKiroRouteError(
+		c,
+		http.StatusNotFound,
+		"not_found_error",
+		"Kiro routing is disabled on the shared /v1 surface",
+	)
+	return true
+}
+
+func requireKiroGroup() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if getGroupPlatform(c) == service.PlatformKiro {
+			c.Next()
+			return
+		}
+		writeKiroRouteError(
+			c,
+			http.StatusForbidden,
+			"authentication_error",
+			"Kiro endpoint requires an API key assigned to a kiro group",
+		)
+		c.Abort()
+	}
+}
+
+func kiroBridgeUnavailableHandler(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if cfg == nil || cfg.Kiro.SidecarURL == "" {
+			writeKiroRouteError(
+				c,
+				http.StatusServiceUnavailable,
+				"api_error",
+				"Kiro sidecar is not configured",
+			)
+			return
+		}
+		writeKiroRouteError(
+			c,
+			http.StatusNotImplemented,
+			"api_error",
+			"Kiro sidecar bridge is not implemented in this build",
+		)
+	}
+}
+
+func writeKiroRouteError(c *gin.Context, status int, errType string, message string) {
+	c.JSON(status, gin.H{
+		"type": "error",
+		"error": gin.H{
+			"type":    errType,
+			"message": message,
+		},
+	})
 }
