@@ -1175,6 +1175,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		nil,
 		nil,
 		nil,
+		nil, // walletRepo
 		nil,
 		nil,
 		cfg,

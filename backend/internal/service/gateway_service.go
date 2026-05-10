@@ -541,6 +541,7 @@ type GatewayService struct {
 	usageBillingRepo      UsageBillingRepository
 	userRepo              UserRepository
 	userSubRepo           UserSubscriptionRepository
+	walletRepo            WalletRepository
 	userGroupRateRepo     UserGroupRateRepository
 	cache                 GatewayCache
 	digestStore           *DigestSessionStore
@@ -580,6 +581,7 @@ func NewGatewayService(
 	usageBillingRepo UsageBillingRepository,
 	userRepo UserRepository,
 	userSubRepo UserSubscriptionRepository,
+	walletRepo WalletRepository,
 	userGroupRateRepo UserGroupRateRepository,
 	cache GatewayCache,
 	cfg *config.Config,
@@ -611,6 +613,7 @@ func NewGatewayService(
 		usageBillingRepo:     usageBillingRepo,
 		userRepo:             userRepo,
 		userSubRepo:          userSubRepo,
+		walletRepo:           walletRepo,
 		userGroupRateRepo:    userGroupRateRepo,
 		cache:                cache,
 		digestStore:          digestStore,
@@ -7916,7 +7919,19 @@ func postUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *bill
 		// Subscription usage tracked by ActualCost so group rate multiplier
 		// consumes the quota at the expected speed.
 		if cost.ActualCost > 0 {
-			if err := deps.userSubRepo.IncrementUsage(billingCtx, p.Subscription.ID, cost.ActualCost); err != nil {
+			if p.Subscription != nil && p.Subscription.IsWalletMode() {
+				// 钱包模式 (v4) legacy fallback：直接调 walletRepo.Deduct。
+				// 该路径仅在 unified billing repo nil 时触发（测试或降级），生产
+				// 走 applyUsageBilling → repo.Apply → deductUsageBillingWallet。
+				if deps.walletRepo != nil {
+					if _, err := deps.walletRepo.Deduct(billingCtx, WalletDeductCommand{
+						SubscriptionID: p.Subscription.ID,
+						CostUSD:        cost.ActualCost,
+					}); err != nil && !errors.Is(err, ErrWalletInsufficient) {
+						slog.Error("wallet deduct failed", "subscription_id", p.Subscription.ID, "error", err)
+					}
+				}
+			} else if err := deps.userSubRepo.IncrementUsage(billingCtx, p.Subscription.ID, cost.ActualCost); err != nil {
 				slog.Error("increment subscription usage failed", "subscription_id", p.Subscription.ID, "error", err)
 			}
 		}
@@ -8019,9 +8034,16 @@ func buildUsageBillingCommand(requestID string, usageLog *UsageLog, p *postUsage
 	// user-specific) rate multiplier consumes subscription quota at the expected
 	// speed. TotalCost remains the raw (pre-multiplier) value; downstream guards
 	// on "> 0" still correctly skip free subscriptions (RateMultiplier == 0).
+	//
+	// 钱包模式 (v4) 与 v3 老订阅互斥：v4 走 WalletCost (FOR UPDATE 扣 wallet_balance_usd
+	// 并落 ledger 流水)，v3 走 SubscriptionCost (group 维度限额累加)。
 	if p.IsSubscriptionBill && p.Subscription != nil && p.Cost.TotalCost > 0 {
 		cmd.SubscriptionID = &p.Subscription.ID
-		cmd.SubscriptionCost = p.Cost.ActualCost
+		if p.Subscription.IsWalletMode() {
+			cmd.WalletCost = p.Cost.ActualCost
+		} else {
+			cmd.SubscriptionCost = p.Cost.ActualCost
+		}
 	} else if p.Cost.ActualCost > 0 {
 		cmd.BalanceCost = p.Cost.ActualCost
 	}
@@ -8201,6 +8223,7 @@ type billingDeps struct {
 	accountRepo          AccountRepository
 	userRepo             UserRepository
 	userSubRepo          UserSubscriptionRepository
+	walletRepo           WalletRepository
 	billingCacheService  *BillingCacheService
 	deferredService      *DeferredService
 	balanceNotifyService *BalanceNotifyService
@@ -8211,6 +8234,7 @@ func (s *GatewayService) billingDeps() *billingDeps {
 		accountRepo:          s.accountRepo,
 		userRepo:             s.userRepo,
 		userSubRepo:          s.userSubRepo,
+		walletRepo:           s.walletRepo,
 		billingCacheService:  s.billingCacheService,
 		deferredService:      s.deferredService,
 		balanceNotifyService: s.balanceNotifyService,

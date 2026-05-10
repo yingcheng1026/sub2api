@@ -318,6 +318,7 @@ type OpenAIGatewayService struct {
 	usageBillingRepo      UsageBillingRepository
 	userRepo              UserRepository
 	userSubRepo           UserSubscriptionRepository
+	walletRepo            WalletRepository
 	cache                 GatewayCache
 	cfg                   *config.Config
 	codexDetector         CodexClientRestrictionDetector
@@ -362,6 +363,7 @@ func NewOpenAIGatewayService(
 	usageBillingRepo UsageBillingRepository,
 	userRepo UserRepository,
 	userSubRepo UserSubscriptionRepository,
+	walletRepo WalletRepository,
 	userGroupRateRepo UserGroupRateRepository,
 	cache GatewayCache,
 	cfg *config.Config,
@@ -384,6 +386,7 @@ func NewOpenAIGatewayService(
 		usageBillingRepo:    usageBillingRepo,
 		userRepo:            userRepo,
 		userSubRepo:         userSubRepo,
+		walletRepo:          walletRepo,
 		cache:               cache,
 		cfg:                 cfg,
 		codexDetector:       NewOpenAICodexClientRestrictionDetector(cfg),
@@ -510,6 +513,7 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 		accountRepo:          s.accountRepo,
 		userRepo:             s.userRepo,
 		userSubRepo:          s.userSubRepo,
+		walletRepo:           s.walletRepo,
 		billingCacheService:  s.billingCacheService,
 		deferredService:      s.deferredService,
 		balanceNotifyService: s.balanceNotifyService,

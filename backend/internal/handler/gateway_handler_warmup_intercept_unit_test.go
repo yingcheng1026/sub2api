@@ -152,6 +152,7 @@ func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*servi
 		nil, // usageBillingRepo
 		nil, // userRepo
 		nil, // userSubRepo
+		nil, // walletRepo
 		nil, // userGroupRateRepo
 		nil, // cache (disable sticky)
 		nil, // cfg

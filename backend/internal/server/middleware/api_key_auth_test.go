@@ -65,10 +65,11 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
 
 		past := time.Now().Add(-48 * time.Hour)
+		groupID := group.ID
 		sub := &service.UserSubscription{
 			ID:               55,
 			UserID:           user.ID,
-			GroupID:          group.ID,
+			GroupID:          &groupID,
 			Status:           service.SubscriptionStatusActive,
 			ExpiresAt:        time.Now().Add(24 * time.Hour),
 			DailyWindowStart: &past,
@@ -141,10 +142,11 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
 
 		now := time.Now()
+		groupID := group.ID
 		sub := &service.UserSubscription{
 			ID:               55,
 			UserID:           user.ID,
-			GroupID:          group.ID,
+			GroupID:          &groupID,
 			Status:           service.SubscriptionStatusActive,
 			ExpiresAt:        now.Add(24 * time.Hour),
 			DailyWindowStart: &now,
@@ -152,7 +154,7 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		}
 		subscriptionRepo := &stubUserSubscriptionRepo{
 			getActive: func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
-				if userID != sub.UserID || groupID != sub.GroupID {
+				if sub.GroupID == nil || userID != sub.UserID || groupID != *sub.GroupID {
 					return nil, service.ErrSubscriptionNotFound
 				}
 				clone := *sub

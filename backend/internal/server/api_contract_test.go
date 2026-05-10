@@ -353,7 +353,7 @@ func TestAPIContracts(t *testing.T) {
 					{
 						ID:              501,
 						UserID:          1,
-						GroupID:         10,
+						GroupID:         ptr(int64(10)),
 						StartsAt:        deps.now,
 						ExpiresAt:       time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC), // 使用未来日期避免 normalizeSubscriptionStatus 标记为过期
 						Status:          service.SubscriptionStatusActive,

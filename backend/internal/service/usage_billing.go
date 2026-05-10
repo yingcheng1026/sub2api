@@ -39,6 +39,12 @@ type UsageBillingCommand struct {
 	APIKeyQuotaCost     float64
 	APIKeyRateLimitCost float64
 	AccountQuotaCost    float64
+
+	// WalletCost 钱包模式 (v4) 实际扣款金额。设置时表示要在事务内 FOR UPDATE
+	// 锁住 user_subscriptions 行扣减 wallet_balance_usd 并落 ledger 流水。
+	// 与 SubscriptionCost 互斥：v3 老订阅走 SubscriptionCost (group 维度限额)，
+	// v4 钱包订阅走 WalletCost。详见 design §2.2。
+	WalletCost float64
 }
 
 func (c *UsageBillingCommand) Normalize() {
@@ -56,7 +62,7 @@ func buildUsageBillingFingerprint(c *UsageBillingCommand) string {
 		return ""
 	}
 	raw := fmt.Sprintf(
-		"%d|%d|%d|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%s|%d|%0.10f|%0.10f|%0.10f|%0.10f|%0.10f",
+		"%d|%d|%d|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%s|%d|%0.10f|%0.10f|%0.10f|%0.10f|%0.10f|%0.10f",
 		c.UserID,
 		c.AccountID,
 		c.APIKeyID,
@@ -77,6 +83,7 @@ func buildUsageBillingFingerprint(c *UsageBillingCommand) string {
 		c.APIKeyQuotaCost,
 		c.APIKeyRateLimitCost,
 		c.AccountQuotaCost,
+		c.WalletCost,
 	)
 	if payloadHash := strings.TrimSpace(c.RequestPayloadHash); payloadHash != "" {
 		raw += "|" + payloadHash
@@ -114,7 +121,9 @@ type AccountQuotaState struct {
 type UsageBillingApplyResult struct {
 	Applied              bool
 	APIKeyQuotaExhausted bool
+	WalletInsufficient   bool               // v4 钱包模式扣款时余额不足（事务回滚，未落账）
 	NewBalance           *float64           // post-deduction balance (nil = no balance deduction)
+	NewWalletBalance     *float64           // post-deduction wallet balance (nil = not wallet mode)
 	QuotaState           *AccountQuotaState // post-increment quota state (nil = no quota increment)
 }
 

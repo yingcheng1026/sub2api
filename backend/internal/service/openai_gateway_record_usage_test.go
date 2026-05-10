@@ -140,6 +140,7 @@ func newOpenAIRecordUsageServiceForTest(usageRepo UsageLogRepository, userRepo U
 		nil,
 		userRepo,
 		subRepo,
+		nil, // walletRepo
 		rateRepo,
 		nil,
 		cfg,
