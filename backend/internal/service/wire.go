@@ -156,6 +156,14 @@ func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository) *S
 	return svc
 }
 
+// ProvideWalletReconcileService creates and starts WalletReconcileService.
+// 间隔 5 分钟、tolerance $0.01 — 与 design 文档一致。
+func ProvideWalletReconcileService(walletRepo WalletRepository) *WalletReconcileService {
+	svc := NewWalletReconcileService(walletRepo, 5*time.Minute, 0.01)
+	svc.Start()
+	return svc
+}
+
 // ProvideTimingWheelService creates and starts TimingWheelService
 func ProvideTimingWheelService() (*TimingWheelService, error) {
 	svc, err := NewTimingWheelService()
@@ -491,6 +499,7 @@ var ProviderSet = wire.NewSet(
 	ProvideTokenRefreshService,
 	ProvideAccountExpiryService,
 	ProvideSubscriptionExpiryService,
+	ProvideWalletReconcileService,
 	ProvideTimingWheelService,
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,

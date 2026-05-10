@@ -821,8 +821,14 @@ func (s *BillingCacheService) checkWalletEligibility(subscription *UserSubscript
 		// 调用方已保证 IsWalletMode()，但 defensive：理论不可达。
 		return nil
 	}
-	if *subscription.WalletBalanceUSD <= 0 {
+	bal := *subscription.WalletBalanceUSD
+	if bal <= 0 {
+		// 注：insufficient_total 在 handler.billingErrorDetails 统一 +1（HTTP
+		// 边界做单一计数源，避免重复）。
 		return ErrWalletInsufficient
+	}
+	if bal <= walletBalanceLowThresholdUSD {
+		recordWalletBalanceLow()
 	}
 	return nil
 }

@@ -180,6 +180,59 @@ func TestWalletRepo_Adjust_BeginTxError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestWalletRepo_ReconcileBalances_DriftDetection 验证 cached vs ledger SUM
+// 漂移检测：相等 / 容忍内 / 漂移超容忍三种情况都要正确分类。
+func TestWalletRepo_ReconcileBalances_DriftDetection(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	// 三条订阅：
+	//   1) cached=100, sum=100         → 0 漂移，不上报
+	//   2) cached=50.005, sum=50       → 0.005 < tolerance 0.01，不上报
+	//   3) cached=42, sum=40           → 2.0 > tolerance，上报
+	mock.ExpectQuery("SELECT us.id, us.wallet_balance_usd").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "wallet_balance_usd", "ledger_sum"}).
+			AddRow(int64(1), 100.0, 100.0).
+			AddRow(int64(2), 50.005, 50.0).
+			AddRow(int64(3), 42.0, 40.0))
+
+	drifts, err := repo.ReconcileBalances(context.Background(), 0.01)
+	require.NoError(t, err)
+	require.Len(t, drifts, 1, "only sub#3 should be flagged")
+	require.Equal(t, int64(3), drifts[0].SubscriptionID)
+	require.InDelta(t, 2.0, drifts[0].Drift, 0.0001)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestWalletRepo_ReconcileBalances_DefaultTolerance tolerance ≤ 0 时应回退
+// 默认值 0.01；负 tolerance 不应误把所有订阅都标为漂移。
+func TestWalletRepo_ReconcileBalances_DefaultTolerance(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("SELECT us.id, us.wallet_balance_usd").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "wallet_balance_usd", "ledger_sum"}).
+			AddRow(int64(1), 100.0, 100.0))
+
+	drifts, err := repo.ReconcileBalances(context.Background(), -1)
+	require.NoError(t, err)
+	require.Empty(t, drifts)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestWalletRepo_ReconcileBalances_QueryError SQL 错误时返回错误，不静默丢弃。
+func TestWalletRepo_ReconcileBalances_QueryError(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("SELECT us.id, us.wallet_balance_usd").
+		WillReturnError(errors.New("db down"))
+
+	_, err := repo.ReconcileBalances(context.Background(), 0.01)
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestWalletRepo_ListLedger_OrderedAndScanned(t *testing.T) {
 	repo, mock, db := newWalletRepoWithMock(t)
 	defer func() { _ = db.Close() }()

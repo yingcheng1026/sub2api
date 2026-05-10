@@ -66,6 +66,14 @@ type WalletAdjustCommand struct {
 	Notes          string
 }
 
+// WalletReconcileDrift 对账发现的单条漂移记录。
+type WalletReconcileDrift struct {
+	SubscriptionID int64
+	Cached         float64
+	LedgerSum      float64
+	Drift          float64
+}
+
 // WalletRepository 钱包扣款/审计仓储端口。
 //
 // 关键不变量：
@@ -82,4 +90,9 @@ type WalletRepository interface {
 
 	// ListLedger 查询订阅的流水（最近 N 条，倒序）。
 	ListLedger(ctx context.Context, subscriptionID int64, limit int) ([]WalletLedgerEntry, error)
+
+	// ReconcileBalances 比对所有钱包模式订阅的 cached wallet_balance_usd 与
+	// ledger 累计 SUM(delta_usd)；返回漂移 > tolerance 的条目。tolerance 推荐
+	// 0.01（DB CHECK 约束允许的浮点抖动）。
+	ReconcileBalances(ctx context.Context, tolerance float64) ([]WalletReconcileDrift, error)
 }

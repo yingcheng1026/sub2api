@@ -166,6 +166,58 @@ func (r *walletRepository) Adjust(ctx context.Context, cmd service.WalletAdjustC
 	return entry, nil
 }
 
+// ReconcileBalances 把所有钱包模式订阅的 cached wallet_balance_usd 与
+// subscription_wallet_ledger.SUM(delta_usd) 对比，返回漂移超过 tolerance 的
+// 条目。漂移 0 / -0 视为相等。
+//
+// 设计：
+//   - 所有 ledger 行的 delta 总和 = 当前 wallet_balance_usd（activation 加 +bal，
+//     usage 减 -cost，refund 再加 +bal …）；任何单调插入都不会改变这个不变量。
+//   - 用 LEFT JOIN COALESCE(SUM, 0) 兼容刚开通还没出账的订阅。
+//   - DECIMAL(20,10) 在 sql 端聚合时自动转 float64，精度足够。
+func (r *walletRepository) ReconcileBalances(ctx context.Context, tolerance float64) ([]service.WalletReconcileDrift, error) {
+	if tolerance < 0 {
+		tolerance = 0.01
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT us.id, us.wallet_balance_usd, COALESCE(SUM(l.delta_usd), 0)
+		FROM user_subscriptions us
+		LEFT JOIN subscription_wallet_ledger l ON l.subscription_id = us.id
+		WHERE us.wallet_balance_usd IS NOT NULL
+		  AND us.deleted_at IS NULL
+		GROUP BY us.id, us.wallet_balance_usd
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []service.WalletReconcileDrift
+	for rows.Next() {
+		var (
+			id        int64
+			cached    float64
+			ledgerSum float64
+		)
+		if err := rows.Scan(&id, &cached, &ledgerSum); err != nil {
+			return nil, fmt.Errorf("reconcile scan: %w", err)
+		}
+		drift := cached - ledgerSum
+		if drift < 0 {
+			drift = -drift
+		}
+		if drift > tolerance {
+			out = append(out, service.WalletReconcileDrift{
+				SubscriptionID: id,
+				Cached:         cached,
+				LedgerSum:      ledgerSum,
+				Drift:          drift,
+			})
+		}
+	}
+	return out, rows.Err()
+}
+
 func (r *walletRepository) ListLedger(ctx context.Context, subscriptionID int64, limit int) ([]service.WalletLedgerEntry, error) {
 	if subscriptionID <= 0 {
 		return nil, service.ErrWalletNotFound

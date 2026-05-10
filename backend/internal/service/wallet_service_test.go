@@ -31,6 +31,10 @@ func (f *fakeWalletRepo) ListLedger(_ context.Context, _ int64, _ int) ([]Wallet
 	return nil, nil
 }
 
+func (f *fakeWalletRepo) ReconcileBalances(_ context.Context, _ float64) ([]WalletReconcileDrift, error) {
+	return nil, nil
+}
+
 func TestWalletService_Deduct_RejectsNonPositive(t *testing.T) {
 	repo := &fakeWalletRepo{}
 	svc := NewWalletService(repo)
