@@ -2387,6 +2387,7 @@ export default {
       monthly: 'Monthly',
       noLimits: 'No limits configured',
       unlimited: 'Unlimited',
+      consumed: 'Consumed',
       resetNow: 'Resetting soon',
       windowNotActive: 'Window not active',
       resetInMinutes: 'Resets in {minutes}m',

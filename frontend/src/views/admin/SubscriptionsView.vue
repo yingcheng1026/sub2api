@@ -324,18 +324,24 @@
                 </div>
               </div>
 
-              <!-- No Limits - Unlimited badge -->
+              <!-- No Limits - 显示无限额徽章 + 累计消耗（来自 usage_logs，standard 类型必备） -->
               <div
                 v-if="
                   !row.group?.daily_limit_usd &&
                   !row.group?.weekly_limit_usd &&
                   !row.group?.monthly_limit_usd
                 "
-                class="flex items-center gap-2 rounded-lg bg-gradient-to-r from-emerald-50 to-teal-50 px-3 py-2 dark:from-emerald-900/20 dark:to-teal-900/20"
+                class="flex items-center justify-between gap-2 rounded-lg bg-gradient-to-r from-emerald-50 to-teal-50 px-3 py-2 dark:from-emerald-900/20 dark:to-teal-900/20"
               >
-                <span class="text-lg text-emerald-600 dark:text-emerald-400">∞</span>
+                <div class="flex items-center gap-2">
+                  <span class="text-lg text-emerald-600 dark:text-emerald-400">∞</span>
+                  <span class="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                    {{ t('admin.subscriptions.unlimited') }}
+                  </span>
+                </div>
                 <span class="text-xs font-medium text-emerald-700 dark:text-emerald-300">
-                  {{ t('admin.subscriptions.unlimited') }}
+                  {{ t('admin.subscriptions.consumed') }}
+                  ${{ resolveSubscriptionConsumedUSD(row).toFixed(2) }}
                 </span>
               </div>
             </div>
@@ -758,6 +764,7 @@ import Select from '@/components/common/Select.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
 import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { resolveSubscriptionConsumedUSD } from './subscriptionConsumed'
 
 const { t } = useI18n()
 const appStore = useAppStore()

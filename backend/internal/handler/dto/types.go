@@ -504,6 +504,12 @@ type UserSubscription struct {
 	WeeklyUsageUSD  float64 `json:"weekly_usage_usd"`
 	MonthlyUsageUSD float64 `json:"monthly_usage_usd"`
 
+	// ConsumedUSD 是 SubscriptionsView 等管理后台展示用的累计消耗。
+	// subscription 类型分组：等于当前账期 monthly_usage_usd。
+	// standard 类型分组：来自 usage_logs.actual_cost 累计 SUM。
+	// 老前端如果还在读 monthly_usage_usd，会继续看到原值，无破坏。
+	ConsumedUSD float64 `json:"consumed_usd"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 

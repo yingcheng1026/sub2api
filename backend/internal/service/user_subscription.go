@@ -19,6 +19,12 @@ type UserSubscription struct {
 	WeeklyUsageUSD  float64
 	MonthlyUsageUSD float64
 
+	// ConsumedUSD 是订阅展示用的累计消耗。
+	// subscription 类型分组：等于 MonthlyUsageUSD（当前账期内消耗）。
+	// standard 类型分组：来自 usage_logs.actual_cost 的累计 SUM（按 user_id + group_id）。
+	// 该字段不参与扣费判断，只供管理后台 SubscriptionsView 等只读路径使用。
+	ConsumedUSD float64
+
 	AssignedBy *int64
 	AssignedAt time.Time
 	Notes      string

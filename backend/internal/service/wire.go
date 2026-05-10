@@ -471,7 +471,7 @@ var ProviderSet = wire.NewSet(
 	NewEmailService,
 	ProvideEmailQueueService,
 	NewTurnstileService,
-	NewSubscriptionService,
+	ProvideSubscriptionService,
 	wire.Bind(new(DefaultSubscriptionAssigner), new(*SubscriptionService)),
 	ProvideConcurrencyService,
 	ProvideUserMessageQueueService,
@@ -516,6 +516,21 @@ var ProviderSet = wire.NewSet(
 // payment.EncryptionKey type instead of raw []byte, avoiding Wire ambiguity.
 func ProvidePaymentConfigService(entClient *dbent.Client, settingRepo SettingRepository, key payment.EncryptionKey) *PaymentConfigService {
 	return NewPaymentConfigService(entClient, settingRepo, []byte(key))
+}
+
+// ProvideSubscriptionService wraps NewSubscriptionService and injects a UsageLogRepository
+// so SubscriptionsView 能在 standard 类型分组下显示真实累计消耗。
+func ProvideSubscriptionService(
+	groupRepo GroupRepository,
+	userSubRepo UserSubscriptionRepository,
+	billingCacheService *BillingCacheService,
+	entClient *dbent.Client,
+	cfg *config.Config,
+	usageRepo UsageLogRepository,
+) *SubscriptionService {
+	svc := NewSubscriptionService(groupRepo, userSubRepo, billingCacheService, entClient, cfg)
+	svc.SetUsageReader(usageRepo)
+	return svc
 }
 
 // ProvideBalanceNotifyService creates BalanceNotifyService

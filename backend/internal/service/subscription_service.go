@@ -13,9 +13,17 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/dgraph-io/ristretto"
 	"golang.org/x/sync/singleflight"
 )
+
+// subscriptionUsageReader 仅用于 SubscriptionsView 展示口径下，按 user_id + group_id
+// 聚合 usage_logs.actual_cost。这是 standard 模式分组（如 paid-trial-bonus）唯一
+// 能取到累计消耗的来源——standard 模式不会把消耗写进 user_subscriptions.monthly_usage_usd。
+type subscriptionUsageReader interface {
+	GetStatsWithFilters(ctx context.Context, filters usagestats.UsageLogFilters) (*usagestats.UsageStats, error)
+}
 
 // MaxExpiresAt is the maximum allowed expiration date (year 2099)
 // This prevents time.Time JSON serialization errors (RFC 3339 requires year <= 9999)
@@ -53,6 +61,16 @@ type SubscriptionService struct {
 	subCacheJitter int // 抖动百分比
 
 	maintenanceQueue *SubscriptionMaintenanceQueue
+
+	// usageReader 可选：当注入时，List 路径会用它把 standard 类型分组的累计消耗
+	// 补回到 ConsumedUSD 字段；未注入时 ConsumedUSD 为 0，向后兼容。
+	usageReader subscriptionUsageReader
+}
+
+// SetUsageReader 注入 usage_logs 聚合读取器，用于 SubscriptionsView 展示口径。
+// 设计为 setter 而不是构造参数，避免改动 wire DI 全图。生产路径在 wire 装配阶段调用一次。
+func (s *SubscriptionService) SetUsageReader(r subscriptionUsageReader) {
+	s.usageReader = r
 }
 
 // NewSubscriptionService 创建订阅服务
@@ -642,7 +660,35 @@ func (s *SubscriptionService) List(ctx context.Context, page, pageSize int, user
 	}
 	normalizeExpiredWindows(subs)
 	normalizeSubscriptionStatus(subs)
+	s.fillConsumedUSD(ctx, subs)
 	return subs, pag, nil
+}
+
+// fillConsumedUSD 给每条订阅补 ConsumedUSD（展示用，不影响扣费）。
+//   - subscription 类型分组：当前账期消耗 = MonthlyUsageUSD（订阅模式实时维护）。
+//   - 其它分组（默认 standard）：累计消耗 = SUM(usage_logs.actual_cost) WHERE user_id+group_id。
+//
+// 当 Group 缺失或 usageReader 未注入时保持 0，避免管理后台拿到误导值。
+// 单页 N 次查询；分页通常 ≤50 行，且每次只是聚合 SQL，不打扰扣费链路。
+func (s *SubscriptionService) fillConsumedUSD(ctx context.Context, subs []UserSubscription) {
+	for i := range subs {
+		sub := &subs[i]
+		if sub.Group != nil && sub.Group.IsSubscriptionType() {
+			sub.ConsumedUSD = sub.MonthlyUsageUSD
+			continue
+		}
+		if s.usageReader == nil || sub.Group == nil {
+			continue
+		}
+		stats, err := s.usageReader.GetStatsWithFilters(ctx, usagestats.UsageLogFilters{
+			UserID:  sub.UserID,
+			GroupID: sub.GroupID,
+		})
+		if err != nil || stats == nil {
+			continue
+		}
+		sub.ConsumedUSD = stats.TotalActualCost
+	}
 }
 
 // normalizeExpiredWindows 将已过期窗口的数据清零（仅影响返回数据，不影响数据库）
