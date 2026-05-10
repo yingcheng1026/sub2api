@@ -1371,6 +1371,38 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.models_list_cache_ttl_seconds",
 		},
 		{
+			name: "kiro max concurrency positive",
+			mutate: func(c *Config) {
+				c.Kiro.Enabled = true
+				c.Kiro.MaxConcurrency = 0
+			},
+			wantErr: "kiro.max_concurrency",
+		},
+		{
+			name: "kiro request timeout positive",
+			mutate: func(c *Config) {
+				c.Kiro.Enabled = true
+				c.Kiro.RequestTimeoutSeconds = 0
+			},
+			wantErr: "kiro.request_timeout_seconds",
+		},
+		{
+			name: "kiro sidecar url must be absolute http url",
+			mutate: func(c *Config) {
+				c.Kiro.Enabled = true
+				c.Kiro.SidecarURL = "localhost:8787"
+			},
+			wantErr: "kiro.sidecar_url",
+		},
+		{
+			name: "kiro sidecar url cannot include userinfo",
+			mutate: func(c *Config) {
+				c.Kiro.Enabled = true
+				c.Kiro.SidecarURL = "http://user:pass@127.0.0.1:8787"
+			},
+			wantErr: "kiro.sidecar_url",
+		},
+		{
 			name:    "gateway scheduling sticky waiting",
 			mutate:  func(c *Config) { c.Gateway.Scheduling.StickySessionMaxWaiting = 0 },
 			wantErr: "gateway.scheduling.sticky_session_max_waiting",
