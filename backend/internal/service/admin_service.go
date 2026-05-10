@@ -2090,6 +2090,10 @@ func (s *adminServiceImpl) GetAccountsByIDs(ctx context.Context, ids []int64) ([
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if err := validateKiroAccountType(input.Platform, input.Type); err != nil {
+		return nil, err
+	}
+
 	// 绑定分组
 	groupIDs := input.GroupIDs
 	// 如果没有指定分组,自动绑定对应平台的默认分组
@@ -2104,6 +2108,10 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 				}
 			}
 		}
+	}
+
+	if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, input.Platform, groupIDs); err != nil {
+		return nil, err
 	}
 
 	// 检查混合渠道风险（除非用户已确认）
@@ -2204,6 +2212,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		account.Name = input.Name
 	}
 	if input.Type != "" {
+		if err := validateKiroAccountType(account.Platform, input.Type); err != nil {
+			return nil, err
+		}
 		account.Type = input.Type
 	}
 	if input.Notes != nil {
@@ -2291,6 +2302,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := s.validateGroupIDsExist(ctx, *input.GroupIDs); err != nil {
 			return nil, err
 		}
+		if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, account.Platform, *input.GroupIDs); err != nil {
+			return nil, err
+		}
 
 		// 检查混合渠道风险（除非用户已确认）
 		if !input.SkipMixedChannelCheck {
@@ -2345,11 +2359,12 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		}
 	}
 
+	needAccountPlatformPreload := input.GroupIDs != nil
 	needMixedChannelCheck := input.GroupIDs != nil && !input.SkipMixedChannelCheck
 
 	// 预加载账号平台信息（混合渠道检查需要）。
 	platformByID := map[int64]string{}
-	if needMixedChannelCheck {
+	if needAccountPlatformPreload {
 		accounts, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -2357,6 +2372,18 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		for _, account := range accounts {
 			if account != nil {
 				platformByID[account.ID] = account.Platform
+			}
+		}
+	}
+
+	if input.GroupIDs != nil {
+		for _, accountID := range input.AccountIDs {
+			platform := platformByID[accountID]
+			if platform == "" {
+				continue
+			}
+			if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, platform, *input.GroupIDs); err != nil {
+				return nil, err
 			}
 		}
 	}

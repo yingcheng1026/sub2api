@@ -14,6 +14,8 @@ import (
 
 type accountRepoStubForBulkUpdate struct {
 	accountRepoStub
+	createdAccount   *Account
+	updatedAccount   *Account
 	bulkUpdateErr    error
 	bulkUpdateIDs    []int64
 	bindGroupErrByID map[int64]error
@@ -40,6 +42,19 @@ type accountRepoStubForBulkUpdate struct {
 		groupID     int64
 		privacyMode string
 	}
+}
+
+func (s *accountRepoStubForBulkUpdate) Create(_ context.Context, account *Account) error {
+	s.createdAccount = account
+	if account.ID == 0 {
+		account.ID = 1
+	}
+	return nil
+}
+
+func (s *accountRepoStubForBulkUpdate) Update(_ context.Context, account *Account) error {
+	s.updatedAccount = account
+	return nil
 }
 
 func (s *accountRepoStubForBulkUpdate) BulkUpdate(_ context.Context, ids []int64, _ AccountBulkUpdate) (int64, error) {
@@ -245,4 +260,96 @@ func TestAdminServiceBulkUpdateAccounts_ResolvesIDsFromFilters(t *testing.T) {
 	require.Equal(t, 2, result.Success)
 	require.Equal(t, 0, result.Failed)
 	require.Equal(t, []int64{7, 11}, result.SuccessIDs)
+}
+
+func TestAdminService_CreateAccount_KiroRejectsNonKiroGroup(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "anthropic-group", Platform: PlatformAnthropic}},
+	}
+
+	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                  "kiro-upstream",
+		Platform:              PlatformKiro,
+		Type:                  AccountTypeAPIKey,
+		Credentials:           map[string]any{"api_key": "placeholder"},
+		GroupIDs:              []int64{10},
+		SkipMixedChannelCheck: true,
+	})
+
+	require.Nil(t, account)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "kiro accounts can only be assigned to kiro groups")
+	require.Nil(t, repo.createdAccount)
+}
+
+func TestAdminService_CreateAccount_KiroRejectsNonAPIKeyType(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "kiro-group", Platform: PlatformKiro}},
+	}
+
+	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                  "kiro-upstream",
+		Platform:              PlatformKiro,
+		Type:                  AccountTypeOAuth,
+		Credentials:           map[string]any{"access_token": "placeholder"},
+		GroupIDs:              []int64{10},
+		SkipMixedChannelCheck: true,
+	})
+
+	require.Nil(t, account)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "kiro accounts must use apikey type")
+	require.Nil(t, repo.createdAccount)
+}
+
+func TestAdminService_UpdateAccount_NonKiroRejectsKiroGroup(t *testing.T) {
+	groupIDs := []int64{10}
+	repo := &accountRepoStubForBulkUpdate{
+		getByIDAccounts: map[int64]*Account{
+			1: {ID: 1, Name: "claude-upstream", Platform: PlatformAnthropic, Type: AccountTypeOAuth},
+		},
+	}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "kiro-group", Platform: PlatformKiro}},
+	}
+
+	account, err := svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{
+		GroupIDs:              &groupIDs,
+		SkipMixedChannelCheck: true,
+	})
+
+	require.Nil(t, account)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "kiro accounts can only be assigned to kiro groups")
+	require.Nil(t, repo.updatedAccount)
+}
+
+func TestAdminService_BulkUpdateAccounts_KiroIsolationPrecheckBlocksBeforeWrite(t *testing.T) {
+	groupIDs := []int64{10}
+	repo := &accountRepoStubForBulkUpdate{
+		getByIDsAccounts: []*Account{
+			{ID: 1, Platform: PlatformKiro},
+		},
+	}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "openai-group", Platform: PlatformOpenAI}},
+	}
+
+	result, err := svc.BulkUpdateAccounts(context.Background(), &BulkUpdateAccountsInput{
+		AccountIDs:            []int64{1},
+		GroupIDs:              &groupIDs,
+		SkipMixedChannelCheck: true,
+	})
+
+	require.Nil(t, result)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "kiro accounts can only be assigned to kiro groups")
+	require.Empty(t, repo.bulkUpdateIDs)
+	require.Empty(t, repo.bindGroupsCalls)
 }
