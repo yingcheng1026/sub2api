@@ -2,6 +2,8 @@ package routes
 
 import (
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -228,14 +230,17 @@ func getGroupPlatform(c *gin.Context) string {
 }
 
 func isKiroRouteEnabled(cfg *config.Config) bool {
-	return cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.RouteEnabled
+	if cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.RouteEnabled {
+		return true
+	}
+	return envBool("KIRO_ENABLED") && envBool("KIRO_ROUTE_ENABLED")
 }
 
 func rejectKiroAutoRoute(c *gin.Context, cfg *config.Config) bool {
 	if getGroupPlatform(c) != service.PlatformKiro {
 		return false
 	}
-	if cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.AutoRouteOnV1 {
+	if kiroAutoRouteOnV1(cfg) {
 		writeKiroRouteError(
 			c,
 			http.StatusNotImplemented,
@@ -251,6 +256,22 @@ func rejectKiroAutoRoute(c *gin.Context, cfg *config.Config) bool {
 		"Kiro routing is disabled on the shared /v1 surface",
 	)
 	return true
+}
+
+func kiroAutoRouteOnV1(cfg *config.Config) bool {
+	if cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.AutoRouteOnV1 {
+		return true
+	}
+	return envBool("KIRO_ENABLED") && envBool("KIRO_AUTO_ROUTE_ON_V1")
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func requireKiroGroup() gin.HandlerFunc {

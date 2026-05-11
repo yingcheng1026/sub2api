@@ -1,0 +1,102 @@
+services:
+  kiro-sidecar:
+    image: node:24-alpine
+    container_name: hfc-kiro-sidecar
+    restart: unless-stopped
+    mem_limit: ${KIRO_SIDECAR_MEMORY_LIMIT:-512m}
+    memswap_limit: ${KIRO_SIDECAR_MEMORY_SWAP_LIMIT:-512m}
+    cpus: "${KIRO_SIDECAR_CPUS:-0.50}"
+    pids_limit: ${KIRO_SIDECAR_PIDS_LIMIT:-128}
+    working_dir: /app
+    command: ["node", "/app/server.mjs"]
+    ports:
+      - "${KIRO_SIDECAR_BIND_HOST:-127.0.0.1}:${KIRO_SIDECAR_PORT:-18787}:8787"
+    volumes:
+      - ../kiro-sidecar:/app:ro
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8787
+      - KIRO_SIDECAR_MODE=${KIRO_SIDECAR_MODE:-direct}
+      - KIRO_REGION=${KIRO_REGION:-us-east-1}
+      - KIRO_REQUEST_TIMEOUT_MS=${KIRO_REQUEST_TIMEOUT_MS:-120000}
+      - KIRO_HTTP_TIMEOUT_MS=${KIRO_HTTP_TIMEOUT_MS:-120000}
+      - KIRO_MAX_BODY_BYTES=${KIRO_MAX_BODY_BYTES:-2097152}
+      - KIRO_MODELS=${KIRO_MODELS:-claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5-20251001}
+      - TZ=${TZ:-Asia/Shanghai}
+    networks:
+      - relay-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  sub2api-kiro-canary:
+    image: ${KIRO_SUB2API_IMAGE:-hfc/sub2api:kiro-direct-45b35153a9ba-20260511-142138}
+    container_name: sub2api-kiro-canary
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    ports:
+      - "${KIRO_CANARY_BIND_HOST:-127.0.0.1}:${KIRO_CANARY_PORT:-18080}:8080"
+    volumes:
+      - ./data-kiro-canary:/app/data
+    environment:
+      - AUTO_SETUP=false
+      - DATA_DIR=/app/data
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - SERVER_MODE=${SERVER_MODE:-release}
+      - RUN_MODE=${RUN_MODE:-simple}
+      - API_KEY_AUTH_CACHE_L1_SIZE=${API_KEY_AUTH_CACHE_L1_SIZE:-0}
+      - API_KEY_AUTH_CACHE_L1_TTL_SECONDS=${API_KEY_AUTH_CACHE_L1_TTL_SECONDS:-0}
+      - API_KEY_AUTH_CACHE_L2_TTL_SECONDS=${API_KEY_AUTH_CACHE_L2_TTL_SECONDS:-0}
+      - API_KEY_AUTH_CACHE_NEGATIVE_TTL_SECONDS=${API_KEY_AUTH_CACHE_NEGATIVE_TTL_SECONDS:-0}
+      - DASHBOARD_CACHE_ENABLED=${DASHBOARD_CACHE_ENABLED:-false}
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${POSTGRES_USER:-sub2api}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - DATABASE_DBNAME=${POSTGRES_DB:-sub2api}
+      - DATABASE_SSLMODE=disable
+      - DATABASE_MAX_OPEN_CONNS=${KIRO_CANARY_DATABASE_MAX_OPEN_CONNS:-16}
+      - DATABASE_MAX_IDLE_CONNS=${KIRO_CANARY_DATABASE_MAX_IDLE_CONNS:-4}
+      - DATABASE_CONN_MAX_LIFETIME_MINUTES=${DATABASE_CONN_MAX_LIFETIME_MINUTES:-30}
+      - DATABASE_CONN_MAX_IDLE_TIME_MINUTES=${DATABASE_CONN_MAX_IDLE_TIME_MINUTES:-5}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_POOL_SIZE=${KIRO_CANARY_REDIS_POOL_SIZE:-64}
+      - REDIS_MIN_IDLE_CONNS=${KIRO_CANARY_REDIS_MIN_IDLE_CONNS:-2}
+      - REDIS_ENABLE_TLS=false
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@relay.local}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - JWT_EXPIRE_HOUR=${JWT_EXPIRE_HOUR:-24}
+      - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY is required}
+      - TZ=${TZ:-Asia/Shanghai}
+      - KIRO_ENABLED=true
+      - KIRO_ROUTE_ENABLED=true
+      - KIRO_AUTO_ROUTE_ON_V1=false
+      - KIRO_SIDECAR_URL=http://kiro-sidecar:8787
+      - KIRO_MAX_CONCURRENCY=${KIRO_MAX_CONCURRENCY:-1}
+      - KIRO_REQUEST_TIMEOUT_SECONDS=${KIRO_REQUEST_TIMEOUT_SECONDS:-120}
+    depends_on:
+      kiro-sidecar:
+        condition: service_healthy
+    networks:
+      - relay-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  relay-network:
+    external: true

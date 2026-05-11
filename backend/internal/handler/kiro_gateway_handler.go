@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -532,17 +533,25 @@ type kiroRuntimeConfig struct {
 }
 
 func (h *GatewayHandler) kiroConfig() kiroRuntimeConfig {
-	if h != nil && h.cfg != nil {
-		return kiroRuntimeConfig{
-			SidecarURL:            h.cfg.Kiro.SidecarURL,
-			MaxConcurrency:        h.cfg.Kiro.MaxConcurrency,
-			RequestTimeoutSeconds: h.cfg.Kiro.RequestTimeoutSeconds,
-		}
-	}
-	return kiroRuntimeConfig{
+	cfg := kiroRuntimeConfig{
 		MaxConcurrency:        1,
 		RequestTimeoutSeconds: int(kiroDefaultRequestTimeout / time.Second),
 	}
+	if h != nil && h.cfg != nil {
+		cfg.SidecarURL = h.cfg.Kiro.SidecarURL
+		cfg.MaxConcurrency = h.cfg.Kiro.MaxConcurrency
+		cfg.RequestTimeoutSeconds = h.cfg.Kiro.RequestTimeoutSeconds
+	}
+	if sidecarURL := strings.TrimSpace(os.Getenv("KIRO_SIDECAR_URL")); sidecarURL != "" {
+		cfg.SidecarURL = sidecarURL
+	}
+	if maxConcurrency := envPositiveInt("KIRO_MAX_CONCURRENCY"); maxConcurrency > 0 {
+		cfg.MaxConcurrency = maxConcurrency
+	}
+	if timeoutSeconds := envPositiveInt("KIRO_REQUEST_TIMEOUT_SECONDS"); timeoutSeconds > 0 {
+		cfg.RequestTimeoutSeconds = timeoutSeconds
+	}
+	return cfg
 }
 
 func (c kiroRuntimeConfig) requestTimeout() time.Duration {
@@ -550,6 +559,18 @@ func (c kiroRuntimeConfig) requestTimeout() time.Duration {
 		return kiroDefaultRequestTimeout
 	}
 	return time.Duration(c.RequestTimeoutSeconds) * time.Second
+}
+
+func envPositiveInt(key string) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
 }
 
 func validateConfiguredKiroSidecarURL(raw string) (string, error) {
