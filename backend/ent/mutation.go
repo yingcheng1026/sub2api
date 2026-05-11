@@ -105,6 +105,8 @@ type APIKeyMutation struct {
 	updated_at         *time.Time
 	deleted_at         *time.Time
 	key                *string
+	key_hash           *string
+	key_prefix         *string
 	name               *string
 	status             *string
 	last_used_at       *time.Time
@@ -434,6 +436,91 @@ func (m *APIKeyMutation) OldKey(ctx context.Context) (v string, err error) {
 // ResetKey resets all changes to the "key" field.
 func (m *APIKeyMutation) ResetKey() {
 	m.key = nil
+}
+
+// SetKeyHash sets the "key_hash" field.
+func (m *APIKeyMutation) SetKeyHash(s string) {
+	m.key_hash = &s
+}
+
+// KeyHash returns the value of the "key_hash" field in the mutation.
+func (m *APIKeyMutation) KeyHash() (r string, exists bool) {
+	v := m.key_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKeyHash returns the old "key_hash" field's value of the APIKey entity.
+// If the APIKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *APIKeyMutation) OldKeyHash(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKeyHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKeyHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKeyHash: %w", err)
+	}
+	return oldValue.KeyHash, nil
+}
+
+// ClearKeyHash clears the value of the "key_hash" field.
+func (m *APIKeyMutation) ClearKeyHash() {
+	m.key_hash = nil
+	m.clearedFields[apikey.FieldKeyHash] = struct{}{}
+}
+
+// KeyHashCleared returns if the "key_hash" field was cleared in this mutation.
+func (m *APIKeyMutation) KeyHashCleared() bool {
+	_, ok := m.clearedFields[apikey.FieldKeyHash]
+	return ok
+}
+
+// ResetKeyHash resets all changes to the "key_hash" field.
+func (m *APIKeyMutation) ResetKeyHash() {
+	m.key_hash = nil
+	delete(m.clearedFields, apikey.FieldKeyHash)
+}
+
+// SetKeyPrefix sets the "key_prefix" field.
+func (m *APIKeyMutation) SetKeyPrefix(s string) {
+	m.key_prefix = &s
+}
+
+// KeyPrefix returns the value of the "key_prefix" field in the mutation.
+func (m *APIKeyMutation) KeyPrefix() (r string, exists bool) {
+	v := m.key_prefix
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKeyPrefix returns the old "key_prefix" field's value of the APIKey entity.
+// If the APIKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *APIKeyMutation) OldKeyPrefix(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKeyPrefix is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKeyPrefix requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKeyPrefix: %w", err)
+	}
+	return oldValue.KeyPrefix, nil
+}
+
+// ResetKeyPrefix resets all changes to the "key_prefix" field.
+func (m *APIKeyMutation) ResetKeyPrefix() {
+	m.key_prefix = nil
 }
 
 // SetName sets the "name" field.
@@ -1522,7 +1609,7 @@ func (m *APIKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *APIKeyMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 25)
 	if m.created_at != nil {
 		fields = append(fields, apikey.FieldCreatedAt)
 	}
@@ -1537,6 +1624,12 @@ func (m *APIKeyMutation) Fields() []string {
 	}
 	if m.key != nil {
 		fields = append(fields, apikey.FieldKey)
+	}
+	if m.key_hash != nil {
+		fields = append(fields, apikey.FieldKeyHash)
+	}
+	if m.key_prefix != nil {
+		fields = append(fields, apikey.FieldKeyPrefix)
 	}
 	if m.name != nil {
 		fields = append(fields, apikey.FieldName)
@@ -1610,6 +1703,10 @@ func (m *APIKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.UserID()
 	case apikey.FieldKey:
 		return m.Key()
+	case apikey.FieldKeyHash:
+		return m.KeyHash()
+	case apikey.FieldKeyPrefix:
+		return m.KeyPrefix()
 	case apikey.FieldName:
 		return m.Name()
 	case apikey.FieldGroupID:
@@ -1665,6 +1762,10 @@ func (m *APIKeyMutation) OldField(ctx context.Context, name string) (ent.Value, 
 		return m.OldUserID(ctx)
 	case apikey.FieldKey:
 		return m.OldKey(ctx)
+	case apikey.FieldKeyHash:
+		return m.OldKeyHash(ctx)
+	case apikey.FieldKeyPrefix:
+		return m.OldKeyPrefix(ctx)
 	case apikey.FieldName:
 		return m.OldName(ctx)
 	case apikey.FieldGroupID:
@@ -1744,6 +1845,20 @@ func (m *APIKeyMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetKey(v)
+		return nil
+	case apikey.FieldKeyHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKeyHash(v)
+		return nil
+	case apikey.FieldKeyPrefix:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKeyPrefix(v)
 		return nil
 	case apikey.FieldName:
 		v, ok := value.(string)
@@ -2003,6 +2118,9 @@ func (m *APIKeyMutation) ClearedFields() []string {
 	if m.FieldCleared(apikey.FieldDeletedAt) {
 		fields = append(fields, apikey.FieldDeletedAt)
 	}
+	if m.FieldCleared(apikey.FieldKeyHash) {
+		fields = append(fields, apikey.FieldKeyHash)
+	}
 	if m.FieldCleared(apikey.FieldGroupID) {
 		fields = append(fields, apikey.FieldGroupID)
 	}
@@ -2043,6 +2161,9 @@ func (m *APIKeyMutation) ClearField(name string) error {
 	switch name {
 	case apikey.FieldDeletedAt:
 		m.ClearDeletedAt()
+		return nil
+	case apikey.FieldKeyHash:
+		m.ClearKeyHash()
 		return nil
 	case apikey.FieldGroupID:
 		m.ClearGroupID()
@@ -2090,6 +2211,12 @@ func (m *APIKeyMutation) ResetField(name string) error {
 		return nil
 	case apikey.FieldKey:
 		m.ResetKey()
+		return nil
+	case apikey.FieldKeyHash:
+		m.ResetKeyHash()
+		return nil
+	case apikey.FieldKeyPrefix:
+		m.ResetKeyPrefix()
 		return nil
 	case apikey.FieldName:
 		m.ResetName()
