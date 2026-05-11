@@ -398,6 +398,21 @@ func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 		require.Equal(t, "gpt-5.4-mini", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-haiku-4-5-20251001"))
 	})
 
+	t.Run("dated_haiku_override_can_raise_background_model", func(t *testing.T) {
+		apiKey := &service.APIKey{
+			Group: &service.Group{
+				MessagesDispatchModelConfig: service.OpenAIMessagesDispatchModelConfig{
+					HaikuMappedModel: "gpt-5.4",
+					ExactModelMappings: map[string]string{
+						"claude-haiku-4-5-20251001": "gpt-5.4",
+					},
+				},
+			},
+		}
+		require.Equal(t, "gpt-5.4", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-haiku-4-5-20251001"))
+		require.Equal(t, "gpt-5.4", resolveOpenAIMessagesDispatchMappedModel(apiKey, "claude-haiku-4-5"))
+	})
+
 	t.Run("returns_empty_for_non_claude_or_missing_group", func(t *testing.T) {
 		require.Empty(t, resolveOpenAIMessagesDispatchMappedModel(nil, "claude-sonnet-4-5-20250929"))
 		require.Empty(t, resolveOpenAIMessagesDispatchMappedModel(&service.APIKey{}, "claude-sonnet-4-5-20250929"))
@@ -483,6 +498,36 @@ func TestOpenAIResponses_SetsClientTransportHTTP(t *testing.T) {
 
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 	require.Equal(t, service.OpenAIClientTransportHTTP, service.GetOpenAIClientTransport(c))
+}
+
+func TestOpenAIClientCanceledAccountSelectError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("suppresses_pool_error_when_request_context_is_canceled", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+
+		require.True(t, isClientCanceledAccountSelectError(c, service.ErrNoAvailableAccounts))
+	})
+
+	t.Run("keeps_real_pool_error_when_request_context_is_active", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+		require.False(t, isClientCanceledAccountSelectError(c, service.ErrNoAvailableAccounts))
+	})
+
+	t.Run("suppresses_direct_context_canceled_error", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+		require.True(t, isClientCanceledAccountSelectError(c, context.Canceled))
+	})
 }
 
 func TestOpenAIResponses_RejectsMessageIDAsPreviousResponseID(t *testing.T) {
