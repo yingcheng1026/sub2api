@@ -103,12 +103,20 @@ func TestGatewayRoutesOpenAIImagesPathsAreRegistered(t *testing.T) {
 		require.NotEqual(t, http.StatusNotFound, w.Code, "path=%s should hit OpenAI images handler", path)
 	}
 }
-func TestGatewayRoutesKiroDedicatedRoutesAreDisabledByDefault(t *testing.T) {
+func TestGatewayRoutesKiroDedicatedRoutesRequireKiroGroupByDefault(t *testing.T) {
 	router := newGatewayRoutesTestRouter()
 
-	requireRouteNotRegistered(t, router, http.MethodGet, "/kiro/v1/models")
-	requireRouteNotRegistered(t, router, http.MethodPost, "/kiro/v1/messages")
-	requireRouteNotRegistered(t, router, http.MethodPost, "/kiro/v1/messages/count_tokens")
+	requireRouteRegistered(t, router, http.MethodGet, "/kiro/v1/models")
+	requireRouteRegistered(t, router, http.MethodPost, "/kiro/v1/messages")
+	requireRouteRegistered(t, router, http.MethodPost, "/kiro/v1/messages/count_tokens")
+
+	req := httptest.NewRequest(http.MethodGet, "/kiro/v1/models", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "kiro group")
 }
 
 func TestGatewayRoutesKiroDedicatedRoutesRequireKiroGroup(t *testing.T) {

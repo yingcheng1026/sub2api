@@ -186,22 +186,20 @@ func RegisterGatewayRoutes(
 		antigravityV1.GET("/usage", h.Gateway.Usage)
 	}
 
-	if isKiroRouteEnabled(cfg) {
-		kiroV1 := r.Group("/kiro/v1")
-		kiroV1.Use(bodyLimit)
-		kiroV1.Use(clientRequestID)
-		kiroV1.Use(opsErrorLogger)
-		kiroV1.Use(endpointNorm)
-		kiroV1.Use(gin.HandlerFunc(apiKeyAuth))
-		kiroV1.Use(requireGroupAnthropic)
-		kiroV1.Use(requireKiroGroup())
-		{
-			kiroV1.GET("/models", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroModels))
-			kiroV1.POST("/messages", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroMessages))
-			kiroV1.POST("/messages/count_tokens", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroCountTokens))
-			kiroV1.POST("/responses", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroResponses))
-			kiroV1.POST("/chat/completions", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroChatCompletions))
-		}
+	kiroV1 := r.Group("/kiro/v1")
+	kiroV1.Use(bodyLimit)
+	kiroV1.Use(clientRequestID)
+	kiroV1.Use(opsErrorLogger)
+	kiroV1.Use(endpointNorm)
+	kiroV1.Use(gin.HandlerFunc(apiKeyAuth))
+	kiroV1.Use(requireGroupAnthropic)
+	kiroV1.Use(requireKiroGroup())
+	{
+		kiroV1.GET("/models", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroModels))
+		kiroV1.POST("/messages", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroMessages))
+		kiroV1.POST("/messages/count_tokens", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroCountTokens))
+		kiroV1.POST("/responses", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroResponses))
+		kiroV1.POST("/chat/completions", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroChatCompletions))
 	}
 
 	antigravityV1Beta := r.Group("/antigravity/v1beta")
@@ -292,7 +290,7 @@ func requireKiroGroup() gin.HandlerFunc {
 
 func kiroBridgeConfiguredHandler(cfg *config.Config, next gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if cfg == nil || cfg.Kiro.SidecarURL == "" {
+		if (cfg == nil || strings.TrimSpace(cfg.Kiro.SidecarURL) == "") && strings.TrimSpace(os.Getenv("KIRO_SIDECAR_URL")) == "" {
 			writeKiroRouteError(
 				c,
 				http.StatusServiceUnavailable,
