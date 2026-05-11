@@ -1489,8 +1489,11 @@ export interface SubscriptionProgress {
 
 export interface AssignSubscriptionRequest {
   user_id: number
-  group_id: number
+  group_id?: number
   validity_days?: number
+  notes?: string
+  /** 钱包模式 (v4)：>0 时走钱包路径，group_id 忽略；用户级钱包，与具体 group 解耦 */
+  wallet_initial_usd?: number
 }
 
 export interface BulkAssignSubscriptionRequest {

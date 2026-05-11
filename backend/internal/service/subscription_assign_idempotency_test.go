@@ -134,17 +134,19 @@ func (userSubRepoNoop) BatchUpdateExpiredStatus(context.Context) (int64, error) 
 type subscriptionUserSubRepoStub struct {
 	userSubRepoNoop
 
-	nextID      int64
-	byID        map[int64]*UserSubscription
-	byUserGroup map[string]*UserSubscription
-	createCalls int
+	nextID         int64
+	byID           map[int64]*UserSubscription
+	byUserGroup    map[string]*UserSubscription
+	activeWallets  map[int64]*UserSubscription // userID → wallet sub（同时间一个用户最多一条 active）
+	createCalls    int
 }
 
 func newSubscriptionUserSubRepoStub() *subscriptionUserSubRepoStub {
 	return &subscriptionUserSubRepoStub{
-		nextID:      1,
-		byID:        make(map[int64]*UserSubscription),
-		byUserGroup: make(map[string]*UserSubscription),
+		nextID:        1,
+		byID:          make(map[int64]*UserSubscription),
+		byUserGroup:   make(map[string]*UserSubscription),
+		activeWallets: make(map[int64]*UserSubscription),
 	}
 }
 
@@ -164,6 +166,9 @@ func (s *subscriptionUserSubRepoStub) seed(sub *UserSubscription) {
 	s.byID[cp.ID] = &cp
 	if cp.GroupID != nil {
 		s.byUserGroup[s.key(cp.UserID, *cp.GroupID)] = &cp
+	}
+	if cp.WalletBalanceUSD != nil && cp.Status == SubscriptionStatusActive {
+		s.activeWallets[cp.UserID] = &cp
 	}
 }
 
@@ -196,7 +201,19 @@ func (s *subscriptionUserSubRepoStub) Create(_ context.Context, sub *UserSubscri
 	if cp.GroupID != nil {
 		s.byUserGroup[s.key(cp.UserID, *cp.GroupID)] = &cp
 	}
+	if cp.WalletBalanceUSD != nil && cp.Status == SubscriptionStatusActive {
+		s.activeWallets[cp.UserID] = &cp
+	}
 	return nil
+}
+
+func (s *subscriptionUserSubRepoStub) GetActiveWalletByUserID(_ context.Context, userID int64) (*UserSubscription, error) {
+	sub := s.activeWallets[userID]
+	if sub == nil {
+		return nil, ErrSubscriptionNotFound
+	}
+	cp := *sub
+	return &cp, nil
 }
 
 func (s *subscriptionUserSubRepoStub) GetByID(_ context.Context, id int64) (*UserSubscription, error) {

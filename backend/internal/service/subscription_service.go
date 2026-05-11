@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -143,12 +144,26 @@ func (s *SubscriptionService) InvalidateSubCache(userID, groupID int64) {
 }
 
 // AssignSubscriptionInput 分配订阅输入
+//
+// 两种模式：
+//   - Group 模式（v3）：GroupID > 0, WalletInitialUSD == nil
+//   - 钱包模式 (v4)：WalletInitialUSD != nil, GroupID 忽略；用户级，与 group 解耦
 type AssignSubscriptionInput struct {
 	UserID       int64
 	GroupID      int64
 	ValidityDays int
 	AssignedBy   int64
 	Notes        string
+
+	// WalletInitialUSD 非 nil → 走钱包路径：创建一条 group_id=NULL 的钱包订阅，
+	// 初始余额=该值（同时写入 wallet_initial_usd 和 wallet_balance_usd）。
+	// schema 上的 partial unique index 保证一个用户最多一条 active 钱包订阅。
+	WalletInitialUSD *float64
+}
+
+// IsWalletAssign 判断当前 input 是否为钱包模式分配。
+func (i *AssignSubscriptionInput) IsWalletAssign() bool {
+	return i != nil && i.WalletInitialUSD != nil
 }
 
 // AssignSubscription 分配订阅给用户（不允许重复分配）
@@ -325,6 +340,75 @@ func (s *SubscriptionService) createSubscription(ctx context.Context, input *Ass
 	return s.userSubRepo.GetByID(ctx, sub.ID)
 }
 
+// assignWalletSubscriptionWithReuse 钱包模式分配（v4）。
+//
+// 幂等：用户已有 active 钱包订阅 → 返回 ErrSubscriptionAssignConflict（管理员
+// 应改用 ExtendSubscription / 充值流程，而不是再开一条钱包）；schema 上的
+// partial unique index 也会兜底拦截。
+//
+// 不复用 group 路径的 ExistsByUserIDAndGroupID 是因为钱包订阅 group_id=NULL，
+// 复合查询用 group_id=0 拿不到；改用 GetActiveWalletByUserID。
+func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, bool, error) {
+	if input.WalletInitialUSD == nil || *input.WalletInitialUSD <= 0 {
+		return nil, false, fmt.Errorf("wallet_initial_usd must be > 0")
+	}
+
+	existing, err := s.userSubRepo.GetActiveWalletByUserID(ctx, input.UserID)
+	if err != nil && !errors.Is(err, ErrSubscriptionNotFound) {
+		return nil, false, err
+	}
+	if existing != nil {
+		return nil, false, ErrSubscriptionAssignConflict.WithMetadata(map[string]string{
+			"conflict_reason": "wallet_already_active",
+		})
+	}
+
+	sub, err := s.createWalletSubscription(ctx, input)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// 钱包订阅与 group 解耦，不需要按 (user, group) 失效订阅缓存；
+	// 中间件下次请求会直接 GetActiveWalletByUserID 命中。
+	return sub, false, nil
+}
+
+// createWalletSubscription 创建新钱包订阅（内部方法）。group_id=NULL，
+// wallet_initial_usd 和 wallet_balance_usd 都设为 input 给定的初始值。
+func (s *SubscriptionService) createWalletSubscription(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, error) {
+	validityDays := normalizeAssignValidityDays(input.ValidityDays)
+
+	now := time.Now()
+	expiresAt := now.AddDate(0, 0, validityDays)
+	if expiresAt.After(MaxExpiresAt) {
+		expiresAt = MaxExpiresAt
+	}
+
+	initial := *input.WalletInitialUSD
+	balance := initial
+	sub := &UserSubscription{
+		UserID:           input.UserID,
+		GroupID:          nil,
+		StartsAt:         now,
+		ExpiresAt:        expiresAt,
+		Status:           SubscriptionStatusActive,
+		WalletInitialUSD: &initial,
+		WalletBalanceUSD: &balance,
+		AssignedAt:       now,
+		Notes:            input.Notes,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if input.AssignedBy > 0 {
+		sub.AssignedBy = &input.AssignedBy
+	}
+
+	if err := s.userSubRepo.Create(ctx, sub); err != nil {
+		return nil, err
+	}
+	return s.userSubRepo.GetByID(ctx, sub.ID)
+}
+
 // BulkAssignSubscriptionInput 批量分配订阅输入
 type BulkAssignSubscriptionInput struct {
 	UserIDs      []int64
@@ -382,6 +466,11 @@ func (s *SubscriptionService) BulkAssignSubscription(ctx context.Context, input 
 }
 
 func (s *SubscriptionService) assignSubscriptionWithReuse(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, bool, error) {
+	// 钱包模式 (v4)：跳过 group 校验，按 user 维度幂等
+	if input.IsWalletAssign() {
+		return s.assignWalletSubscriptionWithReuse(ctx, input)
+	}
+
 	// 检查分组是否存在且为订阅类型
 	group, err := s.groupRepo.GetByID(ctx, input.GroupID)
 	if err != nil {
