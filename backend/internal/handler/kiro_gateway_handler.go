@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -26,7 +27,7 @@ import (
 )
 
 const (
-	kiroDefaultModel                = "kiro"
+	kiroDefaultModel                = "claude-sonnet-4-6"
 	kiroSidecarAPIKeyHeader         = "X-Kiro-API-Key"
 	kiroSidecarAccountIDHeader      = "X-Kiro-Account-ID"
 	kiroSidecarOriginalPathHeader   = "X-Kiro-Original-Path"
@@ -39,10 +40,9 @@ const (
 var kiroSidecarLimiters sync.Map // map[int]*semaphore.Weighted
 
 func (h *GatewayHandler) KiroModels(c *gin.Context) {
-	h.handleKiroSidecar(c, kiroSidecarRequest{
-		Method: http.MethodGet,
-		Path:   "/v1/models",
-		Model:  kiroDefaultModel,
+	c.JSON(http.StatusOK, gin.H{
+		"data":   claude.DefaultModels,
+		"object": "list",
 	})
 }
 

@@ -18,11 +18,6 @@ const openaiModels = [
   'gpt-image-1', 'gpt-image-1.5', 'gpt-image-2'
 ]
 
-const kiroModels = [
-  'kiro',
-  'kiro-coding'
-]
-
 // Anthropic Claude
 export const claudeModels = [
   'claude-3-5-sonnet-20241022', 'claude-3-5-sonnet-20240620',
@@ -35,6 +30,15 @@ export const claudeModels = [
   'claude-opus-4-6',
   'claude-opus-4-7',
   'claude-sonnet-4-6'
+]
+
+const kiroModels = [
+  'claude-opus-4-5-20251101',
+  'claude-opus-4-6',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-haiku-4-5-20251001'
 ]
 
 // Google Gemini

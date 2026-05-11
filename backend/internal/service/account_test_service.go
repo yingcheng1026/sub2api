@@ -911,7 +911,7 @@ func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *
 	ctx := c.Request.Context()
 	testModelID := strings.TrimSpace(modelID)
 	if testModelID == "" {
-		testModelID = "kiro"
+		testModelID = "claude-sonnet-4-6"
 	}
 	testPrompt := strings.TrimSpace(prompt)
 	if testPrompt == "" {

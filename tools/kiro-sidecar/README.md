@@ -15,6 +15,8 @@ If your Kiro CLI command differs, set `KIRO_CLI_ARGS_JSON`:
 KIRO_CLI_ARGS_JSON='["chat","--no-interactive","--model","{model}","{prompt}"]' node server.mjs
 ```
 
+By default, `/v1/models` exposes the same Claude-only model IDs that Sub2API exposes for Kiro accounts. Override `KIRO_MODELS` only if the production Kiro upstream catalog changes.
+
 ## Sub2API config
 
 ```yaml
@@ -37,7 +39,7 @@ curl -sS http://127.0.0.1:8787/v1/models
 curl -sS http://127.0.0.1:8787/v1/messages \
   -H 'content-type: application/json' \
   -H 'x-kiro-api-key: kiro_xxx' \
-  -d '{"model":"kiro","messages":[{"role":"user","content":"hi"}],"stream":false}'
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
 The reference sidecar intentionally does not implement streaming. It returns a normal JSON response so the admin account test and first `/kiro/v1/messages` can verify account usability before a production-grade sidecar is deployed.
