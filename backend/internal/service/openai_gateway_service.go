@@ -1284,33 +1284,6 @@ func isOpenAIAccountEligibleForRequest(account *Account, requestedModel string, 
 	return true
 }
 
-// prioritizeOpenAICompactAccounts re-orders a slice so that accounts with known
-// compact support are tried first, followed by unknown, then explicitly unsupported.
-// The relative order within each tier is preserved.
-func prioritizeOpenAICompactAccounts(accounts []*Account) []*Account {
-	if len(accounts) == 0 {
-		return nil
-	}
-	supported := make([]*Account, 0, len(accounts))
-	unknown := make([]*Account, 0, len(accounts))
-	unsupported := make([]*Account, 0, len(accounts))
-	for _, account := range accounts {
-		switch openAICompactSupportTier(account) {
-		case 2:
-			supported = append(supported, account)
-		case 1:
-			unknown = append(unknown, account)
-		default:
-			unsupported = append(unsupported, account)
-		}
-	}
-	out := make([]*Account, 0, len(accounts))
-	out = append(out, supported...)
-	out = append(out, unknown...)
-	out = append(out, unsupported...)
-	return out
-}
-
 // resolveOpenAIAccountUpstreamModelForRequest resolves the upstream model that
 // would be sent for a given request, honouring compact-only mappings when the
 // caller is on the /responses/compact path.
@@ -1420,16 +1393,15 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	return account
 }
 
-// selectBestAccount 从候选账号中选择最佳账号（优先级 + LRU）。
+// selectBestAccount 从候选账号中选择最佳账号。
 // 返回 nil 表示无可用账号。
 //
-// selectBestAccount selects the best account from candidates (priority + LRU).
+// selectBestAccount selects the best account from candidates.
 // Returns nil if no available account. The second return reports whether at
 // least one candidate was filtered out solely because it lacks compact support
 // (only meaningful when requireCompact=true).
 func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) (*Account, bool) {
-	var selected *Account
-	selectedCompactTier := -1
+	eligible := make([]*Account, 0, len(accounts))
 	compactBlocked := false
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 
@@ -1462,58 +1434,14 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			}
 		}
 
-		if selected == nil {
-			selected = fresh
-			selectedCompactTier = compactTier
-			continue
-		}
-		if requireCompact && compactTier != selectedCompactTier {
-			if compactTier > selectedCompactTier {
-				selected = fresh
-				selectedCompactTier = compactTier
-			}
-			continue
-		}
-		if s.isBetterAccount(fresh, selected) {
-			selected = fresh
-			selectedCompactTier = compactTier
-		}
+		eligible = append(eligible, fresh)
 	}
 
-	return selected, compactBlocked
-}
-
-// isBetterAccount 判断 candidate 是否比 current 更优。
-// 规则：优先级更高（数值更小）优先；同优先级时，未使用过的优先，其次是最久未使用的。
-//
-// isBetterAccount checks if candidate is better than current.
-// Rules: higher priority (lower value) wins; same priority: never used > least recently used.
-func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool {
-	// 优先级更高（数值更小）
-	// Higher priority (lower value)
-	if candidate.Priority < current.Priority {
-		return true
+	ordered := buildOpenAILoadFactorFallbackOrder(eligible, requireCompact)
+	if len(ordered) == 0 {
+		return nil, compactBlocked
 	}
-	if candidate.Priority > current.Priority {
-		return false
-	}
-
-	// 同优先级，比较最后使用时间
-	// Same priority, compare last used time
-	switch {
-	case candidate.LastUsedAt == nil && current.LastUsedAt != nil:
-		// candidate 从未使用，优先
-		return true
-	case candidate.LastUsedAt != nil && current.LastUsedAt == nil:
-		// current 从未使用，保持
-		return false
-	case candidate.LastUsedAt == nil && current.LastUsedAt == nil:
-		// 都未使用，保持
-		return false
-	default:
-		// 都使用过，选择最久未使用的
-		return candidate.LastUsedAt.Before(*current.LastUsedAt)
-	}
+	return ordered[0], compactBlocked
 }
 
 // weightedShuffleByLoadFactorWithinSortGroups 对已经按 (Priority, LoadRate) 排过序的
@@ -1604,6 +1532,68 @@ func hasNonUniformLoadFactor(seg []accountWithLoad) bool {
 		}
 	}
 	return false
+}
+
+// buildOpenAILoadFactorFallbackOrder is used when live load data is unavailable.
+// Compact support and priority remain hard tiers; LoadFactor only weights
+// accounts inside the same tier, and uniform weights keep the existing LRU order.
+func buildOpenAILoadFactorFallbackOrder(accounts []*Account, requireCompact bool) []*Account {
+	if len(accounts) == 0 {
+		return nil
+	}
+	tiers := []int{0}
+	if requireCompact {
+		tiers = []int{2, 1, 0}
+	}
+
+	out := make([]*Account, 0, len(accounts))
+	for _, tier := range tiers {
+		group := make([]*Account, 0, len(accounts))
+		for _, account := range accounts {
+			if account == nil {
+				continue
+			}
+			if requireCompact && openAICompactSupportTier(account) != tier {
+				continue
+			}
+			group = append(group, account)
+		}
+		if len(group) == 0 {
+			continue
+		}
+		sortAccountsByPriorityAndLastUsed(group, false)
+		for i := 0; i < len(group); {
+			j := i + 1
+			for j < len(group) && group[j].Priority == group[i].Priority {
+				j++
+			}
+			segment := append([]*Account(nil), group[i:j]...)
+			weightedShuffleOpenAIAccountSegmentByLoadFactor(segment)
+			out = append(out, segment...)
+			i = j
+		}
+		if !requireCompact {
+			break
+		}
+	}
+	return out
+}
+
+func weightedShuffleOpenAIAccountSegmentByLoadFactor(accounts []*Account) {
+	if len(accounts) <= 1 {
+		return
+	}
+	segment := make([]accountWithLoad, len(accounts))
+	for i, account := range accounts {
+		segment[i] = accountWithLoad{
+			account:  account,
+			loadInfo: &AccountLoadInfo{LoadRate: 0},
+		}
+	}
+	weightedShuffleSegmentByLoadFactor(segment)
+	for i := range segment {
+		accounts[i] = segment[i].account
+	}
 }
 
 // SelectAccountWithLoadAwareness selects an account with load-awareness and wait plan.
@@ -1747,11 +1737,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 
 	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
 	if err != nil {
-		ordered := append([]*Account(nil), candidates...)
-		sortAccountsByPriorityAndLastUsed(ordered, false)
-		if requireCompact {
-			ordered = prioritizeOpenAICompactAccounts(ordered)
-		}
+		ordered := buildOpenAILoadFactorFallbackOrder(candidates, requireCompact)
 		for _, acc := range ordered {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, requestedModel, false)
 			if fresh == nil {
@@ -1855,11 +1841,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 
 	// ============ Layer 3: Fallback wait ============
-	sortAccountsByPriorityAndLastUsed(candidates, false)
-	if requireCompact {
-		candidates = prioritizeOpenAICompactAccounts(candidates)
-	}
-	for _, acc := range candidates {
+	ordered := buildOpenAILoadFactorFallbackOrder(candidates, requireCompact)
+	for _, acc := range ordered {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, requestedModel, false)
 		if fresh == nil {
 			continue

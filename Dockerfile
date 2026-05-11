@@ -12,11 +12,13 @@ ARG ALPINE_IMAGE=alpine:3.21
 ARG POSTGRES_IMAGE=postgres:18-alpine
 ARG GOPROXY=https://goproxy.cn,direct
 ARG GOSUMDB=sum.golang.google.cn
+ARG FRONTEND_NODE_OPTIONS=--max-old-space-size=3072
 
 # -----------------------------------------------------------------------------
 # Stage 1: Frontend Builder
 # -----------------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS frontend-builder
+ARG FRONTEND_NODE_OPTIONS
 
 WORKDIR /app/frontend
 
@@ -29,8 +31,8 @@ RUN pnpm install --frozen-lockfile
 
 # Copy frontend source and build
 COPY frontend/ ./
-# 在低内存环境（≤2GB）显式提高 Node 堆限制，避免 vite build 的 OOM。
-RUN NODE_OPTIONS="--max-old-space-size=3072" pnpm run build
+# 默认提高 Node 堆限制避免 vite build OOM；受限环境可用 build-arg 调低或置空。
+RUN NODE_OPTIONS="${FRONTEND_NODE_OPTIONS}" pnpm run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder

@@ -606,6 +606,98 @@ func TestOpenAISelectAccountWithLoadAwareness_LoadBatchErrorFallback(t *testing.
 	}
 }
 
+func TestOpenAISelectAccountWithLoadAwareness_LoadBatchDisabledUsesLoadFactorWeighting(t *testing.T) {
+	const (
+		proID         = int64(12)
+		proLoadFactor = 15
+		plusCount     = 9
+		iterations    = 5000
+	)
+	groupID := int64(1)
+
+	accounts := buildOpenAILoadFactorFallbackAccountsForTest(proID, proLoadFactor, plusCount)
+	cfg := &config.Config{}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: accounts},
+		cache:              &stubGatewayCache{},
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+	}
+
+	hits := make(map[int64]int)
+	for i := 0; i < iterations; i++ {
+		selection, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, "", "gpt-4", nil)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		hits[selection.Account.ID]++
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	}
+
+	totalWeight := float64(proLoadFactor + plusCount)
+	require.InDelta(t, float64(proLoadFactor)/totalWeight, float64(hits[proID])/float64(iterations), 0.05)
+}
+
+func TestOpenAISelectAccountWithLoadAwareness_LoadBatchErrorFallbackUsesLoadFactorWeighting(t *testing.T) {
+	const (
+		proID         = int64(12)
+		proLoadFactor = 15
+		plusCount     = 9
+		iterations    = 5000
+	)
+	groupID := int64(1)
+
+	accounts := buildOpenAILoadFactorFallbackAccountsForTest(proID, proLoadFactor, plusCount)
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: accounts},
+		cache:              &stubGatewayCache{},
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{loadBatchErr: errors.New("load batch failed")}),
+	}
+
+	hits := make(map[int64]int)
+	for i := 0; i < iterations; i++ {
+		selection, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, "", "gpt-4", nil)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		hits[selection.Account.ID]++
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	}
+
+	totalWeight := float64(proLoadFactor + plusCount)
+	require.InDelta(t, float64(proLoadFactor)/totalWeight, float64(hits[proID])/float64(iterations), 0.05)
+}
+
+func buildOpenAILoadFactorFallbackAccountsForTest(proID int64, proLoadFactor int, plusCount int) []Account {
+	accounts := make([]Account, 0, plusCount+1)
+	for i := 0; i < plusCount; i++ {
+		accounts = append(accounts, Account{
+			ID:          int64(100 + i),
+			Platform:    PlatformOpenAI,
+			Status:      StatusActive,
+			Schedulable: true,
+			Concurrency: 1,
+			Priority:    1,
+			LoadFactor:  intPtrForTest(1),
+		})
+	}
+	accounts = append(accounts, Account{
+		ID:          proID,
+		Platform:    PlatformOpenAI,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    1,
+		LoadFactor:  intPtrForTest(proLoadFactor),
+	})
+	return accounts
+}
+
 func TestOpenAISelectAccountWithLoadAwareness_NoSlotFallbackWait(t *testing.T) {
 	groupID := int64(1)
 	repo := stubOpenAIAccountRepo{
