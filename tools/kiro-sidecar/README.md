@@ -15,7 +15,7 @@ If your Kiro CLI command differs, set `KIRO_CLI_ARGS_JSON`:
 KIRO_CLI_ARGS_JSON='["chat","--no-interactive","--model","{model}","{prompt}"]' node server.mjs
 ```
 
-By default, `/v1/models` exposes the same Claude-only model IDs that Sub2API exposes for Kiro accounts. Override `KIRO_MODELS` only if the production Kiro upstream catalog changes.
+By default, `/v1/models` exposes the same Claude-only model IDs that Sub2API exposes for Kiro accounts: Anthropic's current latest Opus, Sonnet, and Haiku IDs for Claude Code/API use. Override `KIRO_MODELS` only if the production Kiro upstream catalog changes.
 
 ## Sub2API config
 

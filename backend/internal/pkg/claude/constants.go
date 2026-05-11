@@ -154,6 +154,30 @@ var DefaultModels = []Model{
 	},
 }
 
+// LatestClaudeCodeModels is the scoped Kiro discovery list. Keep it aligned
+// with Anthropic's current Claude Code / Claude API model guidance without
+// changing the legacy Anthropic account picker defaults.
+var LatestClaudeCodeModels = []Model{
+	{
+		ID:          "claude-opus-4-7",
+		Type:        "model",
+		DisplayName: "Claude Opus 4.7",
+		CreatedAt:   "",
+	},
+	{
+		ID:          "claude-sonnet-4-6",
+		Type:        "model",
+		DisplayName: "Claude Sonnet 4.6",
+		CreatedAt:   "",
+	},
+	{
+		ID:          "claude-haiku-4-5-20251001",
+		Type:        "model",
+		DisplayName: "Claude Haiku 4.5",
+		CreatedAt:   "2025-10-01T00:00:00Z",
+	},
+}
+
 // DefaultModelIDs 返回默认模型的 ID 列表
 func DefaultModelIDs() []string {
 	ids := make([]string, len(DefaultModels))

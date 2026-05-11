@@ -8,7 +8,8 @@ const cliPath = process.env.KIRO_CLI_PATH || "kiro-cli";
 const cliArgsTemplate = parseArgsTemplate();
 const requestTimeoutMs = Number.parseInt(process.env.KIRO_REQUEST_TIMEOUT_MS || "90000", 10);
 const maxBodyBytes = Number.parseInt(process.env.KIRO_MAX_BODY_BYTES || "2097152", 10);
-const models = (process.env.KIRO_MODELS || "claude-opus-4-5-20251101,claude-opus-4-6,claude-opus-4-7,claude-sonnet-4-6,claude-sonnet-4-5-20250929,claude-haiku-4-5-20251001")
+const defaultModel = "claude-sonnet-4-6";
+const models = (process.env.KIRO_MODELS || "claude-opus-4-7,claude-sonnet-4-6,claude-haiku-4-5-20251001")
   .split(",")
   .map((v) => v.trim())
   .filter(Boolean);
@@ -221,7 +222,7 @@ async function handleInference(req, res, path) {
     sendError(res, 400, "invalid_request_error", "this reference sidecar does not implement streaming");
     return;
   }
-  const model = typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : "claude-sonnet-4-6";
+  const model = typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : defaultModel;
   const prompt = extractPrompt(payload).trim();
   if (!prompt) {
     sendError(res, 400, "invalid_request_error", "prompt/messages/input is required");

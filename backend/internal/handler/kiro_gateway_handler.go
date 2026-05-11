@@ -41,7 +41,7 @@ var kiroSidecarLimiters sync.Map // map[int]*semaphore.Weighted
 
 func (h *GatewayHandler) KiroModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"data":   claude.DefaultModels,
+		"data":   claude.LatestClaudeCodeModels,
 		"object": "list",
 	})
 }

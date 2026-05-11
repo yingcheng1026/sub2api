@@ -1915,7 +1915,7 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 
 	// Handle Kiro accounts: expose Claude-compatible model IDs to downstream users.
 	if account.Platform == service.PlatformKiro {
-		response.Success(c, claude.DefaultModels)
+		response.Success(c, claude.LatestClaudeCodeModels)
 		return
 	}
 
