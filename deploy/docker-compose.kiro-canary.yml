@@ -33,7 +33,7 @@ services:
       start_period: 10s
 
   sub2api-kiro-canary:
-    image: ${KIRO_SUB2API_IMAGE:-hfc/sub2api:kiro-direct-441c51ca52ed-20260511-151454}
+    image: ${KIRO_SUB2API_IMAGE:-hfc/sub2api:kiro-direct-3d35c366-20260511-153835}
     container_name: sub2api-kiro-canary
     restart: unless-stopped
     ulimits:
