@@ -449,6 +449,8 @@ var ProviderSet = wire.NewSet(
 	NewPromoService,
 	NewUsageService,
 	NewDashboardService,
+	NewModelRouterService,
+	wire.Bind(new(ModelRouter), new(*ModelRouterService)),
 	ProvidePricingService,
 	NewBillingService,
 	ProvideBillingCacheService,

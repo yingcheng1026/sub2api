@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -15,7 +18,22 @@ import (
 
 // NewAPIKeyAuthMiddleware 创建 API Key 认证中间件
 func NewAPIKeyAuthMiddleware(apiKeyService *service.APIKeyService, subscriptionService *service.SubscriptionService, cfg *config.Config) APIKeyAuthMiddleware {
-	return APIKeyAuthMiddleware(apiKeyAuthWithSubscription(apiKeyService, subscriptionService, cfg))
+	return NewAPIKeyAuthMiddlewareWithRouter(apiKeyService, subscriptionService, nil, nil, cfg)
+}
+
+type apiKeyAuthGroupGetter interface {
+	GetByID(ctx context.Context, id int64) (*service.Group, error)
+}
+
+// NewAPIKeyAuthMiddlewareWithRouter 创建支持钱包通用 Key 动态分组路由的认证中间件。
+func NewAPIKeyAuthMiddlewareWithRouter(
+	apiKeyService *service.APIKeyService,
+	subscriptionService *service.SubscriptionService,
+	modelRouter service.ModelRouter,
+	groupGetter apiKeyAuthGroupGetter,
+	cfg *config.Config,
+) APIKeyAuthMiddleware {
+	return APIKeyAuthMiddleware(apiKeyAuthWithSubscription(apiKeyService, subscriptionService, modelRouter, groupGetter, cfg))
 }
 
 // apiKeyAuthWithSubscription API Key认证中间件（支持订阅验证）
@@ -25,7 +43,13 @@ func NewAPIKeyAuthMiddleware(apiKeyService *service.APIKeyService, subscriptionS
 //   - 计费执行（Billing Enforcement）：过期/配额/订阅/余额检查 —— skipBilling 时整块跳过
 //
 // /v1/usage 端点只需鉴权，不需要计费执行（允许过期/配额耗尽的 Key 查询自身用量）。
-func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscriptionService *service.SubscriptionService, cfg *config.Config) gin.HandlerFunc {
+func apiKeyAuthWithSubscription(
+	apiKeyService *service.APIKeyService,
+	subscriptionService *service.SubscriptionService,
+	modelRouter service.ModelRouter,
+	groupGetter apiKeyAuthGroupGetter,
+	cfg *config.Config,
+) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// ── 1. 提取 API Key ──────────────────────────────────────────
 
@@ -130,19 +154,54 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		skipBilling := c.Request.URL.Path == "/v1/usage"
 
 		var subscription *service.UserSubscription
+		var walletSub *service.UserSubscription
+		var routedGroup *service.Group
 		isSubscriptionType := apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
 
 		// 钱包模式 (v4) 优先：钱包订阅独立于 api_key.group_id，只要用户持有
 		// active 钱包订阅，所有 group（包括 standard 类型）都走钱包扣费。
 		// 命中后跳过 (user, group) 老路径，由 BillingCacheService 走钱包预检。
 		if subscriptionService != nil {
-			walletSub, walletErr := subscriptionService.GetActiveWalletSubscription(
+			foundWalletSub, walletErr := subscriptionService.GetActiveWalletSubscription(
 				c.Request.Context(),
 				apiKey.User.ID,
 			)
-			if walletErr == nil && walletSub != nil {
+			if walletErr == nil && foundWalletSub != nil {
+				walletSub = foundWalletSub
 				subscription = walletSub
 			}
+		}
+
+		if walletSub != nil && apiKey.GroupID == nil {
+			modelName, extractErr := extractModelFromRequest(c)
+			if extractErr != nil {
+				AbortWithError(c, 400, "model_unsupported", "该模型未启用，请联系客服")
+				return
+			}
+			if modelRouter == nil || groupGetter == nil {
+				AbortWithError(c, 500, "INTERNAL_ERROR", "Model router is not configured")
+				return
+			}
+			groupID, routeErr := modelRouter.ResolveGroupID(c.Request.Context(), apiKey.User.ID, modelName)
+			if routeErr != nil {
+				if errors.Is(routeErr, service.ErrModelUnsupported) {
+					AbortWithError(c, 400, "model_unsupported", "该模型未启用，请联系客服")
+					return
+				}
+				AbortWithError(c, 500, "INTERNAL_ERROR", "Failed to route model")
+				return
+			}
+			group, groupErr := groupGetter.GetByID(c.Request.Context(), groupID)
+			if groupErr != nil || !service.IsGroupContextValid(group) {
+				AbortWithError(c, 400, "model_unsupported", "该模型未启用，请联系客服")
+				return
+			}
+			routedGroup = group
+			effectiveGroupID := group.ID
+			apiKeyCopy := *apiKey
+			apiKeyCopy.GroupID = &effectiveGroupID
+			apiKeyCopy.Group = group
+			apiKey = &apiKeyCopy
 		}
 
 		// 钱包未命中且 group 是 subscription 类型 → 走 v3 老订阅 lookup。
@@ -239,11 +298,39 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			Concurrency: apiKey.User.Concurrency,
 		})
 		c.Set(string(ContextKeyUserRole), apiKey.User.Role)
-		setGroupContext(c, apiKey.Group)
+		if routedGroup != nil {
+			setGroupContext(c, routedGroup)
+		} else {
+			setGroupContext(c, apiKey.Group)
+		}
 		_ = apiKeyService.TouchLastUsed(c.Request.Context(), apiKey.ID)
 
 		c.Next()
 	}
+}
+
+func extractModelFromRequest(c *gin.Context) (string, error) {
+	if c.Request == nil || c.Request.Body == nil {
+		return "", service.ErrModelUnsupported
+	}
+
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		return "", err
+	}
+	modelName := strings.TrimSpace(payload.Model)
+	if modelName == "" {
+		return "", service.ErrModelUnsupported
+	}
+	return modelName, nil
 }
 
 // GetAPIKeyFromContext 从上下文中获取API key

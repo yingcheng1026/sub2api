@@ -24,12 +24,13 @@ type fakeAPIKeyRepo struct {
 }
 
 type fakeGoogleSubscriptionRepo struct {
-	getActive      func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
-	updateStatus   func(ctx context.Context, subscriptionID int64, status string) error
-	activateWindow func(ctx context.Context, id int64, start time.Time) error
-	resetDaily     func(ctx context.Context, id int64, start time.Time) error
-	resetWeekly    func(ctx context.Context, id int64, start time.Time) error
-	resetMonthly   func(ctx context.Context, id int64, start time.Time) error
+	getActive       func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
+	getActiveWallet func(ctx context.Context, userID int64) (*service.UserSubscription, error)
+	updateStatus    func(ctx context.Context, subscriptionID int64, status string) error
+	activateWindow  func(ctx context.Context, id int64, start time.Time) error
+	resetDaily      func(ctx context.Context, id int64, start time.Time) error
+	resetWeekly     func(ctx context.Context, id int64, start time.Time) error
+	resetMonthly    func(ctx context.Context, id int64, start time.Time) error
 }
 
 func (f fakeAPIKeyRepo) Create(ctx context.Context, key *service.APIKey) error {
@@ -124,6 +125,9 @@ func (f fakeGoogleSubscriptionRepo) GetActiveByUserIDAndGroupID(ctx context.Cont
 	return nil, errors.New("not implemented")
 }
 func (f fakeGoogleSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
+	if f.getActiveWallet != nil {
+		return f.getActiveWallet(ctx, userID)
+	}
 	return nil, service.ErrSubscriptionNotFound
 }
 func (f fakeGoogleSubscriptionRepo) Update(ctx context.Context, sub *service.UserSubscription) error {
