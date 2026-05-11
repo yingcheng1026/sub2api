@@ -47,15 +47,19 @@ func (h *GatewayHandler) KiroModels(c *gin.Context) {
 }
 
 func (h *GatewayHandler) KiroMessages(c *gin.Context) {
-	h.handleKiroSidecarPost(c, "/v1/messages")
+	h.handleKiroSidecarPost(c, "/v1/messages", true)
+}
+
+func (h *GatewayHandler) KiroCountTokens(c *gin.Context) {
+	h.handleKiroSidecarPost(c, "/v1/messages/count_tokens", false)
 }
 
 func (h *GatewayHandler) KiroResponses(c *gin.Context) {
-	h.handleKiroSidecarPost(c, "/v1/responses")
+	h.handleKiroSidecarPost(c, "/v1/responses", true)
 }
 
 func (h *GatewayHandler) KiroChatCompletions(c *gin.Context) {
-	h.handleKiroSidecarPost(c, "/v1/chat/completions")
+	h.handleKiroSidecarPost(c, "/v1/chat/completions", true)
 }
 
 type kiroSidecarRequest struct {
@@ -70,7 +74,7 @@ type kiroSidecarRequest struct {
 	Mapping      service.ChannelMappingResult
 }
 
-func (h *GatewayHandler) handleKiroSidecarPost(c *gin.Context, sidecarPath string) {
+func (h *GatewayHandler) handleKiroSidecarPost(c *gin.Context, sidecarPath string, recordUsage bool) {
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
 		if maxErr, ok := extractMaxBytesError(err); ok {
@@ -122,7 +126,7 @@ func (h *GatewayHandler) handleKiroSidecarPost(c *gin.Context, sidecarPath strin
 		UpstreamBody: upstreamBody,
 		RequestBody:  body,
 		Stream:       stream,
-		RecordUsage:  true,
+		RecordUsage:  recordUsage,
 		Parsed:       parsed,
 		Mapping:      mapping,
 	})

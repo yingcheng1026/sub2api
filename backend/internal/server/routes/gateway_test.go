@@ -108,6 +108,7 @@ func TestGatewayRoutesKiroDedicatedRoutesAreDisabledByDefault(t *testing.T) {
 
 	requireRouteNotRegistered(t, router, http.MethodGet, "/kiro/v1/models")
 	requireRouteNotRegistered(t, router, http.MethodPost, "/kiro/v1/messages")
+	requireRouteNotRegistered(t, router, http.MethodPost, "/kiro/v1/messages/count_tokens")
 }
 
 func TestGatewayRoutesKiroDedicatedRoutesRequireKiroGroup(t *testing.T) {
@@ -123,6 +124,7 @@ func TestGatewayRoutesKiroDedicatedRoutesRequireKiroGroup(t *testing.T) {
 	router := newGatewayRoutesTestRouterWith(cfg, service.PlatformOpenAI)
 
 	requireRouteRegistered(t, router, http.MethodGet, "/kiro/v1/models")
+	requireRouteRegistered(t, router, http.MethodPost, "/kiro/v1/messages/count_tokens")
 
 	req := httptest.NewRequest(http.MethodGet, "/kiro/v1/models", nil)
 	w := httptest.NewRecorder()

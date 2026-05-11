@@ -196,6 +196,7 @@ func RegisterGatewayRoutes(
 		{
 			kiroV1.GET("/models", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroModels))
 			kiroV1.POST("/messages", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroMessages))
+			kiroV1.POST("/messages/count_tokens", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroCountTokens))
 			kiroV1.POST("/responses", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroResponses))
 			kiroV1.POST("/chat/completions", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroChatCompletions))
 		}
