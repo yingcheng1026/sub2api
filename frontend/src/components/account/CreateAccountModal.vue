@@ -1086,11 +1086,43 @@
                 : form.platform === 'gemini'
                   ? 'AIza...'
                   : form.platform === 'kiro'
-                    ? 'kiro-...'
+                    ? 'json:{...}'
                     : 'sk-ant-...'
             "
           />
           <p class="input-hint">{{ apiKeyHint }}</p>
+          <div
+            v-if="form.platform === 'kiro'"
+            class="mt-3 rounded-lg border border-cyan-200 bg-cyan-50/80 p-3 text-xs text-cyan-950 dark:border-cyan-800/60 dark:bg-cyan-950/30 dark:text-cyan-100"
+          >
+            <div class="flex items-start gap-2">
+              <Icon name="terminal" size="sm" class="mt-0.5 shrink-0 text-cyan-600 dark:text-cyan-300" />
+              <div class="min-w-0 flex-1 space-y-3">
+                <div>
+                  <p class="font-medium">Kiro 凭据获取方式</p>
+                  <p class="mt-1 text-cyan-800 dark:text-cyan-200/80">
+                    先在 Kiro 客户端登录账号，然后在终端运行对应命令；命令执行后会自动把
+                    <span class="font-mono">json:{...}</span>
+                    写入粘贴板，再直接粘贴到上面的 API Key 输入框。Base URL 保持默认即可。
+                  </p>
+                </div>
+
+                <div>
+                  <p class="mb-1 font-medium">macOS Terminal</p>
+                  <pre class="overflow-x-auto rounded-md bg-white p-2 font-mono text-[11px] leading-relaxed text-gray-800 ring-1 ring-cyan-100 dark:bg-dark-800 dark:text-gray-100 dark:ring-cyan-900/60"><code>{{ kiroMacCredentialCommand }}</code></pre>
+                </div>
+
+                <div>
+                  <p class="mb-1 font-medium">Windows PowerShell</p>
+                  <pre class="overflow-x-auto rounded-md bg-white p-2 font-mono text-[11px] leading-relaxed text-gray-800 ring-1 ring-cyan-100 dark:bg-dark-800 dark:text-gray-100 dark:ring-cyan-900/60"><code>{{ kiroWindowsCredentialCommand }}</code></pre>
+                </div>
+
+                <p class="text-cyan-800 dark:text-cyan-200/80">
+                  粘贴板里的内容就是上游 Kiro 账号凭据，请只粘贴到这里，不要发到聊天或工单里。
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Gemini API Key tier selection -->
@@ -3219,16 +3251,20 @@ const oauthStepTitle = computed(() => {
 const baseUrlHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
-  if (form.platform === 'kiro') return 'Optional local sidecar note; production forwarding uses backend kiro.sidecar_url.'
+  if (form.platform === 'kiro') return '生产转发使用后端 kiro.sidecar_url；这里保持默认本地 sidecar 地址即可。'
   return t('admin.accounts.baseUrlHint')
 })
 
 const apiKeyHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.apiKeyHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.apiKeyHint')
-  if (form.platform === 'kiro') return 'Kiro upstream API key; Sub2API forwards it only to the configured Kiro sidecar.'
+  if (form.platform === 'kiro') return '粘贴通过下方终端命令复制到剪贴板的 json:{...} Kiro 上游凭据。'
   return t('admin.accounts.apiKeyHint')
 })
+
+const kiroMacCredentialCommand = `python3 -c 'import json,os; d=json.load(open(os.path.expanduser("~/.aws/sso/cache/kiro-auth-token.json"))); print("json:"+json.dumps({"authType":"desktop","refreshToken":d["refreshToken"],"region":"us-east-1","profileArn":d.get("profileArn","")},separators=(",",":")))' | pbcopy`
+
+const kiroWindowsCredentialCommand = `$p="$env:USERPROFILE\\.aws\\sso\\cache\\kiro-auth-token.json"; $t=Get-Content $p -Raw | ConvertFrom-Json; $profileArn=if ($t.profileArn) { $t.profileArn } else { "" }; ("json:" + (@{authType="desktop"; refreshToken=$t.refreshToken; region="us-east-1"; profileArn=$profileArn} | ConvertTo-Json -Compress)) | Set-Clipboard`
 
 interface Props {
   show: boolean
