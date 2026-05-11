@@ -578,7 +578,7 @@ In Claude Code, Plan Mode cannot exit automatically. (Normally when using the na
 
 ## Kiro Support
 
-Kiro is exposed as an isolated platform and group pool. Add upstream Kiro accounts as `platform=kiro`, `type=apikey`, assign them only to Kiro groups, then use the dedicated `/kiro/v1` endpoint.
+Kiro is exposed as a Claude-compatible upstream platform. Add upstream Kiro accounts as `platform=kiro`, `type=apikey`; they may be assigned either to Kiro groups for dedicated `/kiro/v1` canaries or to Anthropic/Claude groups when you want them to participate in the normal `/v1/messages` Claude pool.
 
 | Endpoint | Purpose |
 |----------|---------|

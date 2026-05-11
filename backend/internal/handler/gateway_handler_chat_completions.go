@@ -214,7 +214,22 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
-		result, err := h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
+		var result *service.ForwardResult
+		if account.Platform == service.PlatformKiro {
+			result, err = h.forwardKiroSidecar(c, account, kiroSidecarRequest{
+				Method:       http.MethodPost,
+				Path:         "/v1/chat/completions",
+				Model:        reqModel,
+				UpstreamBody: forwardBody,
+				RequestBody:  body,
+				Stream:       reqStream,
+				RecordUsage:  true,
+				Parsed:       parsedReq,
+				Mapping:      channelMapping,
+			})
+		} else {
+			result, err = h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
+		}
 
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()

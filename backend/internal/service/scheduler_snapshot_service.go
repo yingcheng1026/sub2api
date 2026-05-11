@@ -105,7 +105,7 @@ func (s *SchedulerSnapshotService) Stop() {
 }
 
 func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]Account, bool, error) {
-	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
+	useMixed := useMixedSchedulingForPlatform(platform, hasForcePlatform)
 	mode := s.resolveMode(platform, hasForcePlatform)
 	bucket := s.bucketFor(groupID, platform, mode)
 
@@ -465,6 +465,11 @@ func (s *SchedulerSnapshotService) rebuildByAccount(ctx context.Context, account
 	if err := s.rebuildBucketsForPlatform(ctx, account.Platform, groupIDs, reason, seen); err != nil && firstErr == nil {
 		firstErr = err
 	}
+	if account.Platform == PlatformKiro {
+		if err := s.rebuildBucketsForPlatform(ctx, PlatformAnthropic, groupIDs, reason, seen); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled() {
 		if err := s.rebuildBucketsForPlatform(ctx, PlatformAnthropic, groupIDs, reason, seen); err != nil && firstErr == nil {
 			firstErr = err
@@ -481,7 +486,7 @@ func (s *SchedulerSnapshotService) rebuildByGroupIDs(ctx context.Context, groupI
 	if len(groupIDs) == 0 {
 		return nil
 	}
-	platforms := []string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity}
+	platforms := []string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformKiro}
 	var firstErr error
 	for _, platform := range platforms {
 		if err := s.rebuildBucketsForPlatform(ctx, platform, groupIDs, reason, seen); err != nil && firstErr == nil {
@@ -643,7 +648,7 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 	}
 
 	if useMixed {
-		platforms := []string{bucket.Platform, PlatformAntigravity}
+		platforms := mixedSchedulingPlatforms(bucket.Platform)
 		var accounts []Account
 		var err error
 		if groupID > 0 {
@@ -657,11 +662,11 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 			return nil, err
 		}
 		filtered := make([]Account, 0, len(accounts))
-		for _, acc := range accounts {
-			if acc.Platform == PlatformAntigravity && !acc.IsMixedSchedulingEnabled() {
+		for i := range accounts {
+			if !isAccountAllowedInMixedScheduling(&accounts[i], bucket.Platform) {
 				continue
 			}
-			filtered = append(filtered, acc)
+			filtered = append(filtered, accounts[i])
 		}
 		return filtered, nil
 	}
@@ -722,7 +727,7 @@ func (s *SchedulerSnapshotService) resolveMode(platform string, hasForcePlatform
 	if hasForcePlatform {
 		return SchedulerModeForced
 	}
-	if platform == PlatformAnthropic || platform == PlatformGemini {
+	if useMixedSchedulingForPlatform(platform, false) {
 		return SchedulerModeMixed
 	}
 	return SchedulerModeSingle

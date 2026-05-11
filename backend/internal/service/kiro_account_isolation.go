@@ -35,18 +35,29 @@ func validateKiroAccountGroupIsolation(ctx context.Context, groupRepo GroupRepos
 			return fmt.Errorf("get group %d: %w", groupID, ErrGroupNotFound)
 		}
 		groupPlatform := normalizePlatform(group.Platform)
-		if accountPlatform == PlatformKiro || groupPlatform == PlatformKiro {
-			if accountPlatform != PlatformKiro || groupPlatform != PlatformKiro {
-				return fmt.Errorf(
-					"kiro accounts can only be assigned to kiro groups: account platform %s, group %d platform %s",
-					accountPlatform,
-					groupID,
-					groupPlatform,
-				)
-			}
+		if !isKiroGroupAssignmentCompatible(accountPlatform, groupPlatform) {
+			return fmt.Errorf(
+				"kiro accounts can only be assigned to kiro or anthropic groups, and kiro groups only accept kiro accounts: account platform %s, group %d platform %s",
+				accountPlatform,
+				groupID,
+				groupPlatform,
+			)
 		}
 	}
 	return nil
+}
+
+func isKiroGroupAssignmentCompatible(accountPlatform, groupPlatform string) bool {
+	accountPlatform = normalizePlatform(accountPlatform)
+	groupPlatform = normalizePlatform(groupPlatform)
+
+	if accountPlatform == PlatformKiro {
+		return groupPlatform == PlatformKiro || groupPlatform == PlatformAnthropic
+	}
+	if groupPlatform == PlatformKiro {
+		return accountPlatform == PlatformKiro
+	}
+	return true
 }
 
 func normalizePlatform(platform string) string {

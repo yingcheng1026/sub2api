@@ -70,6 +70,10 @@ const filteredGroups = computed(() => {
       (g) => g.platform === 'antigravity' || g.platform === 'anthropic' || g.platform === 'gemini'
     )
   }
+  // Kiro 只输出 Claude-compatible 模型，可并入 Anthropic/Claude 分组。
+  if (props.platform === 'kiro') {
+    return props.groups.filter((g) => g.platform === 'kiro' || g.platform === 'anthropic')
+  }
   // 默认：只能选择同 platform 的分组
   return props.groups.filter((g) => g.platform === props.platform)
 })

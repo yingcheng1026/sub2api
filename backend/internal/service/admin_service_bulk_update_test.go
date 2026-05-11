@@ -262,7 +262,7 @@ func TestAdminServiceBulkUpdateAccounts_ResolvesIDsFromFilters(t *testing.T) {
 	require.Equal(t, []int64{7, 11}, result.SuccessIDs)
 }
 
-func TestAdminService_CreateAccount_KiroRejectsNonKiroGroup(t *testing.T) {
+func TestAdminService_CreateAccount_KiroAllowsAnthropicGroup(t *testing.T) {
 	repo := &accountRepoStubForBulkUpdate{}
 	svc := &adminServiceImpl{
 		accountRepo: repo,
@@ -278,10 +278,10 @@ func TestAdminService_CreateAccount_KiroRejectsNonKiroGroup(t *testing.T) {
 		SkipMixedChannelCheck: true,
 	})
 
-	require.Nil(t, account)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "kiro accounts can only be assigned to kiro groups")
-	require.Nil(t, repo.createdAccount)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, PlatformKiro, repo.createdAccount.Platform)
+	require.Equal(t, []int64{account.ID}, repo.bindGroupsCalls)
 }
 
 func TestAdminService_CreateAccount_KiroRejectsNonAPIKeyType(t *testing.T) {
@@ -325,7 +325,7 @@ func TestAdminService_UpdateAccount_NonKiroRejectsKiroGroup(t *testing.T) {
 
 	require.Nil(t, account)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "kiro accounts can only be assigned to kiro groups")
+	require.Contains(t, err.Error(), "kiro groups only accept kiro accounts")
 	require.Nil(t, repo.updatedAccount)
 }
 
@@ -349,7 +349,7 @@ func TestAdminService_BulkUpdateAccounts_KiroIsolationPrecheckBlocksBeforeWrite(
 
 	require.Nil(t, result)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "kiro accounts can only be assigned to kiro groups")
+	require.Contains(t, err.Error(), "kiro accounts can only be assigned to kiro or anthropic groups")
 	require.Empty(t, repo.bulkUpdateIDs)
 	require.Empty(t, repo.bindGroupsCalls)
 }

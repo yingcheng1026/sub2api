@@ -1229,6 +1229,33 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		require.Equal(t, int64(2), acc.ID, "应选择优先级最高的账户（包含启用混合调度的antigravity）")
 	})
 
+	t.Run("混合调度-Anthropic分组包含Kiro Claude兼容账户", func(t *testing.T) {
+		repo := &mockAccountRepoForPlatform{
+			accounts: []Account{
+				{ID: 1, Platform: PlatformAnthropic, Priority: 2, Status: StatusActive, Schedulable: true},
+				{ID: 2, Platform: PlatformKiro, Priority: 1, Status: StatusActive, Schedulable: true},
+			},
+			accountsByID: map[int64]*Account{},
+		}
+		for i := range repo.accounts {
+			repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+		}
+
+		cache := &mockGatewayCacheForPlatform{}
+
+		svc := &GatewayService{
+			accountRepo: repo,
+			cache:       cache,
+			cfg:         testConfig(),
+		}
+
+		acc, err := svc.selectAccountWithMixedScheduling(ctx, nil, "", "claude-sonnet-4-6", nil, PlatformAnthropic)
+		require.NoError(t, err)
+		require.NotNil(t, acc)
+		require.Equal(t, int64(2), acc.ID)
+		require.Equal(t, PlatformKiro, acc.Platform)
+	})
+
 	t.Run("混合调度-路由优先选择路由账号", func(t *testing.T) {
 		groupID := int64(30)
 		requestedModel := "claude-sonnet-4-5"

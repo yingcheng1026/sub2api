@@ -2,14 +2,22 @@
 
 ## Scope
 
-Kiro is an independent platform and account pool. Kiro accounts must be added as `platform=kiro` and `type=apikey`, then assigned only to Kiro groups. The shared `/v1` surface still rejects Kiro groups unless `kiro.auto_route_on_v1` is explicitly enabled in a later rollout.
+Kiro is a Claude-compatible upstream platform. Kiro accounts must be added as `platform=kiro` and `type=apikey`. They can stay in Kiro groups for dedicated `/kiro/v1` canaries, or be assigned to Anthropic groups to participate in the shared `/v1/messages`, `/v1/chat/completions`, and `/v1/responses` Claude pool.
 
 ## Runtime Flow
 
 ```text
 client key in Kiro group
   -> /kiro/v1/messages|responses|chat/completions
-  -> Sub2API selects only Kiro accounts in that group
+  -> Sub2API selects Kiro accounts in that group
+  -> Sub2API forwards selected upstream account api_key to Kiro sidecar as X-Kiro-API-Key
+  -> sidecar refreshes the Kiro credential and calls Kiro/AWS generateAssistantResponse
+  -> sidecar parses AWS event-stream frames into Anthropic/OpenAI-compatible output
+  -> Sub2API records usage from sidecar usage fields when present
+
+client key in Anthropic group with Kiro accounts
+  -> /v1/messages|responses|chat/completions
+  -> Sub2API includes Kiro accounts as Claude-compatible candidates
   -> Sub2API forwards selected upstream account api_key to Kiro sidecar as X-Kiro-API-Key
   -> sidecar refreshes the Kiro credential and calls Kiro/AWS generateAssistantResponse
   -> sidecar parses AWS event-stream frames into Anthropic/OpenAI-compatible output
@@ -28,10 +36,11 @@ After comparing the public Kiro implementations, the recommended production path
 | `AIClient-2-API` | Confirms Kiro headers, token refresh endpoints, provider conversion behavior. GPLv3. | Use as cross-check only; do not import code. |
 | `CLIProxyAPIPlus` | Repository was not publicly readable during review. | Excluded from implementation choice until readable. |
 
-The resulting contract keeps Kiro isolated from existing Anthropic/OpenAI/Gemini/Antigravity pools:
+The resulting contract keeps Kiro explicit while allowing Claude-pool fusion:
 
-- Kiro remains a separate `platform=kiro` group and account pool.
-- The normal `/v1` surface remains closed to Kiro while `kiro.auto_route_on_v1=false`.
+- Kiro remains `platform=kiro` at the account layer, so usage logs and upstream behavior remain attributable.
+- Kiro groups stay Kiro-only; Anthropic groups may include Kiro accounts because Kiro exposes only Claude-compatible model IDs.
+- The normal `/v1` surface still rejects API keys assigned directly to Kiro groups while `kiro.auto_route_on_v1=false`; Anthropic groups with Kiro accounts use the shared Claude pool.
 - The sidecar remains a separate local process with its own concurrency cap and can be stopped without affecting current customer traffic.
 - Direct mode supports streaming and tool calls; CLI mode remains only a non-stream fallback for canary debugging.
 
@@ -105,9 +114,9 @@ The JSON may be pasted directly, prefixed with `json:`, or base64url encoded wit
 
 1. Start the reference sidecar in `tools/kiro-sidecar`.
 2. Set `kiro.enabled=true`, `kiro.route_enabled=true`, and `kiro.sidecar_url`.
-3. Create a Kiro group.
-4. Add the upstream Kiro account as Kiro API Key and assign it to that group.
-5. Create or use an API key assigned to the Kiro group.
+3. Create a Kiro group for isolated canary, or choose an Anthropic/Claude group for fused scheduling.
+4. Add the upstream Kiro account as Kiro API Key and assign it to the chosen group.
+5. Create or use an API key assigned to that group.
 6. Test:
 
 ```bash

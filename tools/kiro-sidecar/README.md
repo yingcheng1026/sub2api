@@ -73,7 +73,7 @@ kiro:
   request_timeout_seconds: 90
 ```
 
-Keep `auto_route_on_v1: false` during canary. Test through `/kiro/v1/messages`, `/kiro/v1/chat/completions`, or `/kiro/v1/responses`.
+Keep `auto_route_on_v1: false` for Kiro-group canaries. Once a Kiro account is assigned to an Anthropic/Claude group, shared `/v1/messages`, `/v1/chat/completions`, and `/v1/responses` can select that account and forward through this sidecar.
 
 ## Smoke test
 
@@ -86,4 +86,4 @@ curl -sS http://127.0.0.1:8787/v1/messages \
   -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
-Streaming is supported for `/v1/messages`, `/v1/chat/completions`, and `/v1/responses` in direct mode. For Claude Code canaries, use `/kiro/v1/messages` with a Kiro-group API key first, then only enable wider routing after health, account failover, and usage logs look clean.
+Streaming is supported for `/v1/messages`, `/v1/chat/completions`, and `/v1/responses` in direct mode. For Claude Code canaries, use `/kiro/v1/messages` with a Kiro-group API key first, or attach the Kiro account to an Anthropic group when you want it fused into the shared Claude pool.
