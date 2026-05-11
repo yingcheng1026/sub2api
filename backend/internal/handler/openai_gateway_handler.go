@@ -585,6 +585,20 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
+	contextRisk := analyzeOpenAIMessagesContextRisk(body)
+	longContextGuardrailInjected := false
+	if service.NewClaudeCodeValidator().ValidateUserAgent(c.GetHeader("User-Agent")) {
+		guardedBody, injected, guardErr := applyOpenAIMessagesContextGuardrail(body, contextRisk)
+		if guardErr != nil {
+			reqLog.Warn("openai_messages.long_context_guardrail_skipped", zap.Error(guardErr))
+		} else if injected {
+			body = guardedBody
+			longContextGuardrailInjected = true
+			c.Header("X-HFC-Long-Context-Guardrail", "file-navigation")
+			reqLog.Info("openai_messages.long_context_guardrail_injected", contextRisk.zapFields(0, true)...)
+		}
+	}
+
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
@@ -790,6 +804,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
 		} else {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, nil)
+		}
+
+		promptTotalTokens := result.Usage.InputTokens + result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
+		if contextRisk.shouldLog(promptTotalTokens, longContextGuardrailInjected) {
+			reqLog.Warn("openai_messages.long_context_file_navigation_risk", contextRisk.zapFields(promptTotalTokens, longContextGuardrailInjected)...)
 		}
 
 		userAgent := c.GetHeader("User-Agent")
