@@ -1414,6 +1414,10 @@ export interface UserSubscription {
   daily_usage_usd: number
   weekly_usage_usd: number
   monthly_usage_usd: number
+  // standard 类型分组的累计消耗（来自 usage_logs 聚合）；
+  // subscription 类型分组等于当前账期 monthly_usage_usd。
+  // 后端 2026-05 起返回；老缓存可能为 undefined，前端读取时需兜底。
+  consumed_usd?: number
   daily_window_start: string | null
   weekly_window_start: string | null
   monthly_window_start: string | null
