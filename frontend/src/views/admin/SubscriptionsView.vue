@@ -213,6 +213,21 @@
 
           <template #cell-usage="{ row }">
             <div class="min-w-[280px] space-y-2">
+              <!-- Standard 类型（按次扣 users.balance）：monthly_usage_usd 永远 0，
+                   真正的累计消耗在 usage_logs 里。后端聚合后填进 consumed_usd。
+                   独立显示一行，避免被 limit 进度条遮蔽。 -->
+              <div
+                v-if="row.group?.subscription_type === 'standard'"
+                class="flex items-center justify-between gap-2 rounded-lg bg-sky-50 px-3 py-2 dark:bg-sky-900/20"
+              >
+                <span class="text-xs font-medium text-sky-700 dark:text-sky-300">
+                  {{ t('admin.subscriptions.consumed') }}
+                </span>
+                <span class="text-xs font-semibold text-sky-700 dark:text-sky-300">
+                  ${{ resolveSubscriptionConsumedUSD(row).toFixed(2) }}
+                </span>
+              </div>
+
               <!-- Daily Usage -->
               <div v-if="row.group?.daily_limit_usd" class="usage-row">
                 <div class="flex items-center gap-2">
