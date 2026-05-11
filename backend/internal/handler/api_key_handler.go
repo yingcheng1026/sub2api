@@ -19,13 +19,19 @@ import (
 
 // APIKeyHandler handles API key-related requests
 type APIKeyHandler struct {
-	apiKeyService *service.APIKeyService
+	apiKeyService      *service.APIKeyService
+	modelRouteProvider service.ModelRouteProvider
 }
 
 // NewAPIKeyHandler creates a new APIKeyHandler
 func NewAPIKeyHandler(apiKeyService *service.APIKeyService) *APIKeyHandler {
+	return NewAPIKeyHandlerWithModelRoutes(apiKeyService, nil)
+}
+
+func NewAPIKeyHandlerWithModelRoutes(apiKeyService *service.APIKeyService, modelRouteProvider service.ModelRouteProvider) *APIKeyHandler {
 	return &APIKeyHandler{
-		apiKeyService: apiKeyService,
+		apiKeyService:      apiKeyService,
+		modelRouteProvider: modelRouteProvider,
 	}
 }
 
@@ -330,4 +336,26 @@ func (h *APIKeyHandler) GetUserGroupRates(c *gin.Context) {
 	}
 
 	response.Success(c, rates)
+}
+
+// GetWalletModelRoutes returns the model-name routes available to wallet universal keys.
+// GET /api/v1/groups/model-routes
+func (h *APIKeyHandler) GetWalletModelRoutes(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	routes := service.DefaultModelRoutes()
+	if h.modelRouteProvider != nil {
+		routes = h.modelRouteProvider.Routes()
+	}
+
+	out, err := h.apiKeyService.GetWalletModelRoutes(c.Request.Context(), subject.UserID, routes)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, out)
 }

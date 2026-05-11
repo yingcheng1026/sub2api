@@ -124,6 +124,16 @@ type APIKeyQuotaUsageState struct {
 	Status    string
 }
 
+type WalletModelRouteInfo struct {
+	Pattern                 string  `json:"pattern"`
+	ExampleModel            string  `json:"example_model"`
+	GroupID                 int64   `json:"group_id"`
+	GroupName               string  `json:"group_name"`
+	Platform                string  `json:"platform"`
+	RateMultiplier          float64 `json:"rate_multiplier"`
+	EffectiveRateMultiplier float64 `json:"effective_rate_multiplier"`
+}
+
 // APIKeyCache defines cache operations for API key service
 type APIKeyCache interface {
 	GetCreateAttemptCount(ctx context.Context, userID int64) (int, error)
@@ -466,6 +476,50 @@ func (s *APIKeyService) EnsureWalletUniversalKey(ctx context.Context, userID int
 		return nil, false, err
 	}
 	return key, true, nil
+}
+
+func (s *APIKeyService) GetWalletModelRoutes(ctx context.Context, userID int64, modelRoutes []ModelRoute) ([]WalletModelRouteInfo, error) {
+	if len(modelRoutes) == 0 {
+		modelRoutes = DefaultModelRoutes()
+	}
+
+	groups, err := s.groupRepo.ListActive(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list active groups: %w", err)
+	}
+	groupsByName := make(map[string]Group, len(groups))
+	for _, group := range groups {
+		if group.Status == StatusActive {
+			groupsByName[group.Name] = group
+		}
+	}
+
+	userRates, err := s.GetUserGroupRates(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]WalletModelRouteInfo, 0, len(modelRoutes))
+	for _, route := range modelRoutes {
+		group, ok := groupsByName[route.GroupName]
+		if !ok {
+			continue
+		}
+		effectiveRate := group.RateMultiplier
+		if override, ok := userRates[group.ID]; ok {
+			effectiveRate = override
+		}
+		out = append(out, WalletModelRouteInfo{
+			Pattern:                 route.Pattern,
+			ExampleModel:            route.ExampleModel,
+			GroupID:                 group.ID,
+			GroupName:               group.Name,
+			Platform:                group.Platform,
+			RateMultiplier:          group.RateMultiplier,
+			EffectiveRateMultiplier: effectiveRate,
+		})
+	}
+	return out, nil
 }
 
 // DefaultChatAPIKey returns the newest usable active key for a user.

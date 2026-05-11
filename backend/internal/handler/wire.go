@@ -130,7 +130,7 @@ var ProviderSet = wire.NewSet(
 	// Top-level handlers
 	NewAuthHandler,
 	NewUserHandler,
-	NewAPIKeyHandler,
+	NewAPIKeyHandlerWithModelRoutes,
 	NewUsageHandler,
 	NewRedeemHandler,
 	NewSubscriptionHandler,

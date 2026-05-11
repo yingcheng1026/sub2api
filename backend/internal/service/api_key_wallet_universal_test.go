@@ -85,3 +85,56 @@ func TestAPIKeyServiceEnsureWalletUniversalKeyReusesExistingActiveUniversalKey(t
 	require.Equal(t, 1, repo.listCalls)
 	require.Equal(t, 0, repo.createCalls)
 }
+
+type walletModelRouteGroupRepoStub struct {
+	GroupRepository
+
+	groups []Group
+}
+
+func (s walletModelRouteGroupRepoStub) ListActive(context.Context) ([]Group, error) {
+	out := make([]Group, len(s.groups))
+	copy(out, s.groups)
+	return out, nil
+}
+
+type walletModelRouteUserRateRepoStub struct {
+	UserGroupRateRepository
+
+	rates map[int64]float64
+}
+
+func (s walletModelRouteUserRateRepoStub) GetByUserID(context.Context, int64) (map[int64]float64, error) {
+	out := make(map[int64]float64, len(s.rates))
+	for groupID, rate := range s.rates {
+		out[groupID] = rate
+	}
+	return out, nil
+}
+
+func TestAPIKeyServiceGetWalletModelRoutesUsesConfiguredRoutesAndGroups(t *testing.T) {
+	groupRepo := walletModelRouteGroupRepoStub{groups: []Group{
+		{ID: 2, Name: "gpt-5", Platform: PlatformOpenAI, Status: StatusActive, RateMultiplier: 1.0},
+		{ID: 3, Name: "claude-sonnet", Platform: PlatformAnthropic, Status: StatusActive, RateMultiplier: 1.5},
+	}}
+	rateRepo := walletModelRouteUserRateRepoStub{rates: map[int64]float64{3: 1.25}}
+	svc := NewAPIKeyService(nil, nil, groupRepo, nil, rateRepo, nil, &config.Config{})
+
+	routes, err := svc.GetWalletModelRoutes(context.Background(), 42, []ModelRoute{
+		{Pattern: "claude-sonnet-*", GroupName: "claude-sonnet", ExampleModel: "claude-sonnet-4-6"},
+		{Pattern: "gpt-*", GroupName: "gpt-5", ExampleModel: "gpt-5"},
+		{Pattern: "missing-*", GroupName: "missing", ExampleModel: "missing-model"},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, routes, 2)
+	require.Equal(t, "claude-sonnet-*", routes[0].Pattern)
+	require.Equal(t, "claude-sonnet-4-6", routes[0].ExampleModel)
+	require.Equal(t, int64(3), routes[0].GroupID)
+	require.Equal(t, "claude-sonnet", routes[0].GroupName)
+	require.Equal(t, 1.5, routes[0].RateMultiplier)
+	require.Equal(t, 1.25, routes[0].EffectiveRateMultiplier)
+	require.Equal(t, "gpt-*", routes[1].Pattern)
+	require.Equal(t, int64(2), routes[1].GroupID)
+	require.Equal(t, 1.0, routes[1].EffectiveRateMultiplier)
+}

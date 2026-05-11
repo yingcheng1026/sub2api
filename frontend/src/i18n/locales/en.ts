@@ -6266,7 +6266,11 @@ export default {
       rateListDesc: 'Higher multiplier groups burn the wallet faster',
       rateListEmpty: 'No groups available',
       userOverride: 'Custom',
-      userOverrideHint: 'Admin set a custom multiplier for you (base ×{base})'
+      userOverrideHint: 'Admin set a custom multiplier for you (base ×{base})',
+      routeListTitle: 'Your key routes automatically',
+      routeListDesc: 'The request model chooses the group and multiplier',
+      routeListEmpty: 'No routes available',
+      routeModel: 'Use {model}'
     }
   },
 

@@ -19,6 +19,10 @@ type ModelRouter interface {
 	ResolveGroupID(ctx context.Context, userID int64, modelName string) (int64, error)
 }
 
+type ModelRouteProvider interface {
+	Routes() []ModelRoute
+}
+
 type ModelRouterGroupRepository interface {
 	ListActive(ctx context.Context) ([]Group, error)
 }

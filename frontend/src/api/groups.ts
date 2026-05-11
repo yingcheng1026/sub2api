@@ -6,6 +6,16 @@
 import { apiClient } from './client'
 import type { Group } from '@/types'
 
+export interface WalletModelRoute {
+  pattern: string
+  example_model: string
+  group_id: number
+  group_name: string
+  platform: Group['platform']
+  rate_multiplier: number
+  effective_rate_multiplier: number
+}
+
 /**
  * Get available groups that the current user can bind to API keys
  * This returns groups based on user's permissions:
@@ -27,9 +37,18 @@ export async function getUserGroupRates(): Promise<Record<number, number>> {
   return data || {}
 }
 
+/**
+ * Get model-name routes used by wallet universal keys.
+ */
+export async function getWalletModelRoutes(): Promise<WalletModelRoute[]> {
+  const { data } = await apiClient.get<WalletModelRoute[]>('/groups/model-routes')
+  return data || []
+}
+
 export const userGroupsAPI = {
   getAvailable,
-  getUserGroupRates
+  getUserGroupRates,
+  getWalletModelRoutes
 }
 
 export default userGroupsAPI
