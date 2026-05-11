@@ -38,6 +38,67 @@ func TestAssignWalletSubscriptionCreatesNewWallet(t *testing.T) {
 	require.Equal(t, 1, subRepo.createCalls)
 }
 
+type walletUniversalKeyEnsurerStub struct {
+	calls   int
+	userIDs []int64
+	key     *APIKey
+	created bool
+	err     error
+}
+
+func (s *walletUniversalKeyEnsurerStub) EnsureWalletUniversalKey(_ context.Context, userID int64) (*APIKey, bool, error) {
+	s.calls++
+	s.userIDs = append(s.userIDs, userID)
+	return s.key, s.created, s.err
+}
+
+func TestAssignWalletSubscriptionEnsuresUniversalKey(t *testing.T) {
+	subRepo := newSubscriptionUserSubRepoStub()
+	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	keyEnsurer := &walletUniversalKeyEnsurerStub{
+		key:     &APIKey{ID: 77, UserID: 1001, Name: WalletUniversalAPIKeyName, Status: StatusAPIKeyActive},
+		created: true,
+	}
+	svc.SetWalletUniversalKeyService(keyEnsurer)
+
+	initial := 1500.0
+	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+		UserID:           1001,
+		ValidityDays:     30,
+		WalletInitialUSD: &initial,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, keyEnsurer.calls)
+	require.Equal(t, []int64{1001}, keyEnsurer.userIDs)
+	require.NotNil(t, sub.WalletUniversalKey)
+	require.Equal(t, int64(77), sub.WalletUniversalKey.ID)
+	require.True(t, sub.WalletUniversalKeyCreated)
+}
+
+func TestAssignWalletSubscriptionSkipsCreatingUniversalKeyWhenExisting(t *testing.T) {
+	subRepo := newSubscriptionUserSubRepoStub()
+	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	keyEnsurer := &walletUniversalKeyEnsurerStub{
+		key:     &APIKey{ID: 88, UserID: 1001, Name: WalletUniversalAPIKeyName, Status: StatusAPIKeyActive},
+		created: false,
+	}
+	svc.SetWalletUniversalKeyService(keyEnsurer)
+
+	initial := 1500.0
+	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+		UserID:           1001,
+		ValidityDays:     30,
+		WalletInitialUSD: &initial,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, keyEnsurer.calls)
+	require.NotNil(t, sub.WalletUniversalKey)
+	require.Equal(t, int64(88), sub.WalletUniversalKey.ID)
+	require.False(t, sub.WalletUniversalKeyCreated)
+}
+
 // TestAssignWalletSubscriptionConflictWhenActiveExists 验证：用户已有 active
 // 钱包订阅时，再次分配返回 ErrSubscriptionAssignConflict（reason=wallet_already_active），
 // 防止误开重复钱包导致 partial unique index 撞车。

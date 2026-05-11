@@ -46,6 +46,7 @@ type SubscriptionService struct {
 	userSubRepo         UserSubscriptionRepository
 	billingCacheService *BillingCacheService
 	entClient           *dbent.Client
+	walletKeyService    WalletUniversalKeyService
 
 	// L1 缓存：加速中间件热路径的订阅查询
 	subCacheL1     *ristretto.Cache
@@ -54,6 +55,10 @@ type SubscriptionService struct {
 	subCacheJitter int // 抖动百分比
 
 	maintenanceQueue *SubscriptionMaintenanceQueue
+}
+
+type WalletUniversalKeyService interface {
+	EnsureWalletUniversalKey(ctx context.Context, userID int64) (*APIKey, bool, error)
 }
 
 // NewSubscriptionService 创建订阅服务
@@ -67,6 +72,10 @@ func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscript
 	svc.initSubCache(cfg)
 	svc.initMaintenanceQueue(cfg)
 	return svc
+}
+
+func (s *SubscriptionService) SetWalletUniversalKeyService(keyService WalletUniversalKeyService) {
+	s.walletKeyService = keyService
 }
 
 func (s *SubscriptionService) initMaintenanceQueue(cfg *config.Config) {
@@ -367,10 +376,26 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 	if err != nil {
 		return nil, false, err
 	}
+	if err := s.ensureWalletUniversalKey(ctx, input.UserID, sub); err != nil {
+		return nil, false, err
+	}
 
 	// 钱包订阅与 group 解耦，不需要按 (user, group) 失效订阅缓存；
 	// 中间件下次请求会直接 GetActiveWalletByUserID 命中。
 	return sub, false, nil
+}
+
+func (s *SubscriptionService) ensureWalletUniversalKey(ctx context.Context, userID int64, sub *UserSubscription) error {
+	if s.walletKeyService == nil || sub == nil {
+		return nil
+	}
+	key, created, err := s.walletKeyService.EnsureWalletUniversalKey(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("ensure wallet universal api key: %w", err)
+	}
+	sub.WalletUniversalKey = key
+	sub.WalletUniversalKeyCreated = created
+	return nil
 }
 
 // createWalletSubscription 创建新钱包订阅（内部方法）。group_id=NULL，

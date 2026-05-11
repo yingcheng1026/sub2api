@@ -45,6 +45,8 @@ const (
 	apiKeyLastUsedFailBackoff = 5 * time.Second
 )
 
+const WalletUniversalAPIKeyName = "钱包通用 key（自动路由）"
+
 type APIKeyRepository interface {
 	Create(ctx context.Context, key *APIKey) error
 	GetByID(ctx context.Context, id int64) (*APIKey, error)
@@ -434,6 +436,36 @@ func (s *APIKeyService) List(ctx context.Context, userID int64, params paginatio
 		return nil, nil, fmt.Errorf("list api keys: %w", err)
 	}
 	return keys, pagination, nil
+}
+
+// EnsureWalletUniversalKey returns an existing usable wallet universal key, or
+// creates one when the user does not already have an active null-group key.
+func (s *APIKeyService) EnsureWalletUniversalKey(ctx context.Context, userID int64) (*APIKey, bool, error) {
+	keys, _, err := s.List(ctx, userID, pagination.PaginationParams{
+		Page:      1,
+		PageSize:  100,
+		SortBy:    "created_at",
+		SortOrder: "desc",
+	}, APIKeyListFilters{Status: StatusAPIKeyActive})
+	if err != nil {
+		return nil, false, err
+	}
+	for i := range keys {
+		key := &keys[i]
+		if key.GroupID != nil || !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() {
+			continue
+		}
+		return key, false, nil
+	}
+
+	key, err := s.Create(ctx, userID, CreateAPIKeyRequest{
+		Name:    WalletUniversalAPIKeyName,
+		GroupID: nil,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return key, true, nil
 }
 
 // DefaultChatAPIKey returns the newest usable active key for a user.

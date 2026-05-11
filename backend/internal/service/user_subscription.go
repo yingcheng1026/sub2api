@@ -35,6 +35,10 @@ type UserSubscription struct {
 	User           *User
 	Group          *Group
 	AssignedByUser *User
+
+	// Runtime-only assignment metadata used by admin wallet activation responses.
+	WalletUniversalKey        *APIKey
+	WalletUniversalKeyCreated bool
 }
 
 // IsWalletMode 钱包模式订阅判别。

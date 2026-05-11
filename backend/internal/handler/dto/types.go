@@ -491,8 +491,8 @@ type Setting struct {
 }
 
 type UserSubscription struct {
-	ID     int64  `json:"id"`
-	UserID int64  `json:"user_id"`
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
 	// GroupID 钱包模式 (v4) 下为 nil；老的单 group 订阅 (v3) 下必填。
 	GroupID *int64 `json:"group_id"`
 
@@ -529,6 +529,9 @@ type AdminUserSubscription struct {
 	Notes      string    `json:"notes"`
 
 	AssignedByUser *User `json:"assigned_by_user,omitempty"`
+
+	WalletUniversalKey        *APIKey `json:"wallet_universal_key,omitempty"`
+	WalletUniversalKeyCreated *bool   `json:"wallet_universal_key_created,omitempty"`
 }
 
 type BulkAssignResult struct {

@@ -706,12 +706,19 @@ func UserSubscriptionFromServiceAdmin(sub *service.UserSubscription) *AdminUserS
 	if sub == nil {
 		return nil
 	}
+	var walletUniversalKeyCreated *bool
+	if sub.WalletUniversalKey != nil {
+		created := sub.WalletUniversalKeyCreated
+		walletUniversalKeyCreated = &created
+	}
 	return &AdminUserSubscription{
-		UserSubscription: userSubscriptionFromServiceBase(sub),
-		AssignedBy:       sub.AssignedBy,
-		AssignedAt:       sub.AssignedAt,
-		Notes:            sub.Notes,
-		AssignedByUser:   UserFromServiceShallow(sub.AssignedByUser),
+		UserSubscription:          userSubscriptionFromServiceBase(sub),
+		AssignedBy:                sub.AssignedBy,
+		AssignedAt:                sub.AssignedAt,
+		Notes:                     sub.Notes,
+		AssignedByUser:            UserFromServiceShallow(sub.AssignedByUser),
+		WalletUniversalKey:        APIKeyFromService(sub.WalletUniversalKey),
+		WalletUniversalKeyCreated: walletUniversalKeyCreated,
 	}
 }
 
