@@ -673,6 +673,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			false,
 		)
 		if err != nil {
+			if isClientCanceledAccountSelectError(c, err) {
+				reqLog.Info("openai_messages.account_select_aborted_client_canceled", zap.Error(err))
+				return
+			}
 			reqLog.Warn("openai_messages.account_select_failed",
 				zap.Error(err),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
@@ -692,6 +696,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if isClientCanceledAccountSelectError(c, nil) {
+				reqLog.Info("openai_messages.account_select_empty_client_canceled")
+				return
+			}
 			h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 			return
 		}
@@ -854,6 +862,16 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 		return
 	}
 	h.anthropicErrorResponse(c, status, errType, message)
+}
+
+func isClientCanceledAccountSelectError(c *gin.Context, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if c == nil || c.Request == nil {
+		return false
+	}
+	return c.Request.Context().Err() != nil
 }
 
 // handleAnthropicFailoverExhausted maps upstream failover errors to Anthropic format.
