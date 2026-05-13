@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -131,4 +132,62 @@ func TestAssignWalletSubscriptionRejectsNonPositiveBalance(t *testing.T) {
 		require.Error(t, err, "balance=%v 应被拒绝", bad)
 	}
 	require.Equal(t, 0, subRepo.createCalls)
+}
+
+// TestAssignWalletSubscriptionCreditsPlanForcesMaxExpiresAt 验证 B2.3：
+// plan_type='credits' 走永久 expires_at（截断到 MaxExpiresAt 2099-12-31），
+// validity_days 被忽略；plan_type='subscription' 或空串走 days。
+//
+// 见 docs/plans/2026-05-13-wallet-multikey-credits-design.md §2.2。
+func TestAssignWalletSubscriptionCreditsPlanForcesMaxExpiresAt(t *testing.T) {
+	t.Run("credits 永久有效", func(t *testing.T) {
+		subRepo := newSubscriptionUserSubRepoStub()
+		svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+
+		initial := 500.0
+		sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+			UserID:           2001,
+			ValidityDays:     7, // 应该被忽略
+			WalletInitialUSD: &initial,
+			PlanType:         PlanTypeCredits,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, sub)
+		require.Equal(t, MaxExpiresAt, sub.ExpiresAt, "额度卡 expires_at 必须 == MaxExpiresAt (2099)")
+	})
+
+	t.Run("subscription 按 days 计算", func(t *testing.T) {
+		subRepo := newSubscriptionUserSubRepoStub()
+		svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+
+		initial := 1500.0
+		before := time.Now()
+		sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+			UserID:           2002,
+			ValidityDays:     30,
+			WalletInitialUSD: &initial,
+			PlanType:         PlanTypeSubscription,
+		})
+		require.NoError(t, err)
+		// 大约 30 天后过期，但绝不应该是 MaxExpiresAt
+		require.NotEqual(t, MaxExpiresAt, sub.ExpiresAt, "月卡不应永久有效")
+		// 区间检查：在 before+29.9d ~ before+30.1d 之间
+		require.True(t, sub.ExpiresAt.After(before.Add(29*24*time.Hour)))
+		require.True(t, sub.ExpiresAt.Before(before.Add(31*24*time.Hour)))
+	})
+
+	t.Run("空串等价 subscription", func(t *testing.T) {
+		subRepo := newSubscriptionUserSubRepoStub()
+		svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+
+		initial := 100.0
+		sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+			UserID:           2003,
+			ValidityDays:     30,
+			WalletInitialUSD: &initial,
+			// PlanType 留空
+		})
+		require.NoError(t, err)
+		require.NotEqual(t, MaxExpiresAt, sub.ExpiresAt, "默认走月卡路径，不应永久有效")
+	})
 }

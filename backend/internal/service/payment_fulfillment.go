@@ -376,6 +376,8 @@ func (s *PaymentService) doWalletSub(ctx context.Context, o *dbent.PaymentOrder,
 
 	walletInitial := *plan.WalletQuotaUsd
 	planID := plan.ID
+	// plan_type 透传给 service：credits → 永久 expires_at；subscription/"" → 按 days 计算。
+	planType := plan.PlanType
 	_, err = s.subscriptionSvc.AssignSubscription(ctx, &AssignSubscriptionInput{
 		UserID:           o.UserID,
 		ValidityDays:     days,
@@ -383,6 +385,7 @@ func (s *PaymentService) doWalletSub(ctx context.Context, o *dbent.PaymentOrder,
 		Notes:            orderNote,
 		WalletInitialUSD: &walletInitial,
 		PlanID:           &planID,
+		PlanType:         planType,
 	})
 	if err != nil {
 		return fmt.Errorf("assign wallet subscription: %w", err)

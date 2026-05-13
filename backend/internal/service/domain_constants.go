@@ -76,6 +76,13 @@ const (
 	SubscriptionTypeSubscription = domain.SubscriptionTypeSubscription // 订阅模式（按限额控制）
 )
 
+// SubscriptionPlan.plan_type 取值（v4 钱包模式）。
+// migration 153 已落 CHECK 约束 plan_type IN ('subscription','credits')。
+const (
+	PlanTypeSubscription = "subscription" // 月卡：validity_days 控时长，到期冻结余额
+	PlanTypeCredits      = "credits"      // 额度卡：永久有效（expires_at = MaxExpiresAt 2099），余额烧完为止
+)
+
 // Subscription status constants
 const (
 	SubscriptionStatusActive    = domain.SubscriptionStatusActive

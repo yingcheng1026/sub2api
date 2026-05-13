@@ -181,6 +181,16 @@ type AssignSubscriptionInput struct {
 	// PlanID 钱包模式下用于查 subscription_plan_groups 决定建哪些 group 的 key。
 	// 为 nil 时跳过自动建 key（仅创建钱包订阅，admin 手动开通场景）。
 	PlanID *int64
+
+	// PlanType 钱包模式 plan 形态：subscription (月卡) / credits (额度卡)。
+	// 空串视为 subscription。credits 走永久 expires_at（截断到 MaxExpiresAt 2099）。
+	// 来源：payment_fulfillment.doWalletSub 读 SubscriptionPlan.PlanType 透传。
+	PlanType string
+}
+
+// IsCreditsAssign 当前 input 是否为额度卡（永久有效）分配。
+func (i *AssignSubscriptionInput) IsCreditsAssign() bool {
+	return i != nil && i.PlanType == PlanTypeCredits
 }
 
 // IsWalletAssign 判断当前 input 是否为钱包模式分配。
@@ -445,13 +455,23 @@ func (s *SubscriptionService) lookupPlanGroupIDs(ctx context.Context, planID int
 
 // createWalletSubscription 创建新钱包订阅（内部方法）。group_id=NULL，
 // wallet_initial_usd 和 wallet_balance_usd 都设为 input 给定的初始值。
+//
+// 月卡 (plan_type='subscription'，含空串默认)：expires_at = now + validity_days。
+// 额度卡 (plan_type='credits')：expires_at = MaxExpiresAt (2099-12-31)，validity_days 忽略。
+// 见 docs/plans/2026-05-13-wallet-multikey-credits-design.md §2.2。
 func (s *SubscriptionService) createWalletSubscription(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, error) {
 	validityDays := normalizeAssignValidityDays(input.ValidityDays)
 
 	now := time.Now()
-	expiresAt := now.AddDate(0, 0, validityDays)
-	if expiresAt.After(MaxExpiresAt) {
+	var expiresAt time.Time
+	if input.IsCreditsAssign() {
+		// 额度卡永久有效：直接拉到 MaxExpiresAt，cron 不会到期，余额烧完为止。
 		expiresAt = MaxExpiresAt
+	} else {
+		expiresAt = now.AddDate(0, 0, validityDays)
+		if expiresAt.After(MaxExpiresAt) {
+			expiresAt = MaxExpiresAt
+		}
 	}
 
 	initial := *input.WalletInitialUSD
