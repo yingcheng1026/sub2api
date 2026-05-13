@@ -9,10 +9,11 @@
 -- 详细设计: ai-relay-infra/docs/plans/2026-05-10-wallet-mode-design.md §1.1
 
 CREATE TABLE IF NOT EXISTS subscription_plan_groups (
+    id         BIGSERIAL PRIMARY KEY,
     plan_id    BIGINT NOT NULL REFERENCES subscription_plans(id) ON DELETE CASCADE,
     group_id   BIGINT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (plan_id, group_id)
+    CONSTRAINT subscription_plan_groups_plan_id_group_id_key UNIQUE (plan_id, group_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_subscription_plan_groups_group_id

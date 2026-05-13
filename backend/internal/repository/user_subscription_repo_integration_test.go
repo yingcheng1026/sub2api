@@ -90,7 +90,7 @@ func (s *UserSubscriptionRepoSuite) TestCreate() {
 
 	sub := &service.UserSubscription{
 		UserID:    user.ID,
-		GroupID:   group.ID,
+		GroupID:   repositoryInt64Ptr(group.ID),
 		Status:    service.SubscriptionStatusActive,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -730,7 +730,7 @@ func (s *UserSubscriptionRepoSuite) TestTxContext_RollbackIsolation() {
 	repo := NewUserSubscriptionRepository(baseClient)
 	sub := &service.UserSubscription{
 		UserID:     userEnt.ID,
-		GroupID:    groupEnt.ID,
+		GroupID:    repositoryInt64Ptr(groupEnt.ID),
 		ExpiresAt:  time.Now().AddDate(0, 0, 30),
 		Status:     service.SubscriptionStatusActive,
 		AssignedAt: time.Now(),
