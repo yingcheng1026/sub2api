@@ -60,6 +60,20 @@ func (s *WalletService) Adjust(ctx context.Context, cmd WalletAdjustCommand) (Wa
 	return s.repo.Adjust(ctx, cmd)
 }
 
+// Topup 额度卡叠加充值 (B2.4)。同时 +balance 和 +initial，写一条 reason='topup' 流水。
+// DeltaUSD 必须 > 0；非钱包模式订阅返 ErrWalletNotFound。
+func (s *WalletService) Topup(ctx context.Context, subscriptionID int64, deltaUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error) {
+	if deltaUSD <= 0 {
+		return WalletLedgerEntry{}, ErrWalletNegativeDelta
+	}
+	return s.repo.Topup(ctx, WalletTopupCommand{
+		SubscriptionID: subscriptionID,
+		DeltaUSD:       deltaUSD,
+		OperatorID:     operatorID,
+		Notes:          strings.TrimSpace(notes),
+	})
+}
+
 // ListLedger 查最近 limit 条流水。limit ≤ 0 默认 50；> 500 截断到 500。
 func (s *WalletService) ListLedger(ctx context.Context, subscriptionID int64, limit int) ([]WalletLedgerEntry, error) {
 	if limit <= 0 {
@@ -77,7 +91,8 @@ func isValidWalletLedgerReason(reason string) bool {
 		WalletLedgerReasonUsage,
 		WalletLedgerReasonRefund,
 		WalletLedgerReasonAdjustment,
-		WalletLedgerReasonExpiration:
+		WalletLedgerReasonExpiration,
+		WalletLedgerReasonTopup:
 		return true
 	}
 	return false

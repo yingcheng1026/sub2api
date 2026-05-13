@@ -166,6 +166,75 @@ func (r *walletRepository) Adjust(ctx context.Context, cmd service.WalletAdjustC
 	return entry, nil
 }
 
+// Topup 额度卡叠加 (B2.4)：同时 +balance 和 +initial，写 reason='topup' 流水。
+// DeltaUSD 必须 > 0；非钱包模式订阅（wallet_balance_usd IS NULL）返 ErrWalletNotFound。
+func (r *walletRepository) Topup(ctx context.Context, cmd service.WalletTopupCommand) (service.WalletLedgerEntry, error) {
+	if cmd.SubscriptionID <= 0 {
+		return service.WalletLedgerEntry{}, service.ErrWalletNotFound
+	}
+	if cmd.DeltaUSD <= 0 {
+		return service.WalletLedgerEntry{}, service.ErrWalletNegativeDelta
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return service.WalletLedgerEntry{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var balance, initial sql.NullFloat64
+	err = tx.QueryRowContext(ctx, `
+		SELECT wallet_balance_usd, wallet_initial_usd
+		FROM user_subscriptions
+		WHERE id = $1 AND deleted_at IS NULL
+		FOR UPDATE
+	`, cmd.SubscriptionID).Scan(&balance, &initial)
+	if errors.Is(err, sql.ErrNoRows) {
+		return service.WalletLedgerEntry{}, service.ErrWalletNotFound
+	}
+	if err != nil {
+		return service.WalletLedgerEntry{}, fmt.Errorf("lock subscription row: %w", err)
+	}
+	if !balance.Valid || !initial.Valid {
+		// 非钱包模式订阅
+		return service.WalletLedgerEntry{}, service.ErrWalletNotFound
+	}
+
+	newBalance := balance.Float64 + cmd.DeltaUSD
+	newInitial := initial.Float64 + cmd.DeltaUSD
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE user_subscriptions
+		SET wallet_balance_usd = $1, wallet_initial_usd = $2, updated_at = NOW()
+		WHERE id = $3
+	`, newBalance, newInitial, cmd.SubscriptionID); err != nil {
+		return service.WalletLedgerEntry{}, fmt.Errorf("update balance+initial: %w", err)
+	}
+
+	notes := cmd.Notes
+	entry, err := insertLedger(ctx, tx, ledgerInsert{
+		subscriptionID: cmd.SubscriptionID,
+		deltaUSD:       cmd.DeltaUSD,
+		balanceAfter:   newBalance,
+		reason:         service.WalletLedgerReasonTopup,
+		operatorID:     cmd.OperatorID,
+		notes:          notes,
+	})
+	if err != nil {
+		return service.WalletLedgerEntry{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return service.WalletLedgerEntry{}, fmt.Errorf("commit: %w", err)
+	}
+	tx = nil
+	return entry, nil
+}
+
 // ReconcileBalances 把所有钱包模式订阅的 cached wallet_balance_usd 与
 // subscription_wallet_ledger.SUM(delta_usd) 对比，返回漂移超过 tolerance 的
 // 条目。漂移 0 / -0 视为相等。

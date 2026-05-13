@@ -48,6 +48,7 @@ type SubscriptionService struct {
 	billingCacheService *BillingCacheService
 	entClient           *dbent.Client
 	walletKeyService    WalletGroupKeyService
+	walletTopupService  WalletTopupService
 
 	// L1 缓存：加速中间件热路径的订阅查询
 	subCacheL1     *ristretto.Cache
@@ -70,6 +71,15 @@ type WalletGroupKeyService interface {
 	EnsureWalletGroupKeys(ctx context.Context, userID int64, groupIDs []int64) ([]APIKey, int, error)
 }
 
+// WalletTopupService 钱包叠加充值接口（B2.4）：把 deltaUSD 同时累加到现有钱包订阅的
+// wallet_balance_usd 和 wallet_initial_usd，并写一条 reason='topup' 流水。
+//
+// SubscriptionService 在「用户已有 active 钱包 + 本次是额度卡 (plan_type='credits')」
+// 场景下调用，避开 partial unique index 撞车。WalletService 实现此接口。
+type WalletTopupService interface {
+	Topup(ctx context.Context, subscriptionID int64, deltaUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error)
+}
+
 // NewSubscriptionService 创建订阅服务
 func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscriptionRepository, billingCacheService *BillingCacheService, entClient *dbent.Client, cfg *config.Config) *SubscriptionService {
 	svc := &SubscriptionService{
@@ -85,6 +95,12 @@ func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscript
 
 func (s *SubscriptionService) SetWalletGroupKeyService(keyService WalletGroupKeyService) {
 	s.walletKeyService = keyService
+}
+
+// SetWalletTopupService 注入钱包叠加服务。未注入时，已有 active 钱包 + 再来一张额度卡
+// 直接返回 ErrSubscriptionAssignConflict（B2.4 之前的旧行为）。
+func (s *SubscriptionService) SetWalletTopupService(topup WalletTopupService) {
+	s.walletTopupService = topup
 }
 
 func (s *SubscriptionService) initMaintenanceQueue(cfg *config.Config) {
@@ -374,9 +390,14 @@ func (s *SubscriptionService) createSubscription(ctx context.Context, input *Ass
 
 // assignWalletSubscriptionWithReuse 钱包模式分配（v4）。
 //
-// 幂等：用户已有 active 钱包订阅 → 返回 ErrSubscriptionAssignConflict（管理员
-// 应改用 ExtendSubscription / 充值流程，而不是再开一条钱包）；schema 上的
-// partial unique index 也会兜底拦截。
+// 三条分支：
+//  1. 用户没有 active 钱包 → 新建。
+//  2. 已有 active 钱包 + 本次是额度卡 (PlanType='credits') →
+//     调用 walletTopupService.Topup，把 quota 合入现有钱包（balance+initial 双 +delta，
+//     ledger 写 reason='topup'）；不新建 user_subscriptions 行。设计 §2.3。
+//  3. 已有 active 钱包 + 本次是月卡（或未注入 topup 服务）→
+//     返回 ErrSubscriptionAssignConflict（conflict_reason=wallet_already_active 或
+//     wallet_topup_unsupported）；partial unique index 兜底拦截。
 //
 // 不复用 group 路径的 ExistsByUserIDAndGroupID 是因为钱包订阅 group_id=NULL，
 // 复合查询用 group_id=0 拿不到；改用 GetActiveWalletByUserID。
@@ -390,9 +411,7 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 		return nil, false, err
 	}
 	if existing != nil {
-		return nil, false, ErrSubscriptionAssignConflict.WithMetadata(map[string]string{
-			"conflict_reason": "wallet_already_active",
-		})
+		return s.topupExistingWallet(ctx, input, existing)
 	}
 
 	sub, err := s.createWalletSubscription(ctx, input)
@@ -406,6 +425,53 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 	// 钱包订阅与 group 解耦，不需要按 (user, group) 失效订阅缓存；
 	// 中间件下次请求会直接 GetActiveWalletByUserID 命中。
 	return sub, false, nil
+}
+
+// topupExistingWallet 用户已有 active 钱包 → 走 B2.4 叠加路径或拒绝。
+//
+// 仅当 input.PlanType='credits' 且注入了 walletTopupService 时才叠加；否则按老逻辑
+// 返回 conflict，避免月卡叠月卡 / 月卡叠 trial 等语义混乱。
+//
+// 返回 reused=true，sub.ID 不变（叠加在 existing 行上），但 WalletBalanceUSD /
+// WalletInitialUSD 字段已更新到叠加后的值；同时 ensureWalletGroupKeys 也会跑一遍
+// （幂等：缺哪把补哪把），保证额度卡新关联的 group 也能拿到 key。
+func (s *SubscriptionService) topupExistingWallet(ctx context.Context, input *AssignSubscriptionInput, existing *UserSubscription) (*UserSubscription, bool, error) {
+	if !input.IsCreditsAssign() {
+		return nil, false, ErrSubscriptionAssignConflict.WithMetadata(map[string]string{
+			"conflict_reason": "wallet_already_active",
+		})
+	}
+	if s.walletTopupService == nil {
+		return nil, false, ErrSubscriptionAssignConflict.WithMetadata(map[string]string{
+			"conflict_reason": "wallet_topup_unsupported",
+		})
+	}
+
+	delta := *input.WalletInitialUSD
+	notes := fmt.Sprintf("credits topup: %s", strings.TrimSpace(input.Notes))
+	var operator *int64
+	if input.AssignedBy > 0 {
+		op := input.AssignedBy
+		operator = &op
+	}
+	entry, err := s.walletTopupService.Topup(ctx, existing.ID, delta, operator, notes)
+	if err != nil {
+		return nil, false, fmt.Errorf("topup wallet: %w", err)
+	}
+
+	// 同步内存字段（避免再读一次 DB）。balance_after 来自 ledger 返回，权威。
+	newBalance := entry.BalanceAfter
+	newInitial := *existing.WalletInitialUSD + delta
+	existing.WalletBalanceUSD = &newBalance
+	existing.WalletInitialUSD = &newInitial
+
+	// 额度卡新关联的 group 可能没建 key —— 跑一遍 ensureWalletGroupKeys 补缺。
+	// 已有 key 复用，不重复建。
+	if err := s.ensureWalletGroupKeys(ctx, input, existing); err != nil {
+		return nil, false, err
+	}
+
+	return existing, true, nil
 }
 
 // ensureWalletGroupKeys 钱包激活时按 plan 关联的 group 列表自动建 N 把 api_key。

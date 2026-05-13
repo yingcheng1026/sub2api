@@ -11,10 +11,13 @@ import (
 type fakeWalletRepo struct {
 	deductCalls  []WalletDeductCommand
 	adjustCalls  []WalletAdjustCommand
+	topupCalls   []WalletTopupCommand
 	deductResult WalletLedgerEntry
 	deductErr    error
 	adjustResult WalletLedgerEntry
 	adjustErr    error
+	topupResult  WalletLedgerEntry
+	topupErr     error
 }
 
 func (f *fakeWalletRepo) Deduct(_ context.Context, cmd WalletDeductCommand) (WalletLedgerEntry, error) {
@@ -25,6 +28,11 @@ func (f *fakeWalletRepo) Deduct(_ context.Context, cmd WalletDeductCommand) (Wal
 func (f *fakeWalletRepo) Adjust(_ context.Context, cmd WalletAdjustCommand) (WalletLedgerEntry, error) {
 	f.adjustCalls = append(f.adjustCalls, cmd)
 	return f.adjustResult, f.adjustErr
+}
+
+func (f *fakeWalletRepo) Topup(_ context.Context, cmd WalletTopupCommand) (WalletLedgerEntry, error) {
+	f.topupCalls = append(f.topupCalls, cmd)
+	return f.topupResult, f.topupErr
 }
 
 func (f *fakeWalletRepo) ListLedger(_ context.Context, _ int64, _ int) ([]WalletLedgerEntry, error) {
@@ -127,4 +135,36 @@ func TestWalletService_Adjust_PassesThroughRepoError(t *testing.T) {
 		Reason:         WalletLedgerReasonAdjustment,
 	})
 	require.ErrorIs(t, err, stub)
+}
+
+// TestWalletService_Topup_RejectsNonPositive 验证 B2.4 Topup 入参兜底。
+func TestWalletService_Topup_RejectsNonPositive(t *testing.T) {
+	repo := &fakeWalletRepo{}
+	svc := NewWalletService(repo)
+
+	for _, bad := range []float64{0, -1, -500} {
+		_, err := svc.Topup(context.Background(), 1, bad, nil, "")
+		require.ErrorIs(t, err, ErrWalletNegativeDelta, "delta=%v 应被拒", bad)
+	}
+	require.Empty(t, repo.topupCalls, "non-positive topup must short-circuit")
+}
+
+// TestWalletService_Topup_WritesTopupReason 验证 Topup 走 repo 并 trim notes。
+func TestWalletService_Topup_WritesTopupReason(t *testing.T) {
+	repo := &fakeWalletRepo{topupResult: WalletLedgerEntry{ID: 42, BalanceAfter: 2000}}
+	svc := NewWalletService(repo)
+
+	op := int64(7)
+	entry, err := svc.Topup(context.Background(), 99, 500, &op, "  credits-500 ¥149  ")
+	require.NoError(t, err)
+	require.Equal(t, int64(42), entry.ID)
+	require.Equal(t, 2000.0, entry.BalanceAfter)
+	require.Len(t, repo.topupCalls, 1)
+
+	got := repo.topupCalls[0]
+	require.Equal(t, int64(99), got.SubscriptionID)
+	require.Equal(t, 500.0, got.DeltaUSD)
+	require.Equal(t, "credits-500 ¥149", got.Notes, "notes 必须被 trim")
+	require.NotNil(t, got.OperatorID)
+	require.Equal(t, int64(7), *got.OperatorID)
 }

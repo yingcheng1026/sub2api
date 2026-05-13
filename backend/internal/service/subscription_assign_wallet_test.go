@@ -191,3 +191,137 @@ func TestAssignWalletSubscriptionCreditsPlanForcesMaxExpiresAt(t *testing.T) {
 		require.NotEqual(t, MaxExpiresAt, sub.ExpiresAt, "默认走月卡路径，不应永久有效")
 	})
 }
+
+// walletTopupServiceStub 记录 Topup 调用，模拟 repo 返回叠加后的 balance。
+type walletTopupServiceStub struct {
+	calls           int
+	lastSubID       int64
+	lastDelta       float64
+	lastOperator    *int64
+	lastNotes       string
+	returnEntry     WalletLedgerEntry
+	err             error
+}
+
+func (s *walletTopupServiceStub) Topup(_ context.Context, subscriptionID int64, deltaUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error) {
+	s.calls++
+	s.lastSubID = subscriptionID
+	s.lastDelta = deltaUSD
+	s.lastOperator = operatorID
+	s.lastNotes = notes
+	return s.returnEntry, s.err
+}
+
+// TestAssignWalletSubscriptionToppedUpWhenCreditsAndExistingActive 验证 B2.4：
+// 用户已有 active 钱包 + 再来一张额度卡 (plan_type='credits') →
+// 走 Topup 路径而不是 conflict。
+//
+// 见 docs/plans/2026-05-13-wallet-multikey-credits-design.md §2.3。
+func TestAssignWalletSubscriptionToppedUpWhenCreditsAndExistingActive(t *testing.T) {
+	subRepo := newSubscriptionUserSubRepoStub()
+	existingBalance := 100.0
+	existingInitial := 100.0
+	subRepo.seed(&UserSubscription{
+		ID:               7,
+		UserID:           1001,
+		Status:           SubscriptionStatusActive,
+		WalletBalanceUSD: &existingBalance,
+		WalletInitialUSD: &existingInitial,
+	})
+
+	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	topupStub := &walletTopupServiceStub{
+		returnEntry: WalletLedgerEntry{ID: 555, BalanceAfter: 600.0},
+	}
+	svc.SetWalletTopupService(topupStub)
+
+	delta := 500.0
+	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+		UserID:           1001,
+		ValidityDays:     7, // 额度卡忽略
+		AssignedBy:       9,
+		Notes:            "credits-500 ¥149",
+		WalletInitialUSD: &delta,
+		PlanType:         PlanTypeCredits,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, sub)
+	require.Equal(t, int64(7), sub.ID, "叠加必须复用现有 subscription，不新建")
+	require.Equal(t, 0, subRepo.createCalls, "topup 路径不应触发 Create")
+
+	require.Equal(t, 1, topupStub.calls)
+	require.Equal(t, int64(7), topupStub.lastSubID)
+	require.Equal(t, 500.0, topupStub.lastDelta)
+	require.NotNil(t, topupStub.lastOperator)
+	require.Equal(t, int64(9), *topupStub.lastOperator)
+	require.Contains(t, topupStub.lastNotes, "credits topup:")
+	require.Contains(t, topupStub.lastNotes, "credits-500")
+
+	require.NotNil(t, sub.WalletBalanceUSD)
+	require.Equal(t, 600.0, *sub.WalletBalanceUSD, "余额必须 == ledger.balance_after")
+	require.NotNil(t, sub.WalletInitialUSD)
+	require.Equal(t, 600.0, *sub.WalletInitialUSD, "initial 必须 == 旧 initial + delta")
+}
+
+// TestAssignWalletSubscriptionConflictWhenSubscriptionPlanAndExistingActive 验证 B2.4：
+// 已有 active 钱包 + plan_type='subscription'（月卡）→ 仍 conflict_reason=wallet_already_active，
+// 不走 topup（防止月卡叠月卡导致语义混乱）。
+func TestAssignWalletSubscriptionConflictWhenSubscriptionPlanAndExistingActive(t *testing.T) {
+	subRepo := newSubscriptionUserSubRepoStub()
+	existing := 100.0
+	subRepo.seed(&UserSubscription{
+		ID:               8,
+		UserID:           1002,
+		Status:           SubscriptionStatusActive,
+		WalletBalanceUSD: &existing,
+		WalletInitialUSD: &existing,
+	})
+
+	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	topupStub := &walletTopupServiceStub{}
+	svc.SetWalletTopupService(topupStub)
+
+	initial := 1500.0
+	_, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+		UserID:           1002,
+		ValidityDays:     30,
+		WalletInitialUSD: &initial,
+		PlanType:         PlanTypeSubscription,
+	})
+	require.Error(t, err)
+	var coded *infraerrors.Error
+	require.True(t, errors.As(err, &coded))
+	require.Equal(t, ErrSubscriptionAssignConflict.Code, coded.Code)
+	require.Equal(t, "wallet_already_active", coded.Metadata["conflict_reason"])
+	require.Equal(t, 0, topupStub.calls, "月卡分支不应触发 topup")
+}
+
+// TestAssignWalletSubscriptionConflictWhenCreditsButTopupServiceMissing 验证 B2.4
+// 兜底：plan_type='credits' 但没注入 WalletTopupService（旧 wire 路径）→
+// conflict_reason=wallet_topup_unsupported，提示运维注入服务。
+func TestAssignWalletSubscriptionConflictWhenCreditsButTopupServiceMissing(t *testing.T) {
+	subRepo := newSubscriptionUserSubRepoStub()
+	existing := 100.0
+	subRepo.seed(&UserSubscription{
+		ID:               9,
+		UserID:           1003,
+		Status:           SubscriptionStatusActive,
+		WalletBalanceUSD: &existing,
+		WalletInitialUSD: &existing,
+	})
+
+	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	// 不调 SetWalletTopupService
+
+	delta := 500.0
+	_, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+		UserID:           1003,
+		WalletInitialUSD: &delta,
+		PlanType:         PlanTypeCredits,
+	})
+	require.Error(t, err)
+	var coded *infraerrors.Error
+	require.True(t, errors.As(err, &coded))
+	require.Equal(t, ErrSubscriptionAssignConflict.Code, coded.Code)
+	require.Equal(t, "wallet_topup_unsupported", coded.Metadata["conflict_reason"])
+}

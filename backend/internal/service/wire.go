@@ -442,9 +442,11 @@ func ProvideSubscriptionService(
 	entClient *dbent.Client,
 	cfg *config.Config,
 	apiKeyService *APIKeyService,
+	walletService *WalletService,
 ) *SubscriptionService {
 	svc := NewSubscriptionService(groupRepo, userSubRepo, billingCacheService, entClient, cfg)
 	svc.SetWalletGroupKeyService(apiKeyService)
+	svc.SetWalletTopupService(walletService)
 	return svc
 }
 

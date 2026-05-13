@@ -14,6 +14,10 @@ const (
 	WalletLedgerReasonRefund     = "refund"
 	WalletLedgerReasonAdjustment = "adjustment"
 	WalletLedgerReasonExpiration = "expiration"
+	// WalletLedgerReasonTopup 额度卡叠加 (B2.4)：用户已有 active 钱包订阅时
+	// 再买一张额度卡，quota 合入现有钱包，wallet_balance_usd 和 wallet_initial_usd
+	// 双双 +delta。migration 154 已扩 CHECK。
+	WalletLedgerReasonTopup = "topup"
 )
 
 // 钱包模式 (v4) 错误码。
@@ -66,6 +70,23 @@ type WalletAdjustCommand struct {
 	Notes          string
 }
 
+// WalletTopupCommand 额度卡叠加充值入参 (B2.4)。
+//
+// 在事务中执行：
+//  1. SELECT wallet_balance_usd, wallet_initial_usd FROM user_subscriptions
+//     WHERE id=$1 FOR UPDATE（must be a wallet-mode subscription）
+//  2. UPDATE wallet_balance_usd += DeltaUSD
+//     UPDATE wallet_initial_usd += DeltaUSD
+//  3. INSERT subscription_wallet_ledger(reason='topup', delta=+DeltaUSD)
+//
+// DeltaUSD 必须 > 0；非钱包模式订阅返 ErrWalletNotFound。
+type WalletTopupCommand struct {
+	SubscriptionID int64
+	DeltaUSD       float64
+	OperatorID     *int64
+	Notes          string
+}
+
 // WalletReconcileDrift 对账发现的单条漂移记录。
 type WalletReconcileDrift struct {
 	SubscriptionID int64
@@ -87,6 +108,10 @@ type WalletRepository interface {
 
 	// Adjust 余额调整（含初始充值）。
 	Adjust(ctx context.Context, cmd WalletAdjustCommand) (WalletLedgerEntry, error)
+
+	// Topup 额度卡叠加 (B2.4)：同时把 wallet_balance_usd 和 wallet_initial_usd
+	// +DeltaUSD，写一条 reason='topup' 流水。区别于 Adjust（只动 balance）。
+	Topup(ctx context.Context, cmd WalletTopupCommand) (WalletLedgerEntry, error)
 
 	// ListLedger 查询订阅的流水（最近 N 条，倒序）。
 	ListLedger(ctx context.Context, subscriptionID int64, limit int) ([]WalletLedgerEntry, error)
