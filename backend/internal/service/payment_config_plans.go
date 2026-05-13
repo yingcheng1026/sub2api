@@ -34,6 +34,18 @@ func validatePlanRequired(name string, groupID int64, price float64, validityDay
 	return nil
 }
 
+// validatePlanType 兜底 plan_type 取值（空串视为 subscription，向后兼容）。
+func validatePlanType(planType string) (string, error) {
+	pt := strings.TrimSpace(planType)
+	if pt == "" {
+		return PlanTypeSubscription, nil
+	}
+	if pt != PlanTypeSubscription && pt != PlanTypeCredits {
+		return "", infraerrors.BadRequest("PLAN_TYPE_INVALID", "plan_type must be 'subscription' or 'credits'")
+	}
+	return pt, nil
+}
+
 // validatePlanPatch validates only the non-nil fields in a patch update.
 func validatePlanPatch(req UpdatePlanRequest) error {
 	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
@@ -53,6 +65,11 @@ func validatePlanPatch(req UpdatePlanRequest) error {
 	}
 	if req.OriginalPrice != nil && *req.OriginalPrice < 0 {
 		return infraerrors.BadRequest("PLAN_ORIGINAL_PRICE_INVALID", "original price must be >= 0")
+	}
+	if req.PlanType != nil {
+		if _, err := validatePlanType(*req.PlanType); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -128,11 +145,16 @@ func (s *PaymentConfigService) CreatePlan(ctx context.Context, req CreatePlanReq
 	if err := validatePlanRequired(req.Name, req.GroupID, req.Price, req.ValidityDays, req.ValidityUnit, req.OriginalPrice); err != nil {
 		return nil, err
 	}
+	planType, err := validatePlanType(req.PlanType)
+	if err != nil {
+		return nil, err
+	}
 	b := s.entClient.SubscriptionPlan.Create().
 		SetGroupID(req.GroupID).SetName(req.Name).SetDescription(req.Description).
 		SetPrice(req.Price).SetValidityDays(req.ValidityDays).SetValidityUnit(req.ValidityUnit).
 		SetFeatures(req.Features).SetProductName(req.ProductName).
-		SetForSale(req.ForSale).SetSortOrder(req.SortOrder)
+		SetForSale(req.ForSale).SetSortOrder(req.SortOrder).
+		SetPlanType(planType)
 	if req.OriginalPrice != nil {
 		b.SetOriginalPrice(*req.OriginalPrice)
 	}
@@ -179,6 +201,13 @@ func (s *PaymentConfigService) UpdatePlan(ctx context.Context, id int64, req Upd
 	}
 	if req.SortOrder != nil {
 		u.SetSortOrder(*req.SortOrder)
+	}
+	if req.PlanType != nil {
+		pt, err := validatePlanType(*req.PlanType)
+		if err != nil {
+			return nil, err
+		}
+		u.SetPlanType(pt)
 	}
 	return u.Save(ctx)
 }

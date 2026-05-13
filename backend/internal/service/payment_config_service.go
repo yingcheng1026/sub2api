@@ -153,6 +153,9 @@ type CreatePlanRequest struct {
 	ProductName   string   `json:"product_name"`
 	ForSale       bool     `json:"for_sale"`
 	SortOrder     int      `json:"sort_order"`
+	// PlanType 区分月卡 / 额度卡。空串默认 "subscription"。
+	// 取值：subscription | credits。见 docs/plans/2026-05-13-wallet-multikey-credits-design.md §2.2。
+	PlanType string `json:"plan_type"`
 }
 
 type UpdatePlanRequest struct {
@@ -167,6 +170,7 @@ type UpdatePlanRequest struct {
 	ProductName   *string  `json:"product_name"`
 	ForSale       *bool    `json:"for_sale"`
 	SortOrder     *int     `json:"sort_order"`
+	PlanType      *string  `json:"plan_type"`
 }
 
 // PaymentConfigService manages payment configuration and CRUD for
