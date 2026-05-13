@@ -686,6 +686,8 @@ export default {
     walletAnyKeyHint: 'Claude, GPT, and Gemini requests automatically use the matching group and charge your wallet.',
     walletAnyKeyBadge: 'Universal · Wallet mode',
     walletAnyKeySelectPlaceholder: 'Auto-route by model',
+    walletKeyBadge: 'Wallet',
+    walletKeyBadgeHint: 'Auto-created wallet key. All wallet keys share the same balance.',
     statusLabel: 'Status',
     selectStatus: 'Select status',
     saving: 'Saving...',

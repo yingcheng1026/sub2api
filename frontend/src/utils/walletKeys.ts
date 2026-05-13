@@ -1,3 +1,11 @@
+/** 钱包模式多 key 的命名前缀，与后端 SubscriptionActivationService 保持一致。 */
+export const WALLET_KEY_NAME_PREFIX = '钱包-'
+
+/** 判断一个 api_key.name 是否为钱包模式自动建的 key（命名「钱包-{group}」）。 */
+export function isWalletKeyName(name: string | null | undefined): boolean {
+  return typeof name === 'string' && name.startsWith(WALLET_KEY_NAME_PREFIX)
+}
+
 interface GroupSubmitState {
   isEdit: boolean
   hasActiveWallet: boolean

@@ -87,6 +87,13 @@
           <template #cell-name="{ value, row }">
             <div class="flex items-center gap-1.5">
               <span class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
+              <span
+                v-if="isWalletKeyName(value)"
+                class="inline-flex items-center rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800"
+                :title="t('keys.walletKeyBadgeHint')"
+              >
+                {{ t('keys.walletKeyBadge') }}
+              </span>
               <Icon
                 v-if="row.ip_whitelist?.length > 0 || row.ip_blacklist?.length > 0"
                 name="shield"
@@ -1107,7 +1114,7 @@ import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
-import { getCreateKeyGroupId, isWalletUniversalKey, shouldRequireGroupForKeySubmit } from '@/utils/walletKeys'
+import { getCreateKeyGroupId, isWalletKeyName, isWalletUniversalKey, shouldRequireGroupForKeySubmit } from '@/utils/walletKeys'
 
 // Helper to format date for datetime-local input
 const formatDateTimeLocal = (isoDate: string): string => {

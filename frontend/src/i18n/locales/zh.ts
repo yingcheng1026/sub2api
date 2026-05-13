@@ -685,6 +685,8 @@ export default {
     walletAnyKeyHint: '调 Claude、GPT 或 Gemini 时会自动选择对应分组，并从钱包扣费。',
     walletAnyKeyBadge: '通用 · 钱包模式',
     walletAnyKeySelectPlaceholder: '自动按模型路由',
+    walletKeyBadge: '钱包',
+    walletKeyBadgeHint: '钱包模式自动建的 key，所有 key 共享同一个余额。',
     statusLabel: '状态',
     selectStatus: '选择状态',
     saving: '保存中...',
