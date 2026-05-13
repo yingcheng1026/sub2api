@@ -83,6 +83,20 @@ func (_u *SubscriptionPlanUpdate) ClearWalletQuotaUsd() *SubscriptionPlanUpdate 
 	return _u
 }
 
+// SetPlanType sets the "plan_type" field.
+func (_u *SubscriptionPlanUpdate) SetPlanType(v string) *SubscriptionPlanUpdate {
+	_u.mutation.SetPlanType(v)
+	return _u
+}
+
+// SetNillablePlanType sets the "plan_type" field if the given value is not nil.
+func (_u *SubscriptionPlanUpdate) SetNillablePlanType(v *string) *SubscriptionPlanUpdate {
+	if v != nil {
+		_u.SetPlanType(*v)
+	}
+	return _u
+}
+
 // SetName sets the "name" field.
 func (_u *SubscriptionPlanUpdate) SetName(v string) *SubscriptionPlanUpdate {
 	_u.mutation.SetName(v)
@@ -342,6 +356,11 @@ func (_u *SubscriptionPlanUpdate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *SubscriptionPlanUpdate) check() error {
+	if v, ok := _u.mutation.PlanType(); ok {
+		if err := subscriptionplan.PlanTypeValidator(v); err != nil {
+			return &ValidationError{Name: "plan_type", err: fmt.Errorf(`ent: validator failed for field "SubscriptionPlan.plan_type": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Name(); ok {
 		if err := subscriptionplan.NameValidator(v); err != nil {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "SubscriptionPlan.name": %w`, err)}
@@ -389,6 +408,9 @@ func (_u *SubscriptionPlanUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if _u.mutation.WalletQuotaUsdCleared() {
 		_spec.ClearField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64)
+	}
+	if value, ok := _u.mutation.PlanType(); ok {
+		_spec.SetField(subscriptionplan.FieldPlanType, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(subscriptionplan.FieldName, field.TypeString, value)
@@ -554,6 +576,20 @@ func (_u *SubscriptionPlanUpdateOne) AddWalletQuotaUsd(v float64) *SubscriptionP
 // ClearWalletQuotaUsd clears the value of the "wallet_quota_usd" field.
 func (_u *SubscriptionPlanUpdateOne) ClearWalletQuotaUsd() *SubscriptionPlanUpdateOne {
 	_u.mutation.ClearWalletQuotaUsd()
+	return _u
+}
+
+// SetPlanType sets the "plan_type" field.
+func (_u *SubscriptionPlanUpdateOne) SetPlanType(v string) *SubscriptionPlanUpdateOne {
+	_u.mutation.SetPlanType(v)
+	return _u
+}
+
+// SetNillablePlanType sets the "plan_type" field if the given value is not nil.
+func (_u *SubscriptionPlanUpdateOne) SetNillablePlanType(v *string) *SubscriptionPlanUpdateOne {
+	if v != nil {
+		_u.SetPlanType(*v)
+	}
 	return _u
 }
 
@@ -829,6 +865,11 @@ func (_u *SubscriptionPlanUpdateOne) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *SubscriptionPlanUpdateOne) check() error {
+	if v, ok := _u.mutation.PlanType(); ok {
+		if err := subscriptionplan.PlanTypeValidator(v); err != nil {
+			return &ValidationError{Name: "plan_type", err: fmt.Errorf(`ent: validator failed for field "SubscriptionPlan.plan_type": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Name(); ok {
 		if err := subscriptionplan.NameValidator(v); err != nil {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "SubscriptionPlan.name": %w`, err)}
@@ -893,6 +934,9 @@ func (_u *SubscriptionPlanUpdateOne) sqlSave(ctx context.Context) (_node *Subscr
 	}
 	if _u.mutation.WalletQuotaUsdCleared() {
 		_spec.ClearField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64)
+	}
+	if value, ok := _u.mutation.PlanType(); ok {
+		_spec.SetField(subscriptionplan.FieldPlanType, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(subscriptionplan.FieldName, field.TypeString, value)

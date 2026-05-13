@@ -21,6 +21,8 @@ type SubscriptionPlan struct {
 	GroupID *int64 `json:"group_id,omitempty"`
 	// 钱包模式月度总额度（USD）。NOT NULL = v4 钱包；NULL = v3 单 group
 	WalletQuotaUsd *float64 `json:"wallet_quota_usd,omitempty"`
+	// subscription = 月卡（validity_days 控时长，到期冻结）；credits = 额度卡（永久有效）
+	PlanType string `json:"plan_type,omitempty"`
 	// Name holds the value of the "name" field.
 	Name string `json:"name,omitempty"`
 	// Description holds the value of the "description" field.
@@ -80,7 +82,7 @@ func (*SubscriptionPlan) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullFloat64)
 		case subscriptionplan.FieldID, subscriptionplan.FieldGroupID, subscriptionplan.FieldValidityDays, subscriptionplan.FieldSortOrder:
 			values[i] = new(sql.NullInt64)
-		case subscriptionplan.FieldName, subscriptionplan.FieldDescription, subscriptionplan.FieldValidityUnit, subscriptionplan.FieldFeatures, subscriptionplan.FieldProductName:
+		case subscriptionplan.FieldPlanType, subscriptionplan.FieldName, subscriptionplan.FieldDescription, subscriptionplan.FieldValidityUnit, subscriptionplan.FieldFeatures, subscriptionplan.FieldProductName:
 			values[i] = new(sql.NullString)
 		case subscriptionplan.FieldCreatedAt, subscriptionplan.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -118,6 +120,12 @@ func (_m *SubscriptionPlan) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.WalletQuotaUsd = new(float64)
 				*_m.WalletQuotaUsd = value.Float64
+			}
+		case subscriptionplan.FieldPlanType:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field plan_type", values[i])
+			} else if value.Valid {
+				_m.PlanType = value.String
 			}
 		case subscriptionplan.FieldName:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -242,6 +250,9 @@ func (_m *SubscriptionPlan) String() string {
 		builder.WriteString("wallet_quota_usd=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("plan_type=")
+	builder.WriteString(_m.PlanType)
 	builder.WriteString(", ")
 	builder.WriteString("name=")
 	builder.WriteString(_m.Name)

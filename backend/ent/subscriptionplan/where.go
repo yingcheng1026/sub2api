@@ -65,6 +65,11 @@ func WalletQuotaUsd(v float64) predicate.SubscriptionPlan {
 	return predicate.SubscriptionPlan(sql.FieldEQ(FieldWalletQuotaUsd, v))
 }
 
+// PlanType applies equality check predicate on the "plan_type" field. It's identical to PlanTypeEQ.
+func PlanType(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldEQ(FieldPlanType, v))
+}
+
 // Name applies equality check predicate on the "name" field. It's identical to NameEQ.
 func Name(v string) predicate.SubscriptionPlan {
 	return predicate.SubscriptionPlan(sql.FieldEQ(FieldName, v))
@@ -223,6 +228,71 @@ func WalletQuotaUsdIsNil() predicate.SubscriptionPlan {
 // WalletQuotaUsdNotNil applies the NotNil predicate on the "wallet_quota_usd" field.
 func WalletQuotaUsdNotNil() predicate.SubscriptionPlan {
 	return predicate.SubscriptionPlan(sql.FieldNotNull(FieldWalletQuotaUsd))
+}
+
+// PlanTypeEQ applies the EQ predicate on the "plan_type" field.
+func PlanTypeEQ(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldEQ(FieldPlanType, v))
+}
+
+// PlanTypeNEQ applies the NEQ predicate on the "plan_type" field.
+func PlanTypeNEQ(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldNEQ(FieldPlanType, v))
+}
+
+// PlanTypeIn applies the In predicate on the "plan_type" field.
+func PlanTypeIn(vs ...string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldIn(FieldPlanType, vs...))
+}
+
+// PlanTypeNotIn applies the NotIn predicate on the "plan_type" field.
+func PlanTypeNotIn(vs ...string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldNotIn(FieldPlanType, vs...))
+}
+
+// PlanTypeGT applies the GT predicate on the "plan_type" field.
+func PlanTypeGT(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldGT(FieldPlanType, v))
+}
+
+// PlanTypeGTE applies the GTE predicate on the "plan_type" field.
+func PlanTypeGTE(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldGTE(FieldPlanType, v))
+}
+
+// PlanTypeLT applies the LT predicate on the "plan_type" field.
+func PlanTypeLT(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldLT(FieldPlanType, v))
+}
+
+// PlanTypeLTE applies the LTE predicate on the "plan_type" field.
+func PlanTypeLTE(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldLTE(FieldPlanType, v))
+}
+
+// PlanTypeContains applies the Contains predicate on the "plan_type" field.
+func PlanTypeContains(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldContains(FieldPlanType, v))
+}
+
+// PlanTypeHasPrefix applies the HasPrefix predicate on the "plan_type" field.
+func PlanTypeHasPrefix(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldHasPrefix(FieldPlanType, v))
+}
+
+// PlanTypeHasSuffix applies the HasSuffix predicate on the "plan_type" field.
+func PlanTypeHasSuffix(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldHasSuffix(FieldPlanType, v))
+}
+
+// PlanTypeEqualFold applies the EqualFold predicate on the "plan_type" field.
+func PlanTypeEqualFold(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldEqualFold(FieldPlanType, v))
+}
+
+// PlanTypeContainsFold applies the ContainsFold predicate on the "plan_type" field.
+func PlanTypeContainsFold(v string) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldContainsFold(FieldPlanType, v))
 }
 
 // NameEQ applies the EQ predicate on the "name" field.

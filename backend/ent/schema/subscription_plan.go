@@ -42,6 +42,14 @@ func (SubscriptionPlan) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Comment("钱包模式月度总额度（USD）。NOT NULL = v4 钱包；NULL = v3 单 group"),
+		// plan_type 区分月卡 / 额度卡：
+		//   subscription = 月卡，validity_days 控时长（30 天），到期冻结余额
+		//   credits      = 额度卡，永久有效（validity_days=36500），烧完为止
+		// 取值与互斥约束（credits 必须钱包模式）由 migration 153 保证。
+		field.String("plan_type").
+			MaxLen(16).
+			Default("subscription").
+			Comment("subscription = 月卡（validity_days 控时长，到期冻结）；credits = 额度卡（永久有效）"),
 		field.String("name").
 			MaxLen(100).
 			NotEmpty(),
