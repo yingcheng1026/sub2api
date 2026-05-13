@@ -438,6 +438,13 @@ func (a *BufferedResponseAccumulator) HasContent() bool {
 	return a.text.Len() > 0 || len(a.funcCalls) > 0 || a.reasoning.Len() > 0
 }
 
+// HasFunctionCalls reports whether function/tool call output was accumulated.
+// Non-streaming gateways use this to avoid synthesizing a successful response
+// from a potentially partial tool call when an upstream stream ends abruptly.
+func (a *BufferedResponseAccumulator) HasFunctionCalls() bool {
+	return len(a.funcCalls) > 0
+}
+
 // BuildOutput constructs a []ResponsesOutput from the accumulated delta
 // content. The order matches what ResponsesToChatCompletions expects:
 // reasoning → message → function_calls.
