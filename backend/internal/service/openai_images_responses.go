@@ -492,6 +492,24 @@ func buildOpenAIImagesStreamErrorBody(message string) []byte {
 	return body
 }
 
+func buildOpenAIImagesFailoverBody(err error) []byte {
+	message := "upstream request failed"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		message = sanitizeUpstreamErrorMessage(err.Error())
+	}
+	body := []byte(`{"error":{"type":"upstream_error","message":""}}`)
+	body, _ = sjson.SetBytes(body, "error.message", message)
+	return body
+}
+
+func newOpenAIImagesTransientFailoverError(err error, retryableOnSameAccount bool) *UpstreamFailoverError {
+	return &UpstreamFailoverError{
+		StatusCode:             http.StatusBadGateway,
+		ResponseBody:           buildOpenAIImagesFailoverBody(err),
+		RetryableOnSameAccount: retryableOnSameAccount,
+	}
+}
+
 func (s *OpenAIGatewayService) writeOpenAIImagesStreamEvent(c *gin.Context, flusher http.Flusher, eventName string, payload []byte) error {
 	if strings.TrimSpace(eventName) != "" {
 		if _, err := fmt.Fprintf(c.Writer, "event: %s\n", eventName); err != nil {
@@ -789,7 +807,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 			Kind:               "request_error",
 			Message:            safeErr,
 		})
-		return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+		return nil, newOpenAIImagesTransientFailoverError(fmt.Errorf("upstream request failed: %s", safeErr), account.IsPoolMode())
 	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
@@ -832,7 +850,19 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	} else {
 		usage, imageCount, err = s.handleOpenAIImagesOAuthNonStreamingResponse(resp, c, parsed.ResponseFormat, requestModel)
 		if err != nil {
-			return nil, err
+			safeErr := sanitizeUpstreamErrorMessage(err.Error())
+			setOpsUpstreamError(c, http.StatusBadGateway, safeErr, "")
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: resp.StatusCode,
+				UpstreamRequestID:  resp.Header.Get("x-request-id"),
+				UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
+				Kind:               "failover",
+				Message:            safeErr,
+			})
+			return nil, newOpenAIImagesTransientFailoverError(err, account.IsPoolMode())
 		}
 	}
 	if imageCount <= 0 {
