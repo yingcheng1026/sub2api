@@ -34,10 +34,12 @@ func NewRedeemHandler(adminService service.AdminService, redeemService *service.
 // GenerateRedeemCodesRequest represents generate redeem codes request
 type GenerateRedeemCodesRequest struct {
 	Count        int     `json:"count" binding:"required,min=1,max=100"`
-	Type         string  `json:"type" binding:"required,oneof=balance concurrency subscription invitation"`
+	Type         string  `json:"type" binding:"required,oneof=balance concurrency subscription invitation wallet"`
 	Value        float64 `json:"value"`
 	GroupID      *int64  `json:"group_id"`      // 订阅类型必填
 	ValidityDays int     `json:"validity_days"` // 订阅类型使用，正数增加/负数退款扣减
+	// PlanID 钱包模式额度卡 (type='wallet') 必填，链动小铺 credits SKU（B2.7）。
+	PlanID *int64 `json:"plan_id"`
 }
 
 // CreateAndRedeemCodeRequest represents creating a fixed code and redeeming it for a target user.
@@ -114,6 +116,7 @@ func (h *RedeemHandler) Generate(c *gin.Context) {
 			Value:        req.Value,
 			GroupID:      req.GroupID,
 			ValidityDays: req.ValidityDays,
+			PlanID:       req.PlanID,
 		})
 		if execErr != nil {
 			return nil, execErr

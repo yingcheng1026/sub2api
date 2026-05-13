@@ -20,6 +20,10 @@ type RedeemCode struct {
 	GroupID      *int64
 	ValidityDays int
 
+	// PlanID 钱包模式额度卡：兑换时按 plan.WalletQuotaUsd 创建 wallet 订阅。
+	// Type=RedeemTypeWallet 时必填；其它 type 为 nil。链动小铺 credits SKU 走此路径（B2.7）。
+	PlanID *int64
+
 	User  *User
 	Group *Group
 }

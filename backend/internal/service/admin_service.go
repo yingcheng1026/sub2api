@@ -397,6 +397,9 @@ type GenerateRedeemCodesInput struct {
 	Value        float64
 	GroupID      *int64 // 订阅类型专用：关联的分组ID
 	ValidityDays int    // 订阅类型专用：有效天数
+	// PlanID 钱包模式额度卡专用：兑换时按 plan.WalletQuotaUsd 创建 wallet 订阅。
+	// type='wallet' 时必填；其它 type 必须为 nil（链动小铺 credits SKU，B2.7）。
+	PlanID *int64
 }
 
 type ProxyBatchDeleteResult struct {
@@ -2971,6 +2974,9 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 		if input.GroupID == nil {
 			return nil, errors.New("group_id is required for subscription type")
 		}
+		if input.PlanID != nil {
+			return nil, errors.New("plan_id must be empty for subscription type")
+		}
 		// 验证分组存在且为订阅类型
 		group, err := s.groupRepo.GetByID(ctx, *input.GroupID)
 		if err != nil {
@@ -2978,6 +2984,26 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 		}
 		if !group.IsSubscriptionType() {
 			return nil, errors.New("group must be subscription type")
+		}
+	}
+
+	// 钱包模式额度卡：必须有 PlanID + plan 是 credits 钱包 plan（B2.7）
+	if input.Type == RedeemTypeWallet {
+		if input.PlanID == nil {
+			return nil, errors.New("plan_id is required for wallet type")
+		}
+		if input.GroupID != nil {
+			return nil, errors.New("group_id must be empty for wallet type")
+		}
+		plan, err := s.entClient.SubscriptionPlan.Get(ctx, *input.PlanID)
+		if err != nil {
+			return nil, fmt.Errorf("plan not found: %w", err)
+		}
+		if plan.WalletQuotaUsd == nil || *plan.WalletQuotaUsd <= 0 {
+			return nil, errors.New("plan is not a wallet plan (wallet_quota_usd missing)")
+		}
+		if plan.PlanType != PlanTypeCredits {
+			return nil, errors.New("plan must be credits type for wallet redeem codes")
 		}
 	}
 
@@ -3000,6 +3026,10 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 			if code.ValidityDays <= 0 {
 				code.ValidityDays = 30 // 默认30天
 			}
+		}
+		// 钱包模式额度卡：挂 plan_id；validity_days 不参与（永久有效，由 plan_type=credits 决定）
+		if input.Type == RedeemTypeWallet {
+			code.PlanID = input.PlanID
 		}
 		if err := s.redeemCodeRepo.Create(ctx, &code); err != nil {
 			return nil, err

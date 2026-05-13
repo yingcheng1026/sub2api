@@ -299,6 +299,9 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	if redeemCode.Type == RedeemTypeSubscription && redeemCode.GroupID == nil {
 		return nil, infraerrors.BadRequest("REDEEM_CODE_INVALID", "invalid subscription redeem code: missing group_id")
 	}
+	if redeemCode.Type == RedeemTypeWallet && redeemCode.PlanID == nil {
+		return nil, infraerrors.BadRequest("REDEEM_CODE_INVALID", "invalid wallet redeem code: missing plan_id")
+	}
 
 	// 获取用户信息
 	user, err := s.userRepo.GetByID(ctx, userID)
@@ -368,6 +371,32 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 			if err != nil {
 				return nil, fmt.Errorf("assign or extend subscription: %w", err)
 			}
+		}
+
+	case RedeemTypeWallet:
+		// 钱包模式额度卡（B2.7）：按 plan.WalletQuotaUsd 创建 wallet 订阅。
+		// plan_type='credits' → 永久 expires_at（B2.3 已在 service 内处理）。
+		// 已有 active 钱包 → topup 叠加（B2.4 已在 service 内处理）。
+		plan, err := s.entClient.SubscriptionPlan.Get(txCtx, *redeemCode.PlanID)
+		if err != nil {
+			return nil, fmt.Errorf("wallet plan %d not found: %w", *redeemCode.PlanID, err)
+		}
+		if plan.WalletQuotaUsd == nil || *plan.WalletQuotaUsd <= 0 {
+			return nil, infraerrors.BadRequest("REDEEM_CODE_INVALID", "redeem plan is not a wallet plan")
+		}
+		walletInitial := *plan.WalletQuotaUsd
+		planID := plan.ID
+		_, err = s.subscriptionService.AssignSubscription(txCtx, &AssignSubscriptionInput{
+			UserID:           userID,
+			ValidityDays:     plan.ValidityDays,
+			AssignedBy:       0,
+			Notes:            fmt.Sprintf("通过兑换码 %s 兑换额度卡", redeemCode.Code),
+			WalletInitialUSD: &walletInitial,
+			PlanID:           &planID,
+			PlanType:         plan.PlanType,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("assign wallet subscription: %w", err)
 		}
 
 	default:
