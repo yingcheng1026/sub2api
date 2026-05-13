@@ -358,6 +358,11 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	var finalResponse *apicompat.ResponsesResponse
 	var usage OpenAIUsage
 	acc := apicompat.NewBufferedResponseAccumulator()
+	eventsSeen := 0
+	lastEventType := ""
+	lastResponseID := ""
+	terminalEventSeen := false
+	terminalResponsePresent := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -374,13 +379,20 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 			)
 			continue
 		}
+		eventsSeen++
+		lastEventType = event.Type
+		if event.Response != nil && strings.TrimSpace(event.Response.ID) != "" {
+			lastResponseID = event.Response.ID
+		}
 
 		// Accumulate delta content for fallback when terminal output is empty.
 		acc.ProcessEvent(&event)
 
-		if (event.Type == "response.completed" || event.Type == "response.done" ||
-			event.Type == "response.incomplete" || event.Type == "response.failed") &&
-			event.Response != nil {
+		if isResponsesTerminalEventType(event.Type) {
+			terminalEventSeen = true
+		}
+		if isResponsesTerminalEventType(event.Type) && event.Response != nil {
+			terminalResponsePresent = true
 			finalResponse = event.Response
 			if event.Response.Usage != nil {
 				usage = OpenAIUsage{
@@ -394,18 +406,39 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		if !errors.Is(scanErr, context.Canceled) && !errors.Is(scanErr, context.DeadlineExceeded) {
 			logger.L().Warn("openai chat_completions buffered: read error",
-				zap.Error(err),
+				zap.Error(scanErr),
 				zap.String("request_id", requestID),
 			)
 		}
 	}
 
 	if finalResponse == nil {
-		writeChatCompletionsError(c, http.StatusBadGateway, "api_error", "Upstream stream ended without a terminal response event")
-		return nil, fmt.Errorf("upstream stream ended without terminal event")
+		syntheticID := lastResponseID
+		if syntheticID == "" {
+			syntheticID = requestID
+		}
+		if synthetic := synthesizeBufferedResponsesResponse(acc, syntheticID, upstreamModel); synthetic != nil {
+			logger.L().Warn("openai chat_completions buffered: synthesized response after missing terminal event",
+				zap.String("request_id", requestID),
+				zap.String("response_id", synthetic.ID),
+				zap.Int("events_seen", eventsSeen),
+				zap.String("last_event_type", lastEventType),
+				zap.Bool("terminal_event_seen", terminalEventSeen),
+				zap.Bool("terminal_response_present", terminalResponsePresent),
+			)
+			finalResponse = synthetic
+		} else {
+			detail := bufferedMissingTerminalDetail("openai chat_completions buffered", eventsSeen, lastEventType, terminalEventSeen, terminalResponsePresent, acc, scanErr)
+			logger.L().Warn("openai chat_completions buffered: missing terminal response event",
+				zap.String("request_id", requestID),
+				zap.String("detail", detail),
+			)
+			return nil, newBufferedMissingTerminalFailover(resp, detail)
+		}
 	}
 
 	// When the terminal event has an empty output array, reconstruct from
