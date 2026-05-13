@@ -22,8 +22,8 @@ ARG FRONTEND_NODE_OPTIONS
 
 WORKDIR /app/frontend
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm 9.x until frontend/package.json declares allowed build scripts.
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # Install dependencies first (better caching)
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
