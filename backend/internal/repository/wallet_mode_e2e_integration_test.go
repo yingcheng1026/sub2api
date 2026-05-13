@@ -89,7 +89,7 @@ func TestWalletModeStandardPlanPurchaseKeyRoutingAndSharedDeduction(t *testing.T
 	subRepo := NewUserSubscriptionRepository(client)
 	apiKeySvc := service.NewAPIKeyService(apiKeyRepo, userRepo, groupRepo, subRepo, nil, nil, &config.Config{})
 	subSvc := service.NewSubscriptionService(groupRepo, subRepo, nil, client, nil)
-	subSvc.SetWalletUniversalKeyService(apiKeySvc)
+	subSvc.SetWalletGroupKeyService(apiKeySvc)
 	paymentSvc := service.NewPaymentService(client, nil, nil, nil, subSvc, nil, userRepo, groupRepo, nil)
 
 	require.NoError(t, paymentSvc.ExecuteSubscriptionFulfillment(ctx, order.ID))
@@ -102,27 +102,29 @@ func TestWalletModeStandardPlanPurchaseKeyRoutingAndSharedDeduction(t *testing.T
 	require.InDelta(t, walletQuota, *sub.WalletInitialUSD, 0.000001)
 	require.InDelta(t, walletQuota, *sub.WalletBalanceUSD, 0.000001)
 
+	// B2.2 多 key 模式：plan 关联 3 个 group → 自动建 3 把分组 key，命名 "钱包-{group.Name}"
 	keys, _, err := apiKeyRepo.ListByUserID(ctx, user.ID, defaultWalletE2EPagination(), service.APIKeyListFilters{Status: service.StatusAPIKeyActive})
 	require.NoError(t, err)
-	require.Len(t, keys, 1)
-	require.Nil(t, keys[0].GroupID)
-	require.Equal(t, service.WalletUniversalAPIKeyName, keys[0].Name)
+	require.Len(t, keys, 3, "应建 3 把分组 key（GPT / Claude Sonnet / Gemini）")
 
-	router := service.NewModelRouterServiceWithRoutes(groupRepo, service.DefaultModelRoutes())
-	routedGPTGroupID, err := router.ResolveGroupID(ctx, user.ID, "gpt-5")
-	require.NoError(t, err)
-	require.Equal(t, gptGroup.ID, routedGPTGroupID)
-	routedSonnetGroupID, err := router.ResolveGroupID(ctx, user.ID, "claude-sonnet-4-6")
-	require.NoError(t, err)
-	require.Equal(t, sonnetGroup.ID, routedSonnetGroupID)
-	routedGeminiGroupID, err := router.ResolveGroupID(ctx, user.ID, "gemini-2.5-pro")
-	require.NoError(t, err)
-	require.Equal(t, geminiGroup.ID, routedGeminiGroupID)
+	keysByGroupID := make(map[int64]service.APIKey, len(keys))
+	for _, k := range keys {
+		require.True(t, service.IsWalletGroupKeyName(k.Name), "key 名应带 钱包- 前缀，实际 %q", k.Name)
+		require.NotNil(t, k.GroupID, "钱包多 key 模式 group_id 必须非空")
+		keysByGroupID[*k.GroupID] = k
+	}
+	require.Contains(t, keysByGroupID, gptGroup.ID)
+	require.Contains(t, keysByGroupID, sonnetGroup.ID)
+	require.Contains(t, keysByGroupID, geminiGroup.ID)
+	require.Equal(t, "钱包-gpt-5", keysByGroupID[gptGroup.ID].Name)
+	require.Equal(t, "钱包-claude-sonnet", keysByGroupID[sonnetGroup.ID].Name)
+	require.Equal(t, "钱包-gemini-2-pro", keysByGroupID[geminiGroup.ID].Name)
 
+	// 各 group 的 key 独立扣款（不再依赖 ModelRouter）：用各自的 key 直接命中对应 group
 	billingRepo := NewUsageBillingRepository(client, integrationDB)
-	requireWalletChargeApplied(t, billingRepo, user.ID, keys[0].ID, sub.ID, "gpt-5", 1.0*gptGroup.RateMultiplier)
-	requireWalletChargeApplied(t, billingRepo, user.ID, keys[0].ID, sub.ID, "claude-sonnet-4-6", 1.0*sonnetGroup.RateMultiplier)
-	requireWalletChargeApplied(t, billingRepo, user.ID, keys[0].ID, sub.ID, "gemini-2.5-pro", 1.0*geminiGroup.RateMultiplier)
+	requireWalletChargeApplied(t, billingRepo, user.ID, keysByGroupID[gptGroup.ID].ID, sub.ID, "gpt-5", 1.0*gptGroup.RateMultiplier)
+	requireWalletChargeApplied(t, billingRepo, user.ID, keysByGroupID[sonnetGroup.ID].ID, sub.ID, "claude-sonnet-4-6", 1.0*sonnetGroup.RateMultiplier)
+	requireWalletChargeApplied(t, billingRepo, user.ID, keysByGroupID[geminiGroup.ID].ID, sub.ID, "gemini-2.5-pro", 1.0*geminiGroup.RateMultiplier)
 
 	expectedBalance := walletQuota - gptGroup.RateMultiplier - sonnetGroup.RateMultiplier - geminiGroup.RateMultiplier
 	var balance float64

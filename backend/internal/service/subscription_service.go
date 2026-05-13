@@ -11,6 +11,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -46,7 +47,7 @@ type SubscriptionService struct {
 	userSubRepo         UserSubscriptionRepository
 	billingCacheService *BillingCacheService
 	entClient           *dbent.Client
-	walletKeyService    WalletUniversalKeyService
+	walletKeyService    WalletGroupKeyService
 
 	// L1 缓存：加速中间件热路径的订阅查询
 	subCacheL1     *ristretto.Cache
@@ -57,8 +58,16 @@ type SubscriptionService struct {
 	maintenanceQueue *SubscriptionMaintenanceQueue
 }
 
-type WalletUniversalKeyService interface {
-	EnsureWalletUniversalKey(ctx context.Context, userID int64) (*APIKey, bool, error)
+// WalletGroupKeyService 钱包多 key 模式接口：按 plan 关联的 group 列表为用户建/复用 N 把 api_key。
+//
+// 命名规则：每把 key 命名 "钱包-" + group.Name（例如 "钱包-gpt-5"、"钱包-claude-sonnet"）。
+// 幂等：传入相同 groupIDs 多次调用，只为缺失的 (userID, groupID) 组合新建 key，已存在的复用。
+//
+// 返回 (allKeys, createdCount, err)：
+//   - allKeys：本次涉及到的所有 key（含复用 + 新建），顺序与 groupIDs 对应（缺失项跳过）。
+//   - createdCount：本次实际新建的 key 数（不含复用）。
+type WalletGroupKeyService interface {
+	EnsureWalletGroupKeys(ctx context.Context, userID int64, groupIDs []int64) ([]APIKey, int, error)
 }
 
 // NewSubscriptionService 创建订阅服务
@@ -74,7 +83,7 @@ func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscript
 	return svc
 }
 
-func (s *SubscriptionService) SetWalletUniversalKeyService(keyService WalletUniversalKeyService) {
+func (s *SubscriptionService) SetWalletGroupKeyService(keyService WalletGroupKeyService) {
 	s.walletKeyService = keyService
 }
 
@@ -168,6 +177,10 @@ type AssignSubscriptionInput struct {
 	// 初始余额=该值（同时写入 wallet_initial_usd 和 wallet_balance_usd）。
 	// schema 上的 partial unique index 保证一个用户最多一条 active 钱包订阅。
 	WalletInitialUSD *float64
+
+	// PlanID 钱包模式下用于查 subscription_plan_groups 决定建哪些 group 的 key。
+	// 为 nil 时跳过自动建 key（仅创建钱包订阅，admin 手动开通场景）。
+	PlanID *int64
 }
 
 // IsWalletAssign 判断当前 input 是否为钱包模式分配。
@@ -376,7 +389,7 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 	if err != nil {
 		return nil, false, err
 	}
-	if err := s.ensureWalletUniversalKey(ctx, input.UserID, sub); err != nil {
+	if err := s.ensureWalletGroupKeys(ctx, input, sub); err != nil {
 		return nil, false, err
 	}
 
@@ -385,17 +398,49 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 	return sub, false, nil
 }
 
-func (s *SubscriptionService) ensureWalletUniversalKey(ctx context.Context, userID int64, sub *UserSubscription) error {
-	if s.walletKeyService == nil || sub == nil {
+// ensureWalletGroupKeys 钱包激活时按 plan 关联的 group 列表自动建 N 把 api_key。
+//
+// 触发条件：input.PlanID != nil。否则跳过（admin 手动 /assign 不带 plan 的场景）。
+//
+// 失败策略：建 key 失败返回错误，钱包订阅在外层事务中应一并回滚。
+func (s *SubscriptionService) ensureWalletGroupKeys(ctx context.Context, input *AssignSubscriptionInput, sub *UserSubscription) error {
+	if s.walletKeyService == nil || sub == nil || input == nil || input.PlanID == nil {
 		return nil
 	}
-	key, created, err := s.walletKeyService.EnsureWalletUniversalKey(ctx, userID)
+	groupIDs, err := s.lookupPlanGroupIDs(ctx, *input.PlanID)
 	if err != nil {
-		return fmt.Errorf("ensure wallet universal api key: %w", err)
+		return fmt.Errorf("lookup plan groups: %w", err)
 	}
-	sub.WalletUniversalKey = key
-	sub.WalletUniversalKeyCreated = created
+	if len(groupIDs) == 0 {
+		// plan 未关联任何 group → 没有可建的 key。不报错，由 admin 配置检查兜底。
+		return nil
+	}
+	keys, createdCount, err := s.walletKeyService.EnsureWalletGroupKeys(ctx, input.UserID, groupIDs)
+	if err != nil {
+		return fmt.Errorf("ensure wallet group api keys: %w", err)
+	}
+	sub.WalletGroupKeys = keys
+	sub.WalletGroupKeysCreatedCount = createdCount
 	return nil
+}
+
+// lookupPlanGroupIDs 查询 plan 关联的 group ID 列表（subscription_plan_groups 表）。
+func (s *SubscriptionService) lookupPlanGroupIDs(ctx context.Context, planID int64) ([]int64, error) {
+	if s.entClient == nil {
+		return nil, nil
+	}
+	rows, err := s.entClient.SubscriptionPlanGroup.Query().
+		Where(subscriptionplangroup.PlanIDEQ(planID)).
+		Select(subscriptionplangroup.FieldGroupID).
+		Ints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int64, 0, len(rows))
+	for _, v := range rows {
+		out = append(out, int64(v))
+	}
+	return out, nil
 }
 
 // createWalletSubscription 创建新钱包订阅（内部方法）。group_id=NULL，

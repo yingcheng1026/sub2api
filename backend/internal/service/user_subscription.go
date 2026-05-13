@@ -37,8 +37,10 @@ type UserSubscription struct {
 	AssignedByUser *User
 
 	// Runtime-only assignment metadata used by admin wallet activation responses.
-	WalletUniversalKey        *APIKey
-	WalletUniversalKeyCreated bool
+	// 钱包激活时按 plan 关联的 N 个 group 各自建一把 api_key，命名「钱包-{group.Name}」。
+	// WalletGroupKeysCreatedCount 仅统计本次新建（已存在的会复用，不计入）。
+	WalletGroupKeys             []APIKey
+	WalletGroupKeysCreatedCount int
 }
 
 // IsWalletMode 钱包模式订阅判别。

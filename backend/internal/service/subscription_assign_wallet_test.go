@@ -38,65 +38,50 @@ func TestAssignWalletSubscriptionCreatesNewWallet(t *testing.T) {
 	require.Equal(t, 1, subRepo.createCalls)
 }
 
-type walletUniversalKeyEnsurerStub struct {
-	calls   int
-	userIDs []int64
-	key     *APIKey
-	created bool
-	err     error
+// walletGroupKeyEnsurerStub mock 出 EnsureWalletGroupKeys 行为。
+// 注：因为 SubscriptionService 在 input.PlanID 为 nil 时不会调 ensureWalletGroupKeys，
+// 所以本 stub 只有当传入 PlanID 时才被调用。
+//
+// 但 SubscriptionService 还需要查 plan_groups → groupIDs，依赖 entClient.SubscriptionPlanGroup。
+// 单元测试用 entClient=nil 跳过 lookupPlanGroupIDs（返回 nil, nil），所以 stub 收不到调用。
+// 真正覆盖按 plan_groups 建 N 把 key 的逻辑由 integration test (wallet_mode_e2e) 负责。
+type walletGroupKeyEnsurerStub struct {
+	calls    int
+	userIDs  []int64
+	groupIDs [][]int64
+	keys     []APIKey
+	created  int
+	err      error
 }
 
-func (s *walletUniversalKeyEnsurerStub) EnsureWalletUniversalKey(_ context.Context, userID int64) (*APIKey, bool, error) {
+func (s *walletGroupKeyEnsurerStub) EnsureWalletGroupKeys(_ context.Context, userID int64, groupIDs []int64) ([]APIKey, int, error) {
 	s.calls++
 	s.userIDs = append(s.userIDs, userID)
-	return s.key, s.created, s.err
+	s.groupIDs = append(s.groupIDs, groupIDs)
+	return s.keys, s.created, s.err
 }
 
-func TestAssignWalletSubscriptionEnsuresUniversalKey(t *testing.T) {
+// TestAssignWalletSubscriptionSkipsKeyCreationWhenNoPlanID 验证：input.PlanID==nil 时
+// 仅创建钱包订阅，不触发 ensureWalletGroupKeys（admin 手动 /assign 不带 plan_id 的场景）。
+func TestAssignWalletSubscriptionSkipsKeyCreationWhenNoPlanID(t *testing.T) {
 	subRepo := newSubscriptionUserSubRepoStub()
 	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
-	keyEnsurer := &walletUniversalKeyEnsurerStub{
-		key:     &APIKey{ID: 77, UserID: 1001, Name: WalletUniversalAPIKeyName, Status: StatusAPIKeyActive},
-		created: true,
-	}
-	svc.SetWalletUniversalKeyService(keyEnsurer)
+	keyEnsurer := &walletGroupKeyEnsurerStub{}
+	svc.SetWalletGroupKeyService(keyEnsurer)
 
 	initial := 1500.0
 	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
 		UserID:           1001,
 		ValidityDays:     30,
 		WalletInitialUSD: &initial,
+		// PlanID 不传 → 跳过自动建 key
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, 1, keyEnsurer.calls)
-	require.Equal(t, []int64{1001}, keyEnsurer.userIDs)
-	require.NotNil(t, sub.WalletUniversalKey)
-	require.Equal(t, int64(77), sub.WalletUniversalKey.ID)
-	require.True(t, sub.WalletUniversalKeyCreated)
-}
-
-func TestAssignWalletSubscriptionSkipsCreatingUniversalKeyWhenExisting(t *testing.T) {
-	subRepo := newSubscriptionUserSubRepoStub()
-	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
-	keyEnsurer := &walletUniversalKeyEnsurerStub{
-		key:     &APIKey{ID: 88, UserID: 1001, Name: WalletUniversalAPIKeyName, Status: StatusAPIKeyActive},
-		created: false,
-	}
-	svc.SetWalletUniversalKeyService(keyEnsurer)
-
-	initial := 1500.0
-	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
-		UserID:           1001,
-		ValidityDays:     30,
-		WalletInitialUSD: &initial,
-	})
-
-	require.NoError(t, err)
-	require.Equal(t, 1, keyEnsurer.calls)
-	require.NotNil(t, sub.WalletUniversalKey)
-	require.Equal(t, int64(88), sub.WalletUniversalKey.ID)
-	require.False(t, sub.WalletUniversalKeyCreated)
+	require.NotNil(t, sub)
+	require.Equal(t, 0, keyEnsurer.calls, "无 plan_id 时不应触发建 key")
+	require.Nil(t, sub.WalletGroupKeys)
+	require.Equal(t, 0, sub.WalletGroupKeysCreatedCount)
 }
 
 // TestAssignWalletSubscriptionConflictWhenActiveExists 验证：用户已有 active

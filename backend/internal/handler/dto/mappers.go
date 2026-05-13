@@ -706,19 +706,26 @@ func UserSubscriptionFromServiceAdmin(sub *service.UserSubscription) *AdminUserS
 	if sub == nil {
 		return nil
 	}
-	var walletUniversalKeyCreated *bool
-	if sub.WalletUniversalKey != nil {
-		created := sub.WalletUniversalKeyCreated
-		walletUniversalKeyCreated = &created
+	var walletGroupKeys []APIKey
+	var createdCount *int
+	if len(sub.WalletGroupKeys) > 0 {
+		walletGroupKeys = make([]APIKey, 0, len(sub.WalletGroupKeys))
+		for i := range sub.WalletGroupKeys {
+			if dtoKey := APIKeyFromService(&sub.WalletGroupKeys[i]); dtoKey != nil {
+				walletGroupKeys = append(walletGroupKeys, *dtoKey)
+			}
+		}
+		c := sub.WalletGroupKeysCreatedCount
+		createdCount = &c
 	}
 	return &AdminUserSubscription{
-		UserSubscription:          userSubscriptionFromServiceBase(sub),
-		AssignedBy:                sub.AssignedBy,
-		AssignedAt:                sub.AssignedAt,
-		Notes:                     sub.Notes,
-		AssignedByUser:            UserFromServiceShallow(sub.AssignedByUser),
-		WalletUniversalKey:        APIKeyFromService(sub.WalletUniversalKey),
-		WalletUniversalKeyCreated: walletUniversalKeyCreated,
+		UserSubscription:            userSubscriptionFromServiceBase(sub),
+		AssignedBy:                  sub.AssignedBy,
+		AssignedAt:                  sub.AssignedAt,
+		Notes:                       sub.Notes,
+		AssignedByUser:              UserFromServiceShallow(sub.AssignedByUser),
+		WalletGroupKeys:             walletGroupKeys,
+		WalletGroupKeysCreatedCount: createdCount,
 	}
 }
 

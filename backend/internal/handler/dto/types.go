@@ -530,8 +530,10 @@ type AdminUserSubscription struct {
 
 	AssignedByUser *User `json:"assigned_by_user,omitempty"`
 
-	WalletUniversalKey        *APIKey `json:"wallet_universal_key,omitempty"`
-	WalletUniversalKeyCreated *bool   `json:"wallet_universal_key_created,omitempty"`
+	// 钱包激活返回的 N 把分组 key（命名 "钱包-{group.Name}"）。
+	// CreatedCount 仅统计本次新建（复用的不计入），用于 admin /assign UI 区分"已建过"与"刚建好"。
+	WalletGroupKeys             []APIKey `json:"wallet_group_keys,omitempty"`
+	WalletGroupKeysCreatedCount *int     `json:"wallet_group_keys_created_count,omitempty"`
 }
 
 type BulkAssignResult struct {

@@ -444,7 +444,7 @@ func ProvideSubscriptionService(
 	apiKeyService *APIKeyService,
 ) *SubscriptionService {
 	svc := NewSubscriptionService(groupRepo, userSubRepo, billingCacheService, entClient, cfg)
-	svc.SetWalletUniversalKeyService(apiKeyService)
+	svc.SetWalletGroupKeyService(apiKeyService)
 	return svc
 }
 

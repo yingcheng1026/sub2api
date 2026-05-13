@@ -375,12 +375,14 @@ func (s *PaymentService) doWalletSub(ctx context.Context, o *dbent.PaymentOrder,
 	}
 
 	walletInitial := *plan.WalletQuotaUsd
+	planID := plan.ID
 	_, err = s.subscriptionSvc.AssignSubscription(ctx, &AssignSubscriptionInput{
 		UserID:           o.UserID,
 		ValidityDays:     days,
 		AssignedBy:       0,
 		Notes:            orderNote,
 		WalletInitialUSD: &walletInitial,
+		PlanID:           &planID,
 	})
 	if err != nil {
 		return fmt.Errorf("assign wallet subscription: %w", err)

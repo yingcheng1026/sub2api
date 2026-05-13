@@ -45,7 +45,22 @@ const (
 	apiKeyLastUsedFailBackoff = 5 * time.Second
 )
 
-const WalletUniversalAPIKeyName = "钱包通用 key（自动路由）"
+// 钱包多 key 模式：每把 key 命名为 "钱包-" + group.Name（如 "钱包-gpt-5"）。
+// 前端可按 prefix 识别钱包 key（HasPrefix），与 v3 单 group 老 key 区分。
+const WalletGroupKeyNamePrefix = "钱包-"
+
+// IsWalletGroupKeyName 判断 key 名是否为钱包多 key 模式生成的命名格式。
+func IsWalletGroupKeyName(name string) bool {
+	return strings.HasPrefix(name, WalletGroupKeyNamePrefix)
+}
+
+// walletGroupKeyName 为指定 group 拼装钱包 key 命名。
+func walletGroupKeyName(group *Group) string {
+	if group == nil {
+		return WalletGroupKeyNamePrefix
+	}
+	return WalletGroupKeyNamePrefix + group.Name
+}
 
 type APIKeyRepository interface {
 	Create(ctx context.Context, key *APIKey) error
@@ -448,34 +463,67 @@ func (s *APIKeyService) List(ctx context.Context, userID int64, params paginatio
 	return keys, pagination, nil
 }
 
-// EnsureWalletUniversalKey returns an existing usable wallet universal key, or
-// creates one when the user does not already have an active null-group key.
-func (s *APIKeyService) EnsureWalletUniversalKey(ctx context.Context, userID int64) (*APIKey, bool, error) {
-	keys, _, err := s.List(ctx, userID, pagination.PaginationParams{
+// EnsureWalletGroupKeys 钱包激活 / 充值时为用户按 groupIDs 建/复用 N 把分组 key。
+//
+// 命名：每把 key 命名为 "钱包-{group.Name}"。
+// 幂等：若用户名下已有 (groupID, name="钱包-{Name}", status=active, not expired/exhausted)
+//
+//	的 key → 复用；否则新建。
+// 返回：(allKeys, createdCount, err)。allKeys 顺序按入参 groupIDs。
+func (s *APIKeyService) EnsureWalletGroupKeys(ctx context.Context, userID int64, groupIDs []int64) ([]APIKey, int, error) {
+	if len(groupIDs) == 0 {
+		return nil, 0, nil
+	}
+
+	// 查用户所有 active key 一次，避免每个 group 查一次
+	existingKeys, _, err := s.List(ctx, userID, pagination.PaginationParams{
 		Page:      1,
-		PageSize:  100,
+		PageSize:  500,
 		SortBy:    "created_at",
 		SortOrder: "desc",
 	}, APIKeyListFilters{Status: StatusAPIKeyActive})
 	if err != nil {
-		return nil, false, err
-	}
-	for i := range keys {
-		key := &keys[i]
-		if key.GroupID != nil || !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() {
-			continue
-		}
-		return key, false, nil
+		return nil, 0, err
 	}
 
-	key, err := s.Create(ctx, userID, CreateAPIKeyRequest{
-		Name:    WalletUniversalAPIKeyName,
-		GroupID: nil,
-	})
-	if err != nil {
-		return nil, false, err
+	// 按 groupID 索引可复用的钱包 key
+	reusable := make(map[int64]*APIKey, len(existingKeys))
+	for i := range existingKeys {
+		key := &existingKeys[i]
+		if key.GroupID == nil || !IsWalletGroupKeyName(key.Name) {
+			continue
+		}
+		if !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() {
+			continue
+		}
+		reusable[*key.GroupID] = key
 	}
-	return key, true, nil
+
+	result := make([]APIKey, 0, len(groupIDs))
+	created := 0
+	for _, gid := range groupIDs {
+		if exist, ok := reusable[gid]; ok {
+			result = append(result, *exist)
+			continue
+		}
+		group, err := s.groupRepo.GetByID(ctx, gid)
+		if err != nil {
+			return nil, created, fmt.Errorf("get group %d: %w", gid, err)
+		}
+		if group == nil {
+			continue
+		}
+		newKey, err := s.Create(ctx, userID, CreateAPIKeyRequest{
+			Name:    walletGroupKeyName(group),
+			GroupID: &gid,
+		})
+		if err != nil {
+			return nil, created, fmt.Errorf("create wallet group key for group %d: %w", gid, err)
+		}
+		created++
+		result = append(result, *newKey)
+	}
+	return result, created, nil
 }
 
 func (s *APIKeyService) GetWalletModelRoutes(ctx context.Context, userID int64, modelRoutes []ModelRoute) ([]WalletModelRouteInfo, error) {

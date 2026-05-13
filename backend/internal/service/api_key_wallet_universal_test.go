@@ -9,19 +9,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type walletUniversalAPIKeyRepoStub struct {
+type walletGroupKeyAPIKeyRepoStub struct {
 	APIKeyRepository
 
 	keys        []APIKey
 	createCalls int
 	listCalls   int
-	created     *APIKey
+	created     []APIKey
 	listUserID  int64
 	listParams  pagination.PaginationParams
 	listFilters APIKeyListFilters
 }
 
-func (s *walletUniversalAPIKeyRepoStub) ListByUserID(_ context.Context, userID int64, params pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error) {
+func (s *walletGroupKeyAPIKeyRepoStub) ListByUserID(_ context.Context, userID int64, params pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error) {
 	s.listCalls++
 	s.listUserID = userID
 	s.listParams = params
@@ -31,60 +31,128 @@ func (s *walletUniversalAPIKeyRepoStub) ListByUserID(_ context.Context, userID i
 	return out, &pagination.PaginationResult{Total: int64(len(out))}, nil
 }
 
-func (s *walletUniversalAPIKeyRepoStub) Create(_ context.Context, key *APIKey) error {
+func (s *walletGroupKeyAPIKeyRepoStub) Create(_ context.Context, key *APIKey) error {
 	s.createCalls++
-	cp := *key
-	cp.ID = 100 + int64(s.createCalls)
-	key.ID = cp.ID
-	s.created = &cp
+	key.ID = 100 + int64(s.createCalls)
+	s.created = append(s.created, *key)
+	// 模拟新建后追加到 keys
+	s.keys = append(s.keys, *key)
 	return nil
 }
 
-type walletUniversalUserRepoStub struct {
+type walletGroupKeyUserRepoStub struct {
 	UserRepository
 }
 
-func (s walletUniversalUserRepoStub) GetByID(_ context.Context, id int64) (*User, error) {
+func (s walletGroupKeyUserRepoStub) GetByID(_ context.Context, id int64) (*User, error) {
 	return &User{ID: id, Status: StatusActive}, nil
 }
 
-func TestAPIKeyServiceEnsureWalletUniversalKeyCreatesWhenMissing(t *testing.T) {
-	repo := &walletUniversalAPIKeyRepoStub{}
-	svc := NewAPIKeyService(repo, walletUniversalUserRepoStub{}, nil, nil, nil, nil, &config.Config{})
+type walletGroupKeyGroupRepoStub struct {
+	GroupRepository
 
-	key, created, err := svc.EnsureWalletUniversalKey(context.Background(), 42)
-
-	require.NoError(t, err)
-	require.True(t, created)
-	require.NotNil(t, key)
-	require.Equal(t, 1, repo.listCalls)
-	require.Equal(t, int64(42), repo.listUserID)
-	require.Equal(t, StatusAPIKeyActive, repo.listFilters.Status)
-	require.Equal(t, 1, repo.createCalls)
-	require.Equal(t, WalletUniversalAPIKeyName, key.Name)
-	require.Nil(t, key.GroupID)
-	require.Equal(t, StatusActive, key.Status)
-	require.NotEmpty(t, key.Key)
+	groups map[int64]*Group
 }
 
-func TestAPIKeyServiceEnsureWalletUniversalKeyReusesExistingActiveUniversalKey(t *testing.T) {
-	repo := &walletUniversalAPIKeyRepoStub{
+func (s walletGroupKeyGroupRepoStub) GetByID(_ context.Context, id int64) (*Group, error) {
+	if g, ok := s.groups[id]; ok {
+		return g, nil
+	}
+	return nil, nil
+}
+
+func newWalletGroupKeyTestService(repo APIKeyRepository, groupRepo GroupRepository) *APIKeyService {
+	return NewAPIKeyService(repo, walletGroupKeyUserRepoStub{}, groupRepo, nil, nil, nil, &config.Config{})
+}
+
+func TestAPIKeyServiceEnsureWalletGroupKeysCreatesAllForFreshUser(t *testing.T) {
+	repo := &walletGroupKeyAPIKeyRepoStub{}
+	groupRepo := walletGroupKeyGroupRepoStub{groups: map[int64]*Group{
+		2: {ID: 2, Name: "gpt-5", Status: StatusActive},
+		3: {ID: 3, Name: "claude-sonnet", Status: StatusActive},
+		4: {ID: 4, Name: "gemini-2-pro", Status: StatusActive},
+	}}
+	svc := newWalletGroupKeyTestService(repo, groupRepo)
+
+	keys, createdCount, err := svc.EnsureWalletGroupKeys(context.Background(), 42, []int64{2, 3, 4})
+
+	require.NoError(t, err)
+	require.Equal(t, 3, createdCount)
+	require.Len(t, keys, 3)
+	require.Equal(t, 3, repo.createCalls)
+	require.Equal(t, "钱包-gpt-5", keys[0].Name)
+	require.Equal(t, "钱包-claude-sonnet", keys[1].Name)
+	require.Equal(t, "钱包-gemini-2-pro", keys[2].Name)
+	require.NotNil(t, keys[0].GroupID)
+	require.Equal(t, int64(2), *keys[0].GroupID)
+	require.Equal(t, int64(3), *keys[1].GroupID)
+	require.Equal(t, int64(4), *keys[2].GroupID)
+}
+
+func TestAPIKeyServiceEnsureWalletGroupKeysReusesExisting(t *testing.T) {
+	gid2 := int64(2)
+	gid3 := int64(3)
+	repo := &walletGroupKeyAPIKeyRepoStub{
 		keys: []APIKey{
-			{ID: 7, UserID: 42, Key: "sk-existing", Name: "existing", GroupID: nil, Status: StatusAPIKeyActive},
+			{ID: 7, UserID: 42, Name: "钱包-gpt-5", GroupID: &gid2, Status: StatusAPIKeyActive},
+			{ID: 8, UserID: 42, Name: "钱包-claude-sonnet", GroupID: &gid3, Status: StatusAPIKeyActive},
 		},
 	}
-	svc := NewAPIKeyService(repo, walletUniversalUserRepoStub{}, nil, nil, nil, nil, &config.Config{})
+	groupRepo := walletGroupKeyGroupRepoStub{groups: map[int64]*Group{
+		2: {ID: 2, Name: "gpt-5", Status: StatusActive},
+		3: {ID: 3, Name: "claude-sonnet", Status: StatusActive},
+		4: {ID: 4, Name: "gemini-2-pro", Status: StatusActive},
+	}}
+	svc := newWalletGroupKeyTestService(repo, groupRepo)
 
-	key, created, err := svc.EnsureWalletUniversalKey(context.Background(), 42)
+	keys, createdCount, err := svc.EnsureWalletGroupKeys(context.Background(), 42, []int64{2, 3, 4})
 
 	require.NoError(t, err)
-	require.False(t, created)
-	require.NotNil(t, key)
-	require.Equal(t, int64(7), key.ID)
-	require.Equal(t, "sk-existing", key.Key)
-	require.Equal(t, 1, repo.listCalls)
+	require.Equal(t, 1, createdCount)
+	require.Len(t, keys, 3)
+	require.Equal(t, int64(7), keys[0].ID, "应复用已存在的 GPT 钱包 key")
+	require.Equal(t, int64(8), keys[1].ID, "应复用已存在的 Sonnet 钱包 key")
+	require.Equal(t, "钱包-gemini-2-pro", keys[2].Name, "Gemini 之前缺，应新建")
+}
+
+func TestAPIKeyServiceEnsureWalletGroupKeysIgnoresNonWalletKeys(t *testing.T) {
+	// 已存在的 v3 普通 key（不带"钱包-"前缀）不应被复用为钱包 key
+	gid2 := int64(2)
+	repo := &walletGroupKeyAPIKeyRepoStub{
+		keys: []APIKey{
+			{ID: 9, UserID: 42, Name: "old-v3-gpt-key", GroupID: &gid2, Status: StatusAPIKeyActive},
+		},
+	}
+	groupRepo := walletGroupKeyGroupRepoStub{groups: map[int64]*Group{
+		2: {ID: 2, Name: "gpt-5", Status: StatusActive},
+	}}
+	svc := newWalletGroupKeyTestService(repo, groupRepo)
+
+	keys, createdCount, err := svc.EnsureWalletGroupKeys(context.Background(), 42, []int64{2})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, createdCount)
+	require.Len(t, keys, 1)
+	require.Equal(t, "钱包-gpt-5", keys[0].Name)
+	require.NotEqual(t, int64(9), keys[0].ID, "v3 普通 key 不应被复用")
+}
+
+func TestAPIKeyServiceEnsureWalletGroupKeysEmptyInput(t *testing.T) {
+	repo := &walletGroupKeyAPIKeyRepoStub{}
+	svc := newWalletGroupKeyTestService(repo, walletGroupKeyGroupRepoStub{})
+
+	keys, createdCount, err := svc.EnsureWalletGroupKeys(context.Background(), 42, nil)
+
+	require.NoError(t, err)
+	require.Equal(t, 0, createdCount)
+	require.Nil(t, keys)
+	require.Equal(t, 0, repo.listCalls)
 	require.Equal(t, 0, repo.createCalls)
 }
+
+// --------------------------------------------------------------------------
+// GetWalletModelRoutes 测试（B1.5 路由列表，保留作底层能力）
+// --------------------------------------------------------------------------
 
 type walletModelRouteGroupRepoStub struct {
 	GroupRepository
