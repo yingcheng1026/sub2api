@@ -57,10 +57,3 @@ func recordWalletLedgerDrift(n int64) {
 	}
 	walletLedgerDriftTotal.Add(n)
 }
-
-// resetWalletMetricsForTest 仅供单测重置计数器；非测试代码不要调用。
-func resetWalletMetricsForTest() {
-	walletInsufficientTotal.Store(0)
-	walletBalanceLowTotal.Store(0)
-	walletLedgerDriftTotal.Store(0)
-}

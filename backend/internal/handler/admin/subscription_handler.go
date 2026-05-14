@@ -47,7 +47,7 @@ func NewSubscriptionHandler(subscriptionService *service.SubscriptionService) *S
 type AssignSubscriptionRequest struct {
 	UserID           int64    `json:"user_id" binding:"required"`
 	GroupID          int64    `json:"group_id"`
-	ValidityDays     int      `json:"validity_days" binding:"omitempty,max=36500"`              // max 100 years
+	ValidityDays     int      `json:"validity_days" binding:"omitempty,max=36500"` // max 100 years
 	Notes            string   `json:"notes"`
 	WalletInitialUSD *float64 `json:"wallet_initial_usd" binding:"omitempty,gt=0,lte=10000000"` // 钱包模式初始余额 USD
 	PlanID           *int64   `json:"plan_id" binding:"omitempty,gt=0"`                         // 钱包模式：plan 关联 groups → 自动建 N 把分组 key

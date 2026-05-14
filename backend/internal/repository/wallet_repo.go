@@ -259,7 +259,7 @@ func (r *walletRepository) ReconcileBalances(ctx context.Context, tolerance floa
 	if err != nil {
 		return nil, fmt.Errorf("reconcile query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []service.WalletReconcileDrift
 	for rows.Next() {
@@ -305,7 +305,7 @@ func (r *walletRepository) ListLedger(ctx context.Context, subscriptionID int64,
 	if err != nil {
 		return nil, fmt.Errorf("query ledger: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := make([]service.WalletLedgerEntry, 0, limit)
 	for rows.Next() {

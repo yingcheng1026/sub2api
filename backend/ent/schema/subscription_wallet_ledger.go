@@ -18,8 +18,9 @@ import (
 // user_subscriptions.wallet_balance_usd 是其聚合的缓存字段，对账以本表为准。
 //
 // 对账 cron 每 5 分钟跑：
-//   wallet_initial_usd + SUM(ledger.delta_usd) ?= wallet_balance_usd
-//   偏差 > $0.01 → telegram 告警 + 用 ledger 重算修正字段值
+//
+//	wallet_initial_usd + SUM(ledger.delta_usd) ?= wallet_balance_usd
+//	偏差 > $0.01 → telegram 告警 + 用 ledger 重算修正字段值
 //
 // 详细设计：ai-relay-infra/docs/plans/2026-05-10-wallet-mode-design.md §1.2 §5.3
 type SubscriptionWalletLedger struct {

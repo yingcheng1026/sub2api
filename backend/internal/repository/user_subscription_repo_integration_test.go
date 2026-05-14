@@ -302,7 +302,8 @@ func (s *UserSubscriptionRepoSuite) TestList_FilterByGroupID() {
 	subs, _, err := s.repo.List(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, nil, &g1.ID, "", "", "", "")
 	s.Require().NoError(err)
 	s.Require().Len(subs, 1)
-	s.Require().Equal(g1.ID, subs[0].GroupID)
+	s.Require().NotNil(subs[0].GroupID, "v3 月卡订阅 group_id 非空")
+	s.Require().Equal(g1.ID, *subs[0].GroupID)
 }
 
 func (s *UserSubscriptionRepoSuite) TestList_FilterByStatus() {
