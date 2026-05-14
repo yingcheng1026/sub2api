@@ -151,6 +151,75 @@ func TestAPIKeyServiceEnsureWalletGroupKeysEmptyInput(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// EnsureWalletUniversalKey 测试（5/14 反转决策：单 key 模式回归）
+// --------------------------------------------------------------------------
+
+func TestAPIKeyServiceEnsureWalletUniversalKeyCreatesForFreshUser(t *testing.T) {
+	repo := &walletGroupKeyAPIKeyRepoStub{}
+	svc := newWalletGroupKeyTestService(repo, walletGroupKeyGroupRepoStub{})
+
+	key, created, err := svc.EnsureWalletUniversalKey(context.Background(), 42)
+
+	require.NoError(t, err)
+	require.True(t, created, "fresh user 应新建 universal key")
+	require.NotNil(t, key)
+	require.Equal(t, WalletUniversalAPIKeyName, key.Name)
+	require.Nil(t, key.GroupID, "universal key 的 group_id 必须为 NULL")
+	require.Equal(t, 1, repo.createCalls)
+}
+
+func TestAPIKeyServiceEnsureWalletUniversalKeyReusesExisting(t *testing.T) {
+	repo := &walletGroupKeyAPIKeyRepoStub{
+		keys: []APIKey{
+			{
+				ID:      55,
+				UserID:  42,
+				Name:    WalletUniversalAPIKeyName,
+				GroupID: nil,
+				Status:  StatusAPIKeyActive,
+			},
+		},
+	}
+	svc := newWalletGroupKeyTestService(repo, walletGroupKeyGroupRepoStub{})
+
+	key, created, err := svc.EnsureWalletUniversalKey(context.Background(), 42)
+
+	require.NoError(t, err)
+	require.False(t, created, "存在 universal key 时应复用")
+	require.NotNil(t, key)
+	require.Equal(t, int64(55), key.ID)
+	require.Equal(t, 0, repo.createCalls)
+}
+
+// TestAPIKeyServiceEnsureWalletUniversalKeyIgnoresGroupBoundKeys 验证：
+// 用户名下绑 group 的 key（trial-bonus-auto 等）不会被当作 universal key 复用，
+// 系统会新建一把真正的 group_id=NULL key。这正是 5/14 报障用户的场景。
+func TestAPIKeyServiceEnsureWalletUniversalKeyIgnoresGroupBoundKeys(t *testing.T) {
+	groupID := int64(17) // trial-bonus group
+	repo := &walletGroupKeyAPIKeyRepoStub{
+		keys: []APIKey{
+			{
+				ID:      86,
+				UserID:  42,
+				Name:    "trial-bonus-auto",
+				GroupID: &groupID,
+				Status:  StatusAPIKeyActive,
+			},
+		},
+	}
+	svc := newWalletGroupKeyTestService(repo, walletGroupKeyGroupRepoStub{})
+
+	key, created, err := svc.EnsureWalletUniversalKey(context.Background(), 42)
+
+	require.NoError(t, err)
+	require.True(t, created, "绑 group 的老 key 不算 universal，应新建")
+	require.NotNil(t, key)
+	require.Nil(t, key.GroupID)
+	require.Equal(t, WalletUniversalAPIKeyName, key.Name)
+	require.Equal(t, 1, repo.createCalls)
+}
+
+// --------------------------------------------------------------------------
 // GetWalletModelRoutes 测试（B1.5 路由列表，保留作底层能力）
 // --------------------------------------------------------------------------
 

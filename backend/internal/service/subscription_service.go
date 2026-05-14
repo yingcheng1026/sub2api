@@ -59,16 +59,15 @@ type SubscriptionService struct {
 	maintenanceQueue *SubscriptionMaintenanceQueue
 }
 
-// WalletGroupKeyService 钱包多 key 模式接口：按 plan 关联的 group 列表为用户建/复用 N 把 api_key。
+// WalletGroupKeyService 钱包 key 服务接口。
 //
-// 命名规则：每把 key 命名 "钱包-" + group.Name（例如 "钱包-gpt-5"、"钱包-claude-sonnet"）。
-// 幂等：传入相同 groupIDs 多次调用，只为缺失的 (userID, groupID) 组合新建 key，已存在的复用。
-//
-// 返回 (allKeys, createdCount, err)：
-//   - allKeys：本次涉及到的所有 key（含复用 + 新建），顺序与 groupIDs 对应（缺失项跳过）。
-//   - createdCount：本次实际新建的 key 数（不含复用）。
+// 5/14 反转决策（参见 docs/plans/2026-05-14-wallet-single-key-reversal.md）：
+// 激活流程走 EnsureWalletUniversalKey 单 key 路径，建 1 把 group_id=NULL 通用 key，
+// 靠 model_router (B1.1/B1.2) 按调用模型自动路由到对应 group。
+// EnsureWalletGroupKeys 多 key 路径保留作底层能力，激活不再调用（不删，将来要切回快速）。
 type WalletGroupKeyService interface {
 	EnsureWalletGroupKeys(ctx context.Context, userID int64, groupIDs []int64) ([]APIKey, int, error)
+	EnsureWalletUniversalKey(ctx context.Context, userID int64) (*APIKey, bool, error)
 }
 
 // WalletTopupService 钱包叠加充值接口（B2.4）：把 deltaUSD 同时累加到现有钱包订阅的
@@ -474,29 +473,24 @@ func (s *SubscriptionService) topupExistingWallet(ctx context.Context, input *As
 	return existing, true, nil
 }
 
-// ensureWalletGroupKeys 钱包激活时按 plan 关联的 group 列表自动建 N 把 api_key。
+// ensureWalletGroupKeys 钱包激活/topup 时为用户建 1 把通用 key（group_id=NULL），
+// 靠 model_router (B1.1/B1.2) 按调用模型自动路由。
 //
-// 触发条件：input.PlanID != nil。否则跳过（admin 手动 /assign 不带 plan 的场景）。
+// 5/14 反转决策（参见 docs/plans/2026-05-14-wallet-single-key-reversal.md）：
+// 撤销 B2.2 多 key 改造，回到 B1.4 单 key 形态。多 key 路径 (EnsureWalletGroupKeys)
+// 保留作底层能力，激活不再调用，函数名保留 ensureWalletGroupKeys 减少调用方改动。
 //
 // 失败策略：建 key 失败返回错误，钱包订阅在外层事务中应一并回滚。
 func (s *SubscriptionService) ensureWalletGroupKeys(ctx context.Context, input *AssignSubscriptionInput, sub *UserSubscription) error {
-	if s.walletKeyService == nil || sub == nil || input == nil || input.PlanID == nil {
+	if s.walletKeyService == nil || sub == nil || input == nil {
 		return nil
 	}
-	groupIDs, err := s.lookupPlanGroupIDs(ctx, *input.PlanID)
+	key, created, err := s.walletKeyService.EnsureWalletUniversalKey(ctx, input.UserID)
 	if err != nil {
-		return fmt.Errorf("lookup plan groups: %w", err)
+		return fmt.Errorf("ensure wallet universal api key: %w", err)
 	}
-	if len(groupIDs) == 0 {
-		// plan 未关联任何 group → 没有可建的 key。不报错，由 admin 配置检查兜底。
-		return nil
-	}
-	keys, createdCount, err := s.walletKeyService.EnsureWalletGroupKeys(ctx, input.UserID, groupIDs)
-	if err != nil {
-		return fmt.Errorf("ensure wallet group api keys: %w", err)
-	}
-	sub.WalletGroupKeys = keys
-	sub.WalletGroupKeysCreatedCount = createdCount
+	sub.WalletUniversalKey = key
+	sub.WalletUniversalKeyCreated = created
 	return nil
 }
 

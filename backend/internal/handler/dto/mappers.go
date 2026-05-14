@@ -718,6 +718,16 @@ func UserSubscriptionFromServiceAdmin(sub *service.UserSubscription) *AdminUserS
 		c := sub.WalletGroupKeysCreatedCount
 		createdCount = &c
 	}
+
+	// 单 key 模式（5/14 反转决策）：钱包激活/topup 时建 1 把通用 key 走 model_router 路由。
+	var walletUniversalKey *APIKey
+	var walletUniversalKeyCreated *bool
+	if sub.WalletUniversalKey != nil {
+		walletUniversalKey = APIKeyFromService(sub.WalletUniversalKey)
+		c := sub.WalletUniversalKeyCreated
+		walletUniversalKeyCreated = &c
+	}
+
 	return &AdminUserSubscription{
 		UserSubscription:            userSubscriptionFromServiceBase(sub),
 		AssignedBy:                  sub.AssignedBy,
@@ -726,6 +736,8 @@ func UserSubscriptionFromServiceAdmin(sub *service.UserSubscription) *AdminUserS
 		AssignedByUser:              UserFromServiceShallow(sub.AssignedByUser),
 		WalletGroupKeys:             walletGroupKeys,
 		WalletGroupKeysCreatedCount: createdCount,
+		WalletUniversalKey:          walletUniversalKey,
+		WalletUniversalKeyCreated:   walletUniversalKeyCreated,
 	}
 }
 
