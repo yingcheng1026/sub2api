@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   WALLET_KEY_NAME_PREFIX,
+  WALLET_UNIVERSAL_KEY_NAME,
   getCreateKeyGroupId,
   isWalletKeyName,
   isWalletUniversalKey,
+  isWalletUniversalKeyName,
   shouldRequireGroupForKeySubmit
 } from '../walletKeys'
 
@@ -52,5 +54,15 @@ describe('wallet key helpers', () => {
     expect(isWalletKeyName('')).toBe(false)
     expect(isWalletKeyName(null)).toBe(false)
     expect(isWalletKeyName(undefined)).toBe(false)
+  })
+
+  // 5/14 反转决策：单 key 模式 universal key 也走 isWalletKeyName 显示徽章。
+  it('also matches single-key universal name', () => {
+    expect(WALLET_UNIVERSAL_KEY_NAME).toBe('钱包通用 key（自动路由）')
+    expect(isWalletUniversalKeyName(WALLET_UNIVERSAL_KEY_NAME)).toBe(true)
+    expect(isWalletUniversalKeyName('钱包-gpt-5')).toBe(false)
+    expect(isWalletUniversalKeyName(null)).toBe(false)
+    // isWalletKeyName 同时覆盖多 key 前缀和 universal key 全名
+    expect(isWalletKeyName(WALLET_UNIVERSAL_KEY_NAME)).toBe(true)
   })
 })

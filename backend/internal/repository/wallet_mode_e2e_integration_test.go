@@ -102,29 +102,25 @@ func TestWalletModeStandardPlanPurchaseKeyRoutingAndSharedDeduction(t *testing.T
 	require.InDelta(t, walletQuota, *sub.WalletInitialUSD, 0.000001)
 	require.InDelta(t, walletQuota, *sub.WalletBalanceUSD, 0.000001)
 
-	// B2.2 多 key 模式：plan 关联 3 个 group → 自动建 3 把分组 key，命名 "钱包-{group.Name}"
+	// 5/14 反转决策：钱包激活走单 key 路径，建 1 把通用 key（group_id=NULL），
+	// 不再为每个 plan_group 建独立 key。跨平台调度靠 model_router (B1.1/B1.2)。
+	// 参见 docs/plans/2026-05-14-wallet-single-key-reversal.md。
 	keys, _, err := apiKeyRepo.ListByUserID(ctx, user.ID, defaultWalletE2EPagination(), service.APIKeyListFilters{Status: service.StatusAPIKeyActive})
 	require.NoError(t, err)
-	require.Len(t, keys, 3, "应建 3 把分组 key（GPT / Claude Sonnet / Gemini）")
+	require.Len(t, keys, 1, "应只建 1 把 universal key，跨平台调度靠 model_router")
 
-	keysByGroupID := make(map[int64]service.APIKey, len(keys))
-	for _, k := range keys {
-		require.True(t, service.IsWalletGroupKeyName(k.Name), "key 名应带 钱包- 前缀，实际 %q", k.Name)
-		require.NotNil(t, k.GroupID, "钱包多 key 模式 group_id 必须非空")
-		keysByGroupID[*k.GroupID] = k
-	}
-	require.Contains(t, keysByGroupID, gptGroup.ID)
-	require.Contains(t, keysByGroupID, sonnetGroup.ID)
-	require.Contains(t, keysByGroupID, geminiGroup.ID)
-	require.Equal(t, "钱包-gpt-5", keysByGroupID[gptGroup.ID].Name)
-	require.Equal(t, "钱包-claude-sonnet", keysByGroupID[sonnetGroup.ID].Name)
-	require.Equal(t, "钱包-gemini-2-pro", keysByGroupID[geminiGroup.ID].Name)
+	universalKey := keys[0]
+	require.True(t, service.IsWalletUniversalKeyName(universalKey.Name), "key 名应为 universal key 名，实际 %q", universalKey.Name)
+	require.Equal(t, service.WalletUniversalAPIKeyName, universalKey.Name)
+	require.Nil(t, universalKey.GroupID, "universal key 的 group_id 必须为 NULL（跨平台）")
 
-	// 各 group 的 key 独立扣款（不再依赖 ModelRouter）：用各自的 key 直接命中对应 group
+	// 同一把 universal key 调 3 个不同平台模型，由 ModelRouter 在 gateway 层路由到对应 group；
+	// 这里集成测试直传 WalletCost (= group.RateMultiplier) 模拟路由后的扣费金额。
+	// 余额按 wallet_balance_usd 整体扣减，不分 group。
 	billingRepo := NewUsageBillingRepository(client, integrationDB)
-	requireWalletChargeApplied(t, billingRepo, user.ID, keysByGroupID[gptGroup.ID].ID, sub.ID, "gpt-5", 1.0*gptGroup.RateMultiplier)
-	requireWalletChargeApplied(t, billingRepo, user.ID, keysByGroupID[sonnetGroup.ID].ID, sub.ID, "claude-sonnet-4-6", 1.0*sonnetGroup.RateMultiplier)
-	requireWalletChargeApplied(t, billingRepo, user.ID, keysByGroupID[geminiGroup.ID].ID, sub.ID, "gemini-2.5-pro", 1.0*geminiGroup.RateMultiplier)
+	requireWalletChargeApplied(t, billingRepo, user.ID, universalKey.ID, sub.ID, "gpt-5", gptGroup.RateMultiplier)
+	requireWalletChargeApplied(t, billingRepo, user.ID, universalKey.ID, sub.ID, "claude-sonnet-4-6", sonnetGroup.RateMultiplier)
+	requireWalletChargeApplied(t, billingRepo, user.ID, universalKey.ID, sub.ID, "gemini-2.5-pro", geminiGroup.RateMultiplier)
 
 	expectedBalance := walletQuota - gptGroup.RateMultiplier - sonnetGroup.RateMultiplier - geminiGroup.RateMultiplier
 	var balance float64
