@@ -273,7 +273,7 @@ func (h *DashboardHandler) GetModelStats(c *gin.Context) {
 
 	// Parse optional filter params
 	var userID, apiKeyID, accountID, groupID int64
-	modelSource := usagestats.ModelSourceRequested
+	modelSource := usagestats.ModelSourceUpstream
 	var requestType *int16
 	var stream *bool
 	var billingType *int8

@@ -107,22 +107,22 @@ func TestUsageLogFromService_IncludesServiceTierForUserAndAdmin(t *testing.T) {
 	require.InDelta(t, 1.5, *adminDTO.AccountRateMultiplier, 1e-12)
 }
 
-func TestUsageLogFromService_UsesRequestedModelAndKeepsUpstreamAdminOnly(t *testing.T) {
+func TestUsageLogFromService_UsesUpstreamModelAndKeepsUpstreamAdminOnly(t *testing.T) {
 	t.Parallel()
 
-	upstreamModel := "claude-sonnet-4-20250514"
+	upstreamModel := "gpt-5.4"
 	log := &service.UsageLog{
 		RequestID:      "req_4",
-		Model:          upstreamModel,
-		RequestedModel: "claude-sonnet-4",
+		Model:          "claude-sonnet-4-6",
+		RequestedModel: "claude-sonnet-4-6",
 		UpstreamModel:  &upstreamModel,
 	}
 
 	userDTO := UsageLogFromService(log)
 	adminDTO := UsageLogFromServiceAdmin(log)
 
-	require.Equal(t, "claude-sonnet-4", userDTO.Model)
-	require.Equal(t, "claude-sonnet-4", adminDTO.Model)
+	require.Equal(t, "gpt-5.4", userDTO.Model)
+	require.Equal(t, "gpt-5.4", adminDTO.Model)
 
 	userJSON, err := json.Marshal(userDTO)
 	require.NoError(t, err)
@@ -130,22 +130,23 @@ func TestUsageLogFromService_UsesRequestedModelAndKeepsUpstreamAdminOnly(t *test
 
 	adminJSON, err := json.Marshal(adminDTO)
 	require.NoError(t, err)
-	require.Contains(t, string(adminJSON), `"upstream_model":"claude-sonnet-4-20250514"`)
+	require.Contains(t, string(adminJSON), `"upstream_model":"gpt-5.4"`)
 }
 
-func TestUsageLogFromService_FallsBackToLegacyModelWhenRequestedModelMissing(t *testing.T) {
+func TestUsageLogFromService_FallsBackToStoredModelWhenUpstreamMissing(t *testing.T) {
 	t.Parallel()
 
 	log := &service.UsageLog{
-		RequestID: "req_legacy",
-		Model:     "claude-3",
+		RequestID:      "req_model_fallback",
+		Model:          "gpt-5.4",
+		RequestedModel: "claude-sonnet-4-6",
 	}
 
 	userDTO := UsageLogFromService(log)
 	adminDTO := UsageLogFromServiceAdmin(log)
 
-	require.Equal(t, "claude-3", userDTO.Model)
-	require.Equal(t, "claude-3", adminDTO.Model)
+	require.Equal(t, "gpt-5.4", userDTO.Model)
+	require.Equal(t, "gpt-5.4", adminDTO.Model)
 }
 
 func f64Ptr(value float64) *float64 {

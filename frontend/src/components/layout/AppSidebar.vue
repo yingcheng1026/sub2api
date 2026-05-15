@@ -769,9 +769,11 @@ const adminNavItems = computed((): NavItem[] => {
 
   const visible = applyFeatureFlags(baseItems)
 
-  // 简单模式下，在系统设置前插入 API密钥
+  // 简单模式仍然是用户端自助能力精简，但管理员需要稳定看到所有管理入口。
+  // 因此 admin 菜单不按 hideInSimpleMode 过滤；只额外补上 API 密钥入口，
+  // 避免个人区在 simple 模式隐藏后丢失管理员自己的 key 管理入口。
   if (authStore.isSimpleMode) {
-    const filtered = visible.filter(item => !item.hideInSimpleMode)
+    const filtered = [...visible]
     filtered.push({ path: '/keys', label: t('nav.apiKeys'), icon: KeyIcon })
     filtered.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon })
     for (const cm of customMenuItemsForAdmin.value) {

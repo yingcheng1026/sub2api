@@ -3,6 +3,7 @@ package dto
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -562,17 +563,13 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 	// 普通用户 DTO：严禁包含管理员字段（例如 account_rate_multiplier、ip_address、account）。
 	requestType := l.EffectiveRequestType()
 	stream, openAIWSMode := service.ApplyLegacyRequestFields(requestType, l.Stream, l.OpenAIWSMode)
-	requestedModel := l.RequestedModel
-	if requestedModel == "" {
-		requestedModel = l.Model
-	}
 	return UsageLog{
 		ID:                    l.ID,
 		UserID:                l.UserID,
 		APIKeyID:              l.APIKeyID,
 		AccountID:             l.AccountID,
 		RequestID:             l.RequestID,
-		Model:                 requestedModel,
+		Model:                 visibleUsageLogModel(l),
 		ServiceTier:           l.ServiceTier,
 		ReasoningEffort:       l.ReasoningEffort,
 		InboundEndpoint:       l.InboundEndpoint,
@@ -610,6 +607,18 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		Group:                 GroupFromServiceShallow(l.Group),
 		Subscription:          UserSubscriptionFromService(l.Subscription),
 	}
+}
+
+func visibleUsageLogModel(l *service.UsageLog) string {
+	if l.UpstreamModel != nil {
+		if upstream := strings.TrimSpace(*l.UpstreamModel); upstream != "" {
+			return upstream
+		}
+	}
+	if model := strings.TrimSpace(l.Model); model != "" {
+		return model
+	}
+	return strings.TrimSpace(l.RequestedModel)
 }
 
 // UsageLogFromService converts a service UsageLog to DTO for regular users.

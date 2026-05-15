@@ -20,8 +20,11 @@ FROM ${NODE_IMAGE} AS frontend-builder
 
 WORKDIR /app/frontend
 
-# Install pnpm (pin to 10.x — lockfile is v9; pnpm@latest now resolves to 11+ which is stricter)
-RUN corepack enable && corepack prepare pnpm@10 --activate
+# Install pnpm
+# 固定 pnpm 9.x: pnpm@10 启用了对未批准 install scripts 的严格拒绝
+# (ERR_PNPM_IGNORED_BUILDS), 会阻塞 esbuild/vue-demi 的构建。
+# 等 frontend/package.json 加上 pnpm.onlyBuiltDependencies 白名单后再升级。
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # Install dependencies first (better caching)
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
@@ -29,7 +32,8 @@ RUN pnpm install --frozen-lockfile
 
 # Copy frontend source and build
 COPY frontend/ ./
-RUN pnpm run build
+# 在低内存环境（≤2GB）显式提高 Node 堆限制，避免 vite build 的 OOM。
+RUN NODE_OPTIONS="--max-old-space-size=3072" pnpm run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder

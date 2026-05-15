@@ -549,11 +549,17 @@ func buildOpenAIWeightedSelectionOrder(
 	}
 	for i := range pool {
 		// 将 top-K 分值平移到正区间，避免“单一最高分账号”长期垄断。
-		weight := (pool[i].score - minScore) + 1.0
-		if math.IsNaN(weight) || math.IsInf(weight, 0) || weight <= 0 {
-			weight = 1.0
+		baseWeight := (pool[i].score - minScore) + 1.0
+		if math.IsNaN(baseWeight) || math.IsInf(baseWeight, 0) || baseWeight <= 0 {
+			baseWeight = 1.0
 		}
-		weights[i] = weight
+		// 按账号容量配比加权：Pro 20x 类大号配 LoadFactor=20，Plus 配 1，
+		// 抽样比例自动按 LoadFactor 比分摊流量，不再"单一高分号长期垄断"。
+		capacityMultiplier := float64(pool[i].account.EffectiveLoadFactor())
+		if capacityMultiplier <= 0 {
+			capacityMultiplier = 1.0
+		}
+		weights[i] = baseWeight * capacityMultiplier
 	}
 
 	order := make([]openAIAccountCandidateScore, 0, len(pool))

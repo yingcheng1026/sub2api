@@ -778,12 +778,9 @@ router.beforeEach((to, _from, next) => {
     }
   }
 
-  // 简易模式下限制访问某些页面
-  if (authStore.isSimpleMode) {
+  // 简易模式只限制普通用户自助页面；管理员管理页面保持可访问。
+  if (authStore.isSimpleMode && !authStore.isAdmin) {
     const restrictedPaths = [
-      '/admin/groups',
-      '/admin/subscriptions',
-      '/admin/redeem',
       '/subscriptions',
       '/redeem'
     ]

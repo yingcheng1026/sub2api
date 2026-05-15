@@ -1,6 +1,6 @@
 <template>
   <div class="card overflow-hidden">
-    <div class="overflow-auto">
+    <div class="usage-table-scroll overflow-x-auto">
       <DataTable
         :columns="columns"
         :data="data"
@@ -8,6 +8,7 @@
         :server-side-sort="serverSideSort"
         :default-sort-key="defaultSortKey"
         :default-sort-order="defaultSortOrder"
+        :page-vertical-scroll="true"
         @sort="(key, order) => $emit('sort', key, order)"
       >
         <template #cell-user="{ row }">
@@ -476,3 +477,10 @@ const hideTokenTooltip = () => {
   tokenTooltipData.value = null
 }
 </script>
+
+<style scoped>
+.usage-table-scroll {
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+}
+</style>

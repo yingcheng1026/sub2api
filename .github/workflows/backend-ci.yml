@@ -8,6 +8,13 @@ permissions:
   contents: read
 
 jobs:
+  deploy-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify deployment guard scripts
+        run: make test-deploy-scripts
+
   test:
     runs-on: ubuntu-latest
     steps:

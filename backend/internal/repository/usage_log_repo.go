@@ -87,10 +87,13 @@ var usageLogInsertArgTypes = [...]string{
 }
 
 const rawUsageLogModelColumn = "model"
+const requestedUsageLogModelExpr = "COALESCE(NULLIF(TRIM(requested_model), ''), model)"
+const visibleUsageLogModelExpr = "COALESCE(NULLIF(TRIM(upstream_model), ''), model)"
 
 // rawUsageLogModelColumn preserves the exact stored usage_logs.model semantics for direct filters.
 // Historical rows may contain upstream/billing model values, while newer rows store requested_model.
-// Requested/upstream/mapping analytics must use resolveModelDimensionExpression instead.
+// Product/billing analytics must default to requestedUsageLogModelExpr so mapped upstream models
+// do not collapse customer-facing product tiers. Admin upstream views should request upstream explicitly.
 
 // dateFormatWhitelist 将 granularity 参数映射为 PostgreSQL TO_CHAR 格式字符串，防止外部输入直接拼入 SQL
 var dateFormatWhitelist = map[string]string{
@@ -2594,9 +2597,9 @@ func (r *usageLogRepository) GetUserUsageTrendByUserID(ctx context.Context, user
 
 // GetUserModelStats 获取指定用户的模型统计
 func (r *usageLogRepository) GetUserModelStats(ctx context.Context, userID int64, startTime, endTime time.Time) (results []ModelStat, err error) {
-	query := `
+	query := fmt.Sprintf(`
 		SELECT
-			model,
+			%s as model,
 			COUNT(*) as requests,
 			COALESCE(SUM(input_tokens), 0) as input_tokens,
 			COALESCE(SUM(output_tokens), 0) as output_tokens,
@@ -2608,9 +2611,9 @@ func (r *usageLogRepository) GetUserModelStats(ctx context.Context, userID int64
 			COALESCE(SUM(COALESCE(account_stats_cost, total_cost) * COALESCE(account_rate_multiplier, 1)), 0) as account_cost
 		FROM usage_logs
 		WHERE user_id = $1 AND created_at >= $2 AND created_at < $3
-		GROUP BY model
+		GROUP BY %s
 		ORDER BY total_tokens DESC
-	`
+	`, requestedUsageLogModelExpr, requestedUsageLogModelExpr)
 
 	rows, err := r.sql.QueryContext(ctx, query, userID, startTime, endTime)
 	if err != nil {
@@ -3278,14 +3281,15 @@ func (r *usageLogRepository) GetAllGroupUsageSummary(ctx context.Context, todayS
 
 // resolveModelDimensionExpression maps model source type to a safe SQL expression.
 func resolveModelDimensionExpression(modelType string) string {
-	requestedExpr := "COALESCE(NULLIF(TRIM(requested_model), ''), model)"
-	switch usagestats.NormalizeModelSource(modelType) {
+	switch strings.ToLower(strings.TrimSpace(modelType)) {
+	case usagestats.ModelSourceRequested:
+		return requestedUsageLogModelExpr
 	case usagestats.ModelSourceUpstream:
-		return fmt.Sprintf("COALESCE(NULLIF(TRIM(upstream_model), ''), %s)", requestedExpr)
+		return visibleUsageLogModelExpr
 	case usagestats.ModelSourceMapping:
-		return fmt.Sprintf("(%s || ' -> ' || COALESCE(NULLIF(TRIM(upstream_model), ''), %s))", requestedExpr, requestedExpr)
+		return fmt.Sprintf("(%s || ' -> ' || COALESCE(NULLIF(TRIM(upstream_model), ''), %s))", requestedUsageLogModelExpr, requestedUsageLogModelExpr)
 	default:
-		return requestedExpr
+		return requestedUsageLogModelExpr
 	}
 }
 
@@ -3839,7 +3843,7 @@ func usageLogOrderBy(params pagination.PaginationParams) string {
 	var column string
 	switch sortBy {
 	case "model":
-		column = "COALESCE(NULLIF(TRIM(requested_model), ''), model)"
+		column = visibleUsageLogModelExpr
 	case "created_at":
 		column = "created_at"
 	default:

@@ -46,6 +46,10 @@ func (r *snapshotUpdateAccountRepo) UpdateExtra(ctx context.Context, id int64, u
 	return nil
 }
 
+func (r stubOpenAIAccountRepo) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
+	return nil
+}
+
 func (r stubOpenAIAccountRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
 	for i := range r.accounts {
 		if r.accounts[i].ID == id {
@@ -2292,4 +2296,158 @@ func TestHandleSSEToJSON_ResponseFailedReturnsProtocolError(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Contains(t, rec.Body.String(), "upstream rejected request")
 	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+}
+
+// TestWeightedShuffleByLoadFactor_RatioMatchesLoadFactor 验证当所有候选账号
+// (Priority, LoadRate) 相同时，weightedShuffleByLoadFactorWithinSortGroups 把
+// 按 EffectiveLoadFactor 加权的概率分配到位置 0：1 个 Pro 20x（LF=15）+ 9 个
+// Plus（LF=1），位置 0 落在 Pro 上的概率应 ≈ 15/24 ≈ 62.5%，每个 Plus ≈ 4.17%。
+//
+// 这是 selectAccountWithLoadAwareness Layer 2 的实际选号入口，覆盖生产
+// `openai_advanced_scheduler_enabled=false` 时唯一的 OpenAI 选号路径。
+func TestWeightedShuffleByLoadFactor_RatioMatchesLoadFactor(t *testing.T) {
+	const (
+		proID         = int64(12)
+		proLoadFactor = 15
+		plusCount     = 9
+		iterations    = 5000
+	)
+
+	build := func() []accountWithLoad {
+		out := []accountWithLoad{
+			{
+				account: &Account{
+					ID:         proID,
+					Priority:   1,
+					LoadFactor: intPtrForTest(proLoadFactor),
+				},
+				loadInfo: &AccountLoadInfo{LoadRate: 0},
+			},
+		}
+		for i := 0; i < plusCount; i++ {
+			out = append(out, accountWithLoad{
+				account: &Account{
+					ID:         int64(100 + i),
+					Priority:   1,
+					LoadFactor: intPtrForTest(1),
+				},
+				loadInfo: &AccountLoadInfo{LoadRate: 0},
+			})
+		}
+		return out
+	}
+
+	hits := make(map[int64]int)
+	for i := 0; i < iterations; i++ {
+		pool := build()
+		weightedShuffleByLoadFactorWithinSortGroups(pool)
+		hits[pool[0].account.ID]++
+	}
+
+	totalWeight := float64(proLoadFactor + plusCount)
+	expectedProRatio := float64(proLoadFactor) / totalWeight
+	expectedPlusRatio := 1.0 / totalWeight
+
+	proRatio := float64(hits[proID]) / float64(iterations)
+	require.InDelta(t, expectedProRatio, proRatio, 0.05,
+		"Pro 20x LoadFactor=%d 实际占比 %.2f%% 与期望 %.2f%% 偏差超过 5%%",
+		proLoadFactor, proRatio*100, expectedProRatio*100)
+
+	for i := 0; i < plusCount; i++ {
+		plusID := int64(100 + i)
+		plusRatio := float64(hits[plusID]) / float64(iterations)
+		require.InDelta(t, expectedPlusRatio, plusRatio, 0.03,
+			"Plus 号 id=%d 实际占比 %.2f%% 与期望 %.2f%% 偏差超过 3%%",
+			plusID, plusRatio*100, expectedPlusRatio*100)
+	}
+}
+
+// TestWeightedShuffleByLoadFactor_CrossLoadRateSamePriority 验证同 Priority 且
+// 未满载的账号即使 LoadRate 不同，也必须进入同一个 LoadFactor 加权池。
+// 回归场景：Plus 账号 LoadRate=0 排在前段，高容量账号 LoadRate=50 被旧分组
+// 切到后段，导致高容量账号首位命中率从理论值掉到 0。
+func TestWeightedShuffleByLoadFactor_CrossLoadRateSamePriority(t *testing.T) {
+	const (
+		proID         = int64(19)
+		proLoadFactor = 15
+		plusCount     = 5
+		iterations    = 3000
+	)
+
+	build := func() []accountWithLoad {
+		out := make([]accountWithLoad, 0, plusCount+1)
+		for i := 0; i < plusCount; i++ {
+			out = append(out, accountWithLoad{
+				account: &Account{
+					ID:         int64(300 + i),
+					Priority:   1,
+					LoadFactor: intPtrForTest(1),
+				},
+				loadInfo: &AccountLoadInfo{LoadRate: 0},
+			})
+		}
+		out = append(out, accountWithLoad{
+			account: &Account{
+				ID:         proID,
+				Priority:   1,
+				LoadFactor: intPtrForTest(proLoadFactor),
+			},
+			loadInfo: &AccountLoadInfo{LoadRate: 50},
+		})
+		return out
+	}
+
+	proHits := 0
+	for i := 0; i < iterations; i++ {
+		pool := build()
+		weightedShuffleByLoadFactorWithinSortGroups(pool)
+		if pool[0].account.ID == proID {
+			proHits++
+		}
+	}
+
+	expectedProRatio := float64(proLoadFactor) / float64(proLoadFactor+plusCount)
+	proRatio := float64(proHits) / float64(iterations)
+	require.InDelta(t, expectedProRatio, proRatio, 0.06,
+		"同 Priority 健康账号不应被 LoadRate 切 segment；Pro 实际占比 %.2f%% 与期望 %.2f%% 偏差过大",
+		proRatio*100, expectedProRatio*100)
+}
+
+// TestWeightedShuffleByLoadFactor_PreservesPriorityGrouping 验证不同 Priority
+// 的账号即使在同一切片里也会被严格分组：高 Priority（数值小）的账号永远
+// 排在低 Priority 前面，加权抽样只在同 Priority 子组内生效。
+func TestWeightedShuffleByLoadFactor_PreservesPriorityGrouping(t *testing.T) {
+	const iterations = 1000
+	for i := 0; i < iterations; i++ {
+		pool := []accountWithLoad{
+			{account: &Account{ID: 1, Priority: 1, LoadFactor: intPtrForTest(15)}, loadInfo: &AccountLoadInfo{LoadRate: 0}},
+			{account: &Account{ID: 2, Priority: 1, LoadFactor: intPtrForTest(1)}, loadInfo: &AccountLoadInfo{LoadRate: 0}},
+			{account: &Account{ID: 3, Priority: 2, LoadFactor: intPtrForTest(100)}, loadInfo: &AccountLoadInfo{LoadRate: 0}},
+		}
+		weightedShuffleByLoadFactorWithinSortGroups(pool)
+		require.Contains(t, []int64{1, 2}, pool[0].account.ID,
+			"Priority=1 的账号必须排在 Priority=2 之前")
+		require.Contains(t, []int64{1, 2}, pool[1].account.ID,
+			"Priority=1 的账号必须排在 Priority=2 之前")
+		require.Equal(t, int64(3), pool[2].account.ID,
+			"Priority=2 的账号必须排在最后")
+	}
+}
+
+// TestWeightedShuffleByLoadFactor_LoadFactorNilFallsBack 验证 LoadFactor=nil
+// 的旧账号会 fallback 到 Concurrency（再不够 fallback 到 1），不会被当作
+// 权重 0 而抽不到。
+func TestWeightedShuffleByLoadFactor_LoadFactorNilFallsBack(t *testing.T) {
+	const iterations = 2000
+	hits := make(map[int64]int)
+	for i := 0; i < iterations; i++ {
+		pool := []accountWithLoad{
+			{account: &Account{ID: 201, Priority: 1, LoadFactor: nil, Concurrency: 5}, loadInfo: &AccountLoadInfo{LoadRate: 0}},
+			{account: &Account{ID: 202, Priority: 1, LoadFactor: nil, Concurrency: 5}, loadInfo: &AccountLoadInfo{LoadRate: 0}},
+		}
+		weightedShuffleByLoadFactorWithinSortGroups(pool)
+		hits[pool[0].account.ID]++
+	}
+	require.InDelta(t, 0.5, float64(hits[201])/float64(iterations), 0.05)
+	require.InDelta(t, 0.5, float64(hits[202])/float64(iterations), 0.05)
 }

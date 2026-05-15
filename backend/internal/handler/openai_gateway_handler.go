@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -587,6 +588,25 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
+	// Strip placeholder empty-thinking blocks before any further processing.
+	// On the OpenAI translation path the existing Anthropic→Responses converter
+	// already discards thinking content, but doing the scrub here keeps the
+	// ops_error_logs body sample, claude-code-validator, and any failover that
+	// pivots back to a native Anthropic upstream all working off the same clean
+	// payload. See apicompat/sanitize.go.
+	if cleaned, removed, sanErr := apicompat.SanitizeAnthropicRequestBody(body); removed > 0 {
+		body = cleaned
+		reqLog.Info("sanitized empty thinking blocks before upstream forward",
+			zap.Int("removed", removed),
+			zap.String("path", "openai_translation"),
+		)
+	} else if sanErr != nil {
+		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
+			zap.Error(sanErr),
+			zap.String("path", "openai_translation"),
+		)
+	}
+
 	if !gjson.ValidBytes(body) {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return
@@ -796,7 +816,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		inboundEndpoint := GetInboundEndpoint(c)
 		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
 
+		dispatchMappedModel := effectiveMappedModel
 		h.submitOpenAIUsageRecordTask(result, func(ctx context.Context) {
+			usageFields := channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel)
+			usageFields = preserveOpenAIMessagesDispatchSub2BillingSource(usageFields, reqModel, dispatchMappedModel)
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -809,7 +832,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				IPAddress:          clientIP,
 				RequestPayloadHash: requestPayloadHash,
 				APIKeyService:      h.apiKeyService,
-				ChannelUsageFields: channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel),
+				ChannelUsageFields: usageFields,
 			}); err != nil {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.messages"),
@@ -1447,6 +1470,14 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 	if !started {
 		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", "Internal server error")
 	}
+}
+
+func preserveOpenAIMessagesDispatchSub2BillingSource(fields service.ChannelUsageFields, reqModel, mappedModel string) service.ChannelUsageFields {
+	// Billing must follow Sub2API's native channel/upstream basis. Claude
+	// compatibility model names are kept in ChannelUsageFields for audit, but
+	// they must not force requested-model billing when the request is mapped to
+	// a GPT/OpenAI upstream model.
+	return fields
 }
 
 func (h *OpenAIGatewayHandler) ensureResponsesDependencies(c *gin.Context, reqLog *zap.Logger) bool {

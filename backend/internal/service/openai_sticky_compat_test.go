@@ -3,11 +3,38 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 )
+
+// 验证 openAIWSSessionStickyTTL 在 cfg 设置后真生效（修复前 set/refresh 流程
+// hardcode openaiStickySessionTTL=1h，cfg 字段被静默忽略）。
+func TestOpenAIWSSessionStickyTTL_ConfigOverridesDefault(t *testing.T) {
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				OpenAIWS: config.GatewayOpenAIWSConfig{
+					StickySessionTTLSeconds: 600,
+				},
+			},
+		},
+	}
+	require.Equal(t, 600*time.Second, svc.openAIWSSessionStickyTTL())
+}
+
+func TestOpenAIWSSessionStickyTTL_DefaultWhenUnset(t *testing.T) {
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				OpenAIWS: config.GatewayOpenAIWSConfig{},
+			},
+		},
+	}
+	require.Equal(t, openaiStickySessionTTL, svc.openAIWSSessionStickyTTL())
+}
 
 func TestGetStickySessionAccountID_FallbackToLegacyKey(t *testing.T) {
 	beforeFallbackTotal, beforeFallbackHit, _ := openAIStickyCompatStats()

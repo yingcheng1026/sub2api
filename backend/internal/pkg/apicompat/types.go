@@ -61,6 +61,12 @@ type AnthropicContentBlock struct {
 	// type=thinking
 	Thinking string `json:"thinking,omitempty"`
 
+	// type=thinking — signature returned by Anthropic upstream for verification on
+	// subsequent turns. Presence of a non-empty Signature is the marker that this
+	// block is a *real* extended-thinking continuation rather than a placeholder
+	// emitted by buggy clients (see SanitizeAnthropicRequestBody in sanitize.go).
+	Signature string `json:"signature,omitempty"`
+
 	// type=image
 	Source *AnthropicImageSource `json:"source,omitempty"`
 

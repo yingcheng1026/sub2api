@@ -35,9 +35,9 @@ vi.mock('vue-i18n', async () => {
 })
 
 const DataTableStub = {
-  props: ['data'],
+  props: ['data', 'pageVerticalScroll'],
   template: `
-    <div>
+    <div class="data-table-stub" :data-page-vertical-scroll="String(pageVerticalScroll)">
       <div v-for="row in data" :key="row.request_id">
         <slot name="cell-model" :row="row" :value="row.model" />
         <slot name="cell-cost" :row="row" />
@@ -108,6 +108,27 @@ describe('admin UsageTable tooltip', () => {
     expect(text).toContain('$5.0000 / 1M tokens')
     expect(text).toContain('$30.0000 / 1M tokens')
     expect(text).toContain('$0.069568')
+  })
+
+  it('uses page vertical scrolling so the usage log table does not trap page wheel gestures', () => {
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [],
+        loading: false,
+        columns: [],
+      },
+      global: {
+        stubs: {
+          DataTable: DataTableStub,
+          EmptyState: true,
+          Icon: true,
+          Teleport: true,
+        },
+      },
+    })
+
+    expect(wrapper.find('.usage-table-scroll').exists()).toBe(true)
+    expect(wrapper.find('.data-table-stub').attributes('data-page-vertical-scroll')).toBe('true')
   })
 
   it('shows requested and upstream models separately for admin rows', () => {

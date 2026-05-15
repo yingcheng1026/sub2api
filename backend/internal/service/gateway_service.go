@@ -8405,7 +8405,11 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		billingModel = input.ChannelMappedModel
 	}
 	if input.BillingModelSource == BillingModelSourceRequested && input.OriginalModel != "" {
-		billingModel = input.OriginalModel
+		if mappedBillingModel := mappedBillingModelOverRequested(input.OriginalModel, input.ChannelMappedModel, result.UpstreamModel, billingModel); mappedBillingModel != "" {
+			billingModel = mappedBillingModel
+		} else {
+			billingModel = input.OriginalModel
+		}
 	}
 
 	// 确定 RequestedModel（渠道映射前的原始模型）
