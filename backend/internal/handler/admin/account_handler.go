@@ -1919,6 +1919,12 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
+	// Handle Cursor accounts: expose Cursor sidecar model IDs, not Claude IDs.
+	if account.Platform == service.PlatformCursor {
+		response.Success(c, service.DefaultCursorModels)
+		return
+	}
+
 	// Handle Claude/Anthropic accounts
 	// For OAuth and Setup-Token accounts: return default models
 	if account.IsOAuth() {

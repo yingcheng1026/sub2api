@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -198,7 +199,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.testKiroAccountConnection(c, account, modelID, prompt)
 	}
 	if account.Platform == PlatformCursor {
-		return s.sendErrorAndEnd(c, "Cursor account test requires cursor sidecar canary; use /cursor/v1 smoke tests")
+		return s.testCursorAccountConnection(c, account, modelID, prompt)
 	}
 
 	return s.testClaudeAccountConnection(c, account, modelID)
@@ -1006,10 +1007,169 @@ func (s *AccountTestService) buildKiroSidecarEndpoint(path string) (string, erro
 	return u.String(), nil
 }
 
+func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
+	ctx := c.Request.Context()
+	testModelID := normalizeCursorTestModel(account, modelID)
+
+	testPrompt := strings.TrimSpace(prompt)
+	if testPrompt == "" {
+		testPrompt = "hi"
+	}
+
+	accountRef := CursorSidecarAccountRef(account)
+	if accountRef == "" {
+		return s.sendErrorAndEnd(c, "Cursor account is missing sidecar_account_ref")
+	}
+
+	sidecarURL, err := s.buildCursorSidecarEndpoint("/v1/chat/completions")
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	payload := map[string]any{
+		"model": testModelID,
+		"messages": []map[string]any{
+			{"role": "user", "content": testPrompt},
+		},
+		"max_tokens": 64,
+		"stream":     false,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+
+	timeout := s.cursorSidecarTimeout()
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, sidecarURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Cursor sidecar request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Cursor-Account-ID", strconv.FormatInt(account.ID, 10))
+	req.Header.Set("X-Cursor-Account-Ref", accountRef)
+	req.Header.Set("X-Cursor-Original-Path", c.Request.URL.Path)
+	if apiKey := s.cursorSidecarAPIKey(); apiKey != "" {
+		req.Header.Set("X-Cursor-Sidecar-Key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("x-api-key", apiKey)
+	}
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Cursor sidecar request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Cursor sidecar returned %d: %s", resp.StatusCode, string(body)))
+	}
+
+	text := extractCursorTestText(body)
+	if text == "" {
+		text = string(body)
+	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: text})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
+func normalizeCursorTestModel(account *Account, modelID string) string {
+	testModelID := strings.TrimSpace(modelID)
+	if testModelID == "" {
+		return DefaultCursorTestModel
+	}
+	mapped := strings.TrimSpace(account.GetMappedModel(testModelID))
+	if strings.HasPrefix(strings.ToLower(mapped), "cursor-") {
+		return mapped
+	}
+	return DefaultCursorTestModel
+}
+
+func (s *AccountTestService) buildCursorSidecarEndpoint(path string) (string, error) {
+	raw := s.cursorSidecarURL()
+	if raw == "" {
+		return "", fmt.Errorf("Cursor sidecar is not configured")
+	}
+	if err := config.ValidateAbsoluteHTTPURL(raw); err != nil {
+		return "", fmt.Errorf("Invalid Cursor sidecar URL: %s", err.Error())
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("Invalid Cursor sidecar URL: %s", err.Error())
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("Invalid Cursor sidecar URL: must not include userinfo or query")
+	}
+	if strings.TrimSpace(path) == "" || !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("Invalid Cursor sidecar path: must be absolute")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func (s *AccountTestService) cursorSidecarURL() string {
+	if raw := strings.TrimSpace(os.Getenv("CURSOR_SIDECAR_URL")); raw != "" {
+		return raw
+	}
+	if s != nil && s.cfg != nil {
+		return strings.TrimSpace(s.cfg.Cursor.SidecarURL)
+	}
+	return ""
+}
+
+func (s *AccountTestService) cursorSidecarAPIKey() string {
+	if raw := strings.TrimSpace(os.Getenv("CURSOR_SIDECAR_API_KEY")); raw != "" {
+		return raw
+	}
+	if s != nil && s.cfg != nil {
+		return strings.TrimSpace(s.cfg.Cursor.SidecarAPIKey)
+	}
+	return ""
+}
+
+func (s *AccountTestService) cursorSidecarTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("CURSOR_REQUEST_TIMEOUT_SECONDS")); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	if s != nil && s.cfg != nil && s.cfg.Cursor.RequestTimeoutSeconds > 0 {
+		return time.Duration(s.cfg.Cursor.RequestTimeoutSeconds) * time.Second
+	}
+	return 90 * time.Second
+}
+
 func extractKiroTestText(body []byte) string {
 	for _, path := range []string{
 		"content.0.text",
 		"choices.0.message.content",
+		"output.0.content.0.text",
+		"output_text",
+		"text",
+	} {
+		if text := strings.TrimSpace(gjson.GetBytes(body, path).String()); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func extractCursorTestText(body []byte) string {
+	for _, path := range []string{
+		"choices.0.message.content",
+		"content.0.text",
 		"output.0.content.0.text",
 		"output_text",
 		"text",

@@ -7,6 +7,29 @@ import (
 	"strings"
 )
 
+const DefaultCursorTestModel = "cursor-default"
+
+type CursorModel struct {
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   string `json:"created_at"`
+}
+
+var DefaultCursorModels = []CursorModel{
+	{ID: DefaultCursorTestModel, Type: "model", DisplayName: "Cursor Default", CreatedAt: ""},
+	{ID: "cursor-composer-2-fast", Type: "model", DisplayName: "Cursor Composer 2 Fast", CreatedAt: ""},
+	{ID: "cursor-composer-2", Type: "model", DisplayName: "Cursor Composer 2", CreatedAt: ""},
+	{ID: "cursor-gpt-5.5-none", Type: "model", DisplayName: "Cursor GPT-5.5 None", CreatedAt: ""},
+	{ID: "cursor-gpt-5.5-low", Type: "model", DisplayName: "Cursor GPT-5.5 Low", CreatedAt: ""},
+	{ID: "cursor-gpt-5.5-medium", Type: "model", DisplayName: "Cursor GPT-5.5 Medium", CreatedAt: ""},
+	{ID: "cursor-gpt-5.5-high", Type: "model", DisplayName: "Cursor GPT-5.5 High", CreatedAt: ""},
+	{ID: "cursor-gpt-5.5-extra-high", Type: "model", DisplayName: "Cursor GPT-5.5 Extra High", CreatedAt: ""},
+	{ID: "cursor-gpt-5.3-codex", Type: "model", DisplayName: "Cursor GPT-5.3 Codex", CreatedAt: ""},
+	{ID: "cursor-gpt-5.3-codex-high", Type: "model", DisplayName: "Cursor GPT-5.3 Codex High", CreatedAt: ""},
+	{ID: "cursor-gpt-5.3-codex-xhigh", Type: "model", DisplayName: "Cursor GPT-5.3 Codex XHigh", CreatedAt: ""},
+}
+
 func validateCursorAccountType(accountPlatform, accountType string) error {
 	if normalizePlatform(accountPlatform) != PlatformCursor {
 		return nil
