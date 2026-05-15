@@ -23,6 +23,10 @@
   <svg v-else-if="platform === 'kiro'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
     <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18.5v-13Zm2.5-.75a.75.75 0 0 0-.75.75v13c0 .414.336.75.75.75h11a.75.75 0 0 0 .75-.75v-13a.75.75 0 0 0-.75-.75h-11Zm2.03 4.22a.75.75 0 0 1 1.06 0l2 2a.75.75 0 0 1 0 1.06l-2 2a.75.75 0 1 1-1.06-1.06L9.97 11.5 8.53 10.03a.75.75 0 0 1 0-1.06ZM12.75 14.25a.75.75 0 0 1 .75-.75h2.25a.75.75 0 0 1 0 1.5H13.5a.75.75 0 0 1-.75-.75Z" />
   </svg>
+  <!-- Cursor logo (sidecar route) -->
+  <svg v-else-if="platform === 'cursor'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M4.5 4.5h15v15h-15v-15Zm2 2v11h11v-11h-11Zm2.05 2.7a.75.75 0 0 1 1.03-.24l4.75 3a.75.75 0 0 1 0 1.28l-4.75 3a.75.75 0 0 1-1.03-.24.75.75 0 0 1 .24-1.03l3.74-2.37-3.74-2.37a.75.75 0 0 1-.24-1.03Z" />
+  </svg>
   <!-- Fallback: generic platform icon -->
   <svg v-else :class="sizeClass" fill="currentColor" viewBox="0 0 24 24">
     <path

@@ -197,6 +197,9 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	if account.Platform == PlatformKiro {
 		return s.testKiroAccountConnection(c, account, modelID, prompt)
 	}
+	if account.Platform == PlatformCursor {
+		return s.sendErrorAndEnd(c, "Cursor account test requires cursor sidecar canary; use /cursor/v1 smoke tests")
+	}
 
 	return s.testClaudeAccountConnection(c, account, modelID)
 }

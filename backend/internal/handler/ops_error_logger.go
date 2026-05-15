@@ -1064,6 +1064,8 @@ func resolveOpsPlatform(apiKey *service.APIKey, fallback string) string {
 func guessPlatformFromPath(path string) string {
 	p := strings.ToLower(path)
 	switch {
+	case strings.HasPrefix(p, "/cursor/"):
+		return service.PlatformCursor
 	case strings.HasPrefix(p, "/kiro/"):
 		return service.PlatformKiro
 	case strings.HasPrefix(p, "/antigravity/"):

@@ -2008,6 +2008,7 @@ export default {
         gemini: 'Gemini',
         antigravity: 'Antigravity',
         kiro: 'Kiro',
+        cursor: 'Cursor',
       },
       saving: '保存中...',
       noGroups: '暂无分组',
@@ -2763,6 +2764,7 @@ export default {
         gemini: 'Gemini',
         antigravity: 'Antigravity',
         kiro: 'Kiro',
+        cursor: 'Cursor',
       },
       types: {
         oauth: 'OAuth',

@@ -145,6 +145,9 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 	if err := validateKiroAccountType(req.Platform, req.Type); err != nil {
 		return nil, err
 	}
+	if err := validateCursorAccountType(req.Platform, req.Type); err != nil {
+		return nil, err
+	}
 
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
@@ -152,6 +155,9 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 			return nil, err
 		}
 		if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, req.Platform, req.GroupIDs); err != nil {
+			return nil, err
+		}
+		if err := validateCursorAccountGroupIsolation(ctx, s.groupRepo, req.Platform, req.GroupIDs); err != nil {
 			return nil, err
 		}
 	}
@@ -290,6 +296,9 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 			return nil, err
 		}
 		if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, account.Platform, *req.GroupIDs); err != nil {
+			return nil, err
+		}
+		if err := validateCursorAccountGroupIsolation(ctx, s.groupRepo, account.Platform, *req.GroupIDs); err != nil {
 			return nil, err
 		}
 	}

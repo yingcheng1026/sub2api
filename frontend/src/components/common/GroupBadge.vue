@@ -127,6 +127,9 @@ const labelClass = computed(() => {
   if (props.platform === 'kiro') {
     return `${base} bg-cyan-200/60 text-cyan-800 dark:bg-cyan-800/40 dark:text-cyan-300`
   }
+  if (props.platform === 'cursor') {
+    return `${base} bg-zinc-200/70 text-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-200`
+  }
   return `${base} bg-violet-200/60 text-violet-800 dark:bg-violet-800/40 dark:text-violet-300`
 })
 
@@ -152,6 +155,11 @@ const badgeClass = computed(() => {
     return isSubscription.value
       ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300'
       : 'bg-cyan-50 text-cyan-700 dark:bg-cyan-900/20 dark:text-cyan-300'
+  }
+  if (props.platform === 'cursor') {
+    return isSubscription.value
+      ? 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-200'
+      : 'bg-neutral-50 text-neutral-700 dark:bg-zinc-900/40 dark:text-zinc-200'
   }
   // Fallback: original colors
   return isSubscription.value

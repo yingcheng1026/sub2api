@@ -34,7 +34,7 @@ func RegisterGatewayRoutes(
 	requireGroupGoogle := middleware.RequireGroupAssignment(settingService, middleware.GoogleErrorWriter)
 
 	anthropicMessagesHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
@@ -44,7 +44,7 @@ func RegisterGatewayRoutes(
 		h.Gateway.Messages(c)
 	}
 	anthropicCountTokensHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
@@ -60,7 +60,7 @@ func RegisterGatewayRoutes(
 		h.Gateway.CountTokens(c)
 	}
 	responsesHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
@@ -70,13 +70,13 @@ func RegisterGatewayRoutes(
 		h.Gateway.Responses(c)
 	}
 	responsesWebSocketHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		h.OpenAIGateway.ResponsesWebSocket(c)
 	}
 	chatCompletionsHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		if getGroupPlatform(c) == service.PlatformOpenAI {
@@ -86,7 +86,7 @@ func RegisterGatewayRoutes(
 		h.Gateway.ChatCompletions(c)
 	}
 	imagesHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		if getGroupPlatform(c) != service.PlatformOpenAI {
@@ -101,13 +101,13 @@ func RegisterGatewayRoutes(
 		h.OpenAIGateway.Images(c)
 	}
 	modelsHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		h.Gateway.Models(c)
 	}
 	usageHandler := func(c *gin.Context) {
-		if rejectKiroAutoRoute(c, cfg) {
+		if rejectKiroAutoRoute(c, cfg) || rejectCursorAutoRoute(c, cfg) {
 			return
 		}
 		h.Gateway.Usage(c)
@@ -202,6 +202,22 @@ func RegisterGatewayRoutes(
 		kiroV1.POST("/chat/completions", kiroBridgeConfiguredHandler(cfg, h.Gateway.KiroChatCompletions))
 	}
 
+	cursorV1 := r.Group("/cursor/v1")
+	cursorV1.Use(bodyLimit)
+	cursorV1.Use(clientRequestID)
+	cursorV1.Use(opsErrorLogger)
+	cursorV1.Use(endpointNorm)
+	cursorV1.Use(gin.HandlerFunc(apiKeyAuth))
+	cursorV1.Use(requireGroupAnthropic)
+	cursorV1.Use(requireCursorGroup())
+	{
+		cursorV1.GET("/models", cursorBridgeConfiguredHandler(cfg, h.Gateway.CursorModels))
+		cursorV1.POST("/messages", cursorBridgeConfiguredHandler(cfg, h.Gateway.CursorMessages))
+		cursorV1.POST("/messages/count_tokens", cursorBridgeConfiguredHandler(cfg, h.Gateway.CursorCountTokens))
+		cursorV1.POST("/responses", cursorBridgeConfiguredHandler(cfg, h.Gateway.CursorResponses))
+		cursorV1.POST("/chat/completions", cursorBridgeConfiguredHandler(cfg, h.Gateway.CursorChatCompletions))
+	}
+
 	antigravityV1Beta := r.Group("/antigravity/v1beta")
 	antigravityV1Beta.Use(bodyLimit)
 	antigravityV1Beta.Use(clientRequestID)
@@ -234,6 +250,13 @@ func isKiroRouteEnabled(cfg *config.Config) bool {
 	return envBool("KIRO_ENABLED") && envBool("KIRO_ROUTE_ENABLED")
 }
 
+func isCursorRouteEnabled(cfg *config.Config) bool {
+	if cfg != nil && cfg.Cursor.Enabled && cfg.Cursor.RouteEnabled {
+		return true
+	}
+	return envBool("CURSOR_ENABLED") && envBool("CURSOR_ROUTE_ENABLED")
+}
+
 func rejectKiroAutoRoute(c *gin.Context, cfg *config.Config) bool {
 	if getGroupPlatform(c) != service.PlatformKiro {
 		return false
@@ -256,11 +279,40 @@ func rejectKiroAutoRoute(c *gin.Context, cfg *config.Config) bool {
 	return true
 }
 
+func rejectCursorAutoRoute(c *gin.Context, cfg *config.Config) bool {
+	if getGroupPlatform(c) != service.PlatformCursor {
+		return false
+	}
+	if cursorAutoRouteOnV1(cfg) {
+		writeCursorRouteError(
+			c,
+			http.StatusNotImplemented,
+			"api_error",
+			"Cursor /v1 auto routing is not enabled; use the dedicated /cursor/v1 endpoint",
+		)
+		return true
+	}
+	writeCursorRouteError(
+		c,
+		http.StatusNotFound,
+		"not_found_error",
+		"Cursor routing is disabled on the shared /v1 surface",
+	)
+	return true
+}
+
 func kiroAutoRouteOnV1(cfg *config.Config) bool {
 	if cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.AutoRouteOnV1 {
 		return true
 	}
 	return envBool("KIRO_ENABLED") && envBool("KIRO_AUTO_ROUTE_ON_V1")
+}
+
+func cursorAutoRouteOnV1(cfg *config.Config) bool {
+	if cfg != nil && cfg.Cursor.Enabled && cfg.Cursor.AutoRouteOnV1 {
+		return true
+	}
+	return envBool("CURSOR_ENABLED") && envBool("CURSOR_AUTO_ROUTE_ON_V1")
 }
 
 func envBool(key string) bool {
@@ -303,7 +355,57 @@ func kiroBridgeConfiguredHandler(cfg *config.Config, next gin.HandlerFunc) gin.H
 	}
 }
 
+func requireCursorGroup() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if getGroupPlatform(c) == service.PlatformCursor {
+			c.Next()
+			return
+		}
+		writeCursorRouteError(
+			c,
+			http.StatusForbidden,
+			"authentication_error",
+			"Cursor endpoint requires an API key assigned to a cursor group",
+		)
+		c.Abort()
+	}
+}
+
+func cursorBridgeConfiguredHandler(cfg *config.Config, next gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !isCursorRouteEnabled(cfg) {
+			writeCursorRouteError(
+				c,
+				http.StatusNotFound,
+				"not_found_error",
+				"Cursor route is disabled",
+			)
+			return
+		}
+		if (cfg == nil || strings.TrimSpace(cfg.Cursor.SidecarURL) == "") && strings.TrimSpace(os.Getenv("CURSOR_SIDECAR_URL")) == "" {
+			writeCursorRouteError(
+				c,
+				http.StatusServiceUnavailable,
+				"api_error",
+				"Cursor sidecar is not configured",
+			)
+			return
+		}
+		next(c)
+	}
+}
+
 func writeKiroRouteError(c *gin.Context, status int, errType string, message string) {
+	c.JSON(status, gin.H{
+		"type": "error",
+		"error": gin.H{
+			"type":    errType,
+			"message": message,
+		},
+	})
+}
+
+func writeCursorRouteError(c *gin.Context, status int, errType string, message string) {
 	c.JSON(status, gin.H{
 		"type": "error",
 		"error": gin.H{

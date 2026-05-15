@@ -70,7 +70,7 @@
       <!-- Platform Selection - Segmented Control Style -->
       <div>
         <label class="input-label">{{ t('admin.accounts.platform') }}</label>
-        <div class="mt-2 flex rounded-lg bg-gray-100 p-1 dark:bg-dark-700" data-tour="account-form-platform">
+        <div class="mt-2 grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-dark-700 sm:grid-cols-3 lg:grid-cols-6" data-tour="account-form-platform">
           <button
             type="button"
             @click="form.platform = 'anthropic'"
@@ -159,6 +159,19 @@
           >
             <Icon name="terminal" size="sm" />
             Kiro
+          </button>
+          <button
+            type="button"
+            @click="form.platform = 'cursor'"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'cursor'
+                ? 'bg-white text-zinc-700 shadow-sm dark:bg-dark-600 dark:text-zinc-200'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <Icon name="terminal" size="sm" />
+            Cursor
           </button>
         </div>
       </div>
@@ -761,6 +774,38 @@
         </div>
       </div>
 
+      <!-- Account Type Selection (Cursor) -->
+      <div v-if="form.platform === 'cursor'">
+        <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
+        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" data-tour="account-form-type">
+          <button
+            type="button"
+            @click="accountCategory = 'apikey'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              accountCategory === 'apikey'
+                ? 'border-zinc-500 bg-zinc-50 dark:bg-zinc-900/30'
+                : 'border-gray-200 hover:border-zinc-300 dark:border-dark-600 dark:hover:border-zinc-700'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                accountCategory === 'apikey'
+                  ? 'bg-zinc-800 text-white dark:bg-zinc-700'
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon name="terminal" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Cursor Upstream</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">Dedicated sidecar</span>
+            </div>
+          </button>
+        </div>
+      </div>
+
       <!-- Account Type Selection (Antigravity - OAuth or Upstream) -->
       <div v-if="form.platform === 'antigravity'">
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
@@ -1050,6 +1095,23 @@
               t('admin.accounts.setupTokenLongLived')
             }}</span>
           </label>
+        </div>
+      </div>
+
+      <!-- Cursor sidecar account reference -->
+      <div v-if="form.platform === 'cursor'" class="space-y-4">
+        <div>
+          <label class="input-label">Sidecar Account Ref</label>
+          <input
+            v-model="apiKeyValue"
+            type="text"
+            required
+            class="input font-mono"
+            placeholder="cursor-prod-001"
+          />
+          <p class="input-hint">
+            这个值会通过 X-Cursor-Account-Ref 传给 Cursor sidecar；真实 Cursor 上游凭据只放在 sidecar，不进入主服务。
+          </p>
         </div>
       </div>
 
@@ -3252,6 +3314,7 @@ const baseUrlHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
   if (form.platform === 'kiro') return '生产转发使用后端 kiro.sidecar_url；这里保持默认本地 sidecar 地址即可。'
+  if (form.platform === 'cursor') return '生产转发使用后端 cursor.sidecar_url；账号里只保存 sidecar account ref。'
   return t('admin.accounts.baseUrlHint')
 })
 
@@ -3259,6 +3322,7 @@ const apiKeyHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.apiKeyHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.apiKeyHint')
   if (form.platform === 'kiro') return '粘贴通过下方终端命令复制到剪贴板的 json:{...} Kiro 上游凭据。'
+  if (form.platform === 'cursor') return '填写 Cursor sidecar 中配置好的账号引用，不填写真实 Cursor token。'
   return t('admin.accounts.apiKeyHint')
 })
 
@@ -3585,7 +3649,7 @@ const form = reactive({
 
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {
-  if (form.platform === 'kiro') {
+  if (form.platform === 'kiro' || form.platform === 'cursor') {
     return false
   }
   // Antigravity upstream 类型不需要 OAuth 流程
@@ -3661,6 +3725,10 @@ watch(
       form.type = 'apikey'
       return
     }
+    if (form.platform === 'cursor') {
+      form.type = 'upstream'
+      return
+    }
     // Antigravity upstream 类型（实际创建为 apikey）
     if (form.platform === 'antigravity' && agType === 'upstream') {
       form.type = 'apikey'
@@ -3688,13 +3756,15 @@ watch(
   (newPlatform) => {
     // Reset base URL based on platform
     apiKeyBaseUrl.value =
-      (newPlatform === 'openai')
+      newPlatform === 'openai'
         ? 'https://api.openai.com'
         : newPlatform === 'gemini'
           ? 'https://generativelanguage.googleapis.com'
           : newPlatform === 'kiro'
             ? 'http://127.0.0.1:8787'
-            : 'https://api.anthropic.com'
+            : newPlatform === 'cursor'
+              ? 'http://127.0.0.1:8788'
+              : 'https://api.anthropic.com'
     // Clear model-related settings
     allowedModels.value = []
     modelMappings.value = []
@@ -3720,6 +3790,10 @@ watch(
       accountCategory.value = 'oauth-based'
     }
     if (newPlatform === 'kiro') {
+      accountCategory.value = 'apikey'
+      addMethod.value = 'oauth'
+    }
+    if (newPlatform === 'cursor') {
       accountCategory.value = 'apikey'
       addMethod.value = 'oauth'
     }
@@ -4472,6 +4546,22 @@ const handleSubmit = async () => {
       tier_id: 'vertex'
     }
     await createAccountAndFinish(form.platform, 'service_account' as AccountType, credentials)
+    return
+  }
+
+  // Cursor accounts are sidecar references. Real upstream credentials stay in the Cursor sidecar.
+  if (form.platform === 'cursor') {
+    if (!form.name.trim()) {
+      appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
+      return
+    }
+    if (!apiKeyValue.value.trim()) {
+      appStore.showError(t('admin.accounts.pleaseEnterApiKey'))
+      return
+    }
+    await createAccountAndFinish(form.platform, 'upstream', {
+      sidecar_account_ref: apiKeyValue.value.trim()
+    })
     return
   }
 
