@@ -592,13 +592,25 @@ func (h *GatewayHandler) cursorConfig() cursorRuntimeConfig {
 	if sidecarAPIKey := strings.TrimSpace(os.Getenv("CURSOR_SIDECAR_API_KEY")); sidecarAPIKey != "" {
 		cfg.SidecarAPIKey = sidecarAPIKey
 	}
-	if maxConcurrency := envPositiveInt("CURSOR_MAX_CONCURRENCY"); maxConcurrency > 0 {
+	if maxConcurrency := cursorEnvPositiveInt("CURSOR_MAX_CONCURRENCY"); maxConcurrency > 0 {
 		cfg.MaxConcurrency = maxConcurrency
 	}
-	if timeoutSeconds := envPositiveInt("CURSOR_REQUEST_TIMEOUT_SECONDS"); timeoutSeconds > 0 {
+	if timeoutSeconds := cursorEnvPositiveInt("CURSOR_REQUEST_TIMEOUT_SECONDS"); timeoutSeconds > 0 {
 		cfg.RequestTimeoutSeconds = timeoutSeconds
 	}
 	return cfg
+}
+
+func cursorEnvPositiveInt(key string) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
 }
 
 func (c cursorRuntimeConfig) requestTimeout() time.Duration {
