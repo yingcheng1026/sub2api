@@ -2,8 +2,11 @@ package handler
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,4 +59,21 @@ func TestCopyCursorSidecarHeadersDropsSensitiveHopByHopHeaders(t *testing.T) {
 	require.Empty(t, dst.Get("Authorization"))
 	require.Empty(t, dst.Get("X-Cursor-Sidecar-Key"))
 	require.Empty(t, dst.Get("Connection"))
+}
+
+func TestApplyCursorSidecarHeadersAddsInternalAndBearerAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/cursor/v1/responses", nil)
+
+	h := &GatewayHandler{cfg: &config.Config{}}
+	h.cfg.Cursor.SidecarAPIKey = "sidecar-test-key"
+
+	req := httptest.NewRequest(http.MethodPost, "http://sidecar.local/v1/responses", nil)
+	h.applyCursorSidecarHeaders(c, req, nil)
+
+	require.Equal(t, "sidecar-test-key", req.Header.Get("X-Cursor-Sidecar-Key"))
+	require.Equal(t, "Bearer sidecar-test-key", req.Header.Get("Authorization"))
+	require.Equal(t, "sidecar-test-key", req.Header.Get("x-api-key"))
 }

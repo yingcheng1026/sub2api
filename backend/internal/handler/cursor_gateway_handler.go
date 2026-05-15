@@ -545,6 +545,8 @@ func (h *GatewayHandler) applyCursorSidecarHeaders(c *gin.Context, req *http.Req
 	cfg := h.cursorConfig()
 	if cfg.SidecarAPIKey != "" {
 		req.Header.Set(cursorSidecarAPIKeyHeader, cfg.SidecarAPIKey)
+		req.Header.Set("Authorization", "Bearer "+cfg.SidecarAPIKey)
+		req.Header.Set("x-api-key", cfg.SidecarAPIKey)
 	}
 	if account != nil {
 		req.Header.Set(cursorSidecarAccountIDHeader, strconv.FormatInt(account.ID, 10))
