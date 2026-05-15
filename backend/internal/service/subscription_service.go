@@ -495,6 +495,11 @@ func (s *SubscriptionService) ensureWalletGroupKeys(ctx context.Context, input *
 }
 
 // lookupPlanGroupIDs 查询 plan 关联的 group ID 列表（subscription_plan_groups 表）。
+//
+// 5/14 反转决策后单 key 路径不再调用本方法；保留作多 key 路径（B2.2 EnsureWalletGroupKeys）
+// 的底层能力，将来若切回多 key 形态直接复用，避免重写。
+//
+//nolint:unused // 反转决策保留底层能力，见 docs/plans/2026-05-14-wallet-single-key-reversal.md
 func (s *SubscriptionService) lookupPlanGroupIDs(ctx context.Context, planID int64) ([]int64, error) {
 	if s.entClient == nil {
 		return nil, nil

@@ -134,11 +134,11 @@ func (userSubRepoNoop) BatchUpdateExpiredStatus(context.Context) (int64, error) 
 type subscriptionUserSubRepoStub struct {
 	userSubRepoNoop
 
-	nextID         int64
-	byID           map[int64]*UserSubscription
-	byUserGroup    map[string]*UserSubscription
-	activeWallets  map[int64]*UserSubscription // userID → wallet sub（同时间一个用户最多一条 active）
-	createCalls    int
+	nextID        int64
+	byID          map[int64]*UserSubscription
+	byUserGroup   map[string]*UserSubscription
+	activeWallets map[int64]*UserSubscription // userID → wallet sub（同时间一个用户最多一条 active）
+	createCalls   int
 }
 
 func newSubscriptionUserSubRepoStub() *subscriptionUserSubRepoStub {

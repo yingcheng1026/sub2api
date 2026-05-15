@@ -518,6 +518,7 @@ func (s *APIKeyService) EnsureWalletUniversalKey(ctx context.Context, userID int
 // 幂等：若用户名下已有 (groupID, name="钱包-{Name}", status=active, not expired/exhausted)
 //
 //	的 key → 复用；否则新建。
+//
 // 返回：(allKeys, createdCount, err)。allKeys 顺序按入参 groupIDs。
 func (s *APIKeyService) EnsureWalletGroupKeys(ctx context.Context, userID int64, groupIDs []int64) ([]APIKey, int, error) {
 	if len(groupIDs) == 0 {

@@ -1564,10 +1564,7 @@ func weightedShuffleByLoadFactorWithinSortGroups(accounts []accountWithLoad) {
 }
 
 func samePriorityAndLoadRateGroup(a, b accountWithLoad) bool {
-	if a.account.Priority != b.account.Priority {
-		return false
-	}
-	return true
+	return a.account.Priority == b.account.Priority
 }
 
 // weightedShuffleSegmentByLoadFactor 在 seg 上做加权 Fisher–Yates：

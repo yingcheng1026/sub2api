@@ -213,13 +213,13 @@ func TestAssignWalletSubscriptionCreditsPlanForcesMaxExpiresAt(t *testing.T) {
 
 // walletTopupServiceStub 记录 Topup 调用，模拟 repo 返回叠加后的 balance。
 type walletTopupServiceStub struct {
-	calls           int
-	lastSubID       int64
-	lastDelta       float64
-	lastOperator    *int64
-	lastNotes       string
-	returnEntry     WalletLedgerEntry
-	err             error
+	calls        int
+	lastSubID    int64
+	lastDelta    float64
+	lastOperator *int64
+	lastNotes    string
+	returnEntry  WalletLedgerEntry
+	err          error
 }
 
 func (s *walletTopupServiceStub) Topup(_ context.Context, subscriptionID int64, deltaUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error) {

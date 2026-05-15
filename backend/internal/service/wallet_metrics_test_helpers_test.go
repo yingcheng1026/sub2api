@@ -1,3 +1,5 @@
+//go:build unit
+
 package service
 
 // resetWalletMetricsForTest 单测重置计数器。

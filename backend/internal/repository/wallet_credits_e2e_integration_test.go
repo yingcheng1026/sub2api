@@ -17,7 +17,8 @@ import (
 )
 
 // B2.8 端到端回归 #1：链动小铺 credits SKU 走 PaymentOrder webhook 发货 →
-// 创建钱包订阅、expires_at 锁到 MaxExpiresAt（永久），多 key 全开。
+// 创建钱包订阅、expires_at 锁到 MaxExpiresAt（永久），单 key 模式建 1 把 universal key。
+// （5/14 反转决策后从「多 key」改回「单 key + ModelRouter」）。
 func TestWalletCreditsPlanPurchaseActivatesPermanentWallet(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
@@ -100,13 +101,13 @@ func TestWalletCreditsPlanPurchaseActivatesPermanentWallet(t *testing.T) {
 	require.True(t, sub.ExpiresAt.Equal(service.MaxExpiresAt),
 		"额度卡 expires_at 必须 == MaxExpiresAt (2099-12-31)，实际 %v", sub.ExpiresAt)
 
-	// 多 key 全开
+	// 5/14 反转决策：单 key 路径建 1 把 universal key (group_id=NULL)，跨平台调度靠 model_router
 	keys, _, err := apiKeyRepo.ListByUserID(ctx, user.ID, defaultWalletE2EPagination(), service.APIKeyListFilters{Status: service.StatusAPIKeyActive})
 	require.NoError(t, err)
-	require.Len(t, keys, 2, "credits plan 关联 2 个 group → 应建 2 把分组 key")
-	for _, k := range keys {
-		require.True(t, service.IsWalletGroupKeyName(k.Name), "key 名应带 钱包- 前缀，实际 %q", k.Name)
-	}
+	require.Len(t, keys, 1, "credits plan 应只建 1 把 universal key，不分 group")
+	require.True(t, service.IsWalletUniversalKeyName(keys[0].Name), "key 名应为 universal key 名，实际 %q", keys[0].Name)
+	require.Equal(t, service.WalletUniversalAPIKeyName, keys[0].Name)
+	require.Nil(t, keys[0].GroupID, "universal key 的 group_id 必须为 NULL")
 }
 
 // B2.8 端到端回归 #2：月卡用户再买额度卡 → topup 叠加（不新建 user_subscriptions 行）。
