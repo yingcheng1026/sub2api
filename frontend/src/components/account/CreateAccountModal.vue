@@ -1098,21 +1098,118 @@
         </div>
       </div>
 
-      <!-- Cursor sidecar account reference -->
+      <!-- Cursor sidecar account provisioning -->
       <div v-if="form.platform === 'cursor'" class="space-y-4">
-        <div>
-          <label class="input-label">Sidecar Account Ref</label>
-          <input
-            v-model="apiKeyValue"
-            type="text"
-            required
-            class="input font-mono"
-            placeholder="cursor-prod-001"
-          />
-          <p class="input-hint">
-            这个值会通过 X-Cursor-Account-Ref 传给 Cursor sidecar；真实 Cursor 上游凭据只放在 sidecar，不进入主服务。
-          </p>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label class="input-label">Cursor Email</label>
+            <input
+              v-model="cursorEmail"
+              type="email"
+              required
+              class="input"
+              placeholder="name@example.com"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Token Expires At</label>
+            <input
+              v-model="cursorTokenExpiresAt"
+              type="text"
+              class="input font-mono"
+              placeholder="2026-05-15T12:00:00Z"
+              autocomplete="off"
+            />
+          </div>
         </div>
+        <div>
+          <label class="input-label">Cursor Access Token</label>
+          <textarea
+            v-model="cursorAccessToken"
+            required
+            rows="3"
+            class="input font-mono"
+            placeholder="access token"
+            autocomplete="off"
+          />
+        </div>
+        <div>
+          <label class="input-label">Cursor Refresh Token</label>
+          <textarea
+            v-model="cursorRefreshToken"
+            required
+            rows="3"
+            class="input font-mono"
+            placeholder="refresh token"
+            autocomplete="off"
+          />
+        </div>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label class="input-label">Service Machine ID</label>
+            <input
+              v-model="cursorServiceMachineId"
+              type="text"
+              class="input font-mono"
+              placeholder="machine id"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Account UUID</label>
+            <input
+              v-model="cursorAccountUuid"
+              type="text"
+              class="input font-mono"
+              placeholder="optional"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Client Version</label>
+            <input
+              v-model="cursorClientVersion"
+              type="text"
+              class="input font-mono"
+              placeholder="3.3.30"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Config Version</label>
+            <input
+              v-model="cursorConfigVersion"
+              type="text"
+              class="input font-mono"
+              placeholder="optional"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Client ID</label>
+            <input
+              v-model="cursorClientId"
+              type="text"
+              class="input font-mono"
+              placeholder="optional"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Membership</label>
+            <input
+              v-model="cursorMembershipType"
+              type="text"
+              class="input"
+              placeholder="pro"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+        <p class="input-hint">
+          凭据只写入 Cursor sidecar；主服务只保存返回的 sidecar account ref。
+        </p>
       </div>
 
       <!-- API Key input (only for apikey type, excluding Antigravity which has its own fields) -->
@@ -3262,6 +3359,7 @@ import type {
   AccountType,
   CheckMixedChannelResponse,
   CreateAccountRequest,
+  ProvisionCursorAccountRequest,
   OpenAICompactMode
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -3450,6 +3548,16 @@ const allowOverages = ref(false) // For antigravity accounts: enable AI Credits 
 const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigravity: oauth or upstream
 const upstreamBaseUrl = ref('') // For upstream type: base URL
 const upstreamApiKey = ref('') // For upstream type: API key
+const cursorEmail = ref('')
+const cursorAccessToken = ref('')
+const cursorRefreshToken = ref('')
+const cursorTokenExpiresAt = ref('')
+const cursorServiceMachineId = ref('')
+const cursorAccountUuid = ref('')
+const cursorClientVersion = ref('3.3.30')
+const cursorConfigVersion = ref('')
+const cursorClientId = ref('')
+const cursorMembershipType = ref('')
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
@@ -4165,6 +4273,20 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
   }
 }
 
+const submitProvisionCursorAccount = async (payload: ProvisionCursorAccountRequest) => {
+  submitting.value = true
+  try {
+    await adminAPI.accounts.provisionCursorSidecar(payload)
+    appStore.showSuccess(t('admin.accounts.accountCreated'))
+    emit('created')
+    handleClose()
+  } catch (error: any) {
+    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.accounts.failedToCreate'))
+  } finally {
+    submitting.value = false
+  }
+}
+
 // Methods
 const resetForm = () => {
   step.value = 1
@@ -4240,6 +4362,16 @@ const resetForm = () => {
   antigravityAccountType.value = 'oauth'
   upstreamBaseUrl.value = ''
   upstreamApiKey.value = ''
+  cursorEmail.value = ''
+  cursorAccessToken.value = ''
+  cursorRefreshToken.value = ''
+  cursorTokenExpiresAt.value = ''
+  cursorServiceMachineId.value = ''
+  cursorAccountUuid.value = ''
+  cursorClientVersion.value = '3.3.30'
+  cursorConfigVersion.value = ''
+  cursorClientId.value = ''
+  cursorMembershipType.value = ''
   vertexServiceAccountJson.value = ''
   vertexProjectId.value = ''
   vertexClientEmail.value = ''
@@ -4549,18 +4681,45 @@ const handleSubmit = async () => {
     return
   }
 
-  // Cursor accounts are sidecar references. Real upstream credentials stay in the Cursor sidecar.
+  // Cursor accounts are provisioned into the sidecar; Sub2API only stores the returned account ref.
   if (form.platform === 'cursor') {
     if (!form.name.trim()) {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
       return
     }
-    if (!apiKeyValue.value.trim()) {
-      appStore.showError(t('admin.accounts.pleaseEnterApiKey'))
+    if (!cursorEmail.value.trim()) {
+      appStore.showError('请输入 Cursor 邮箱')
       return
     }
-    await createAccountAndFinish(form.platform, 'upstream', {
-      sidecar_account_ref: apiKeyValue.value.trim()
+    if (!cursorAccessToken.value.trim()) {
+      appStore.showError('请输入 Cursor access token')
+      return
+    }
+    if (!cursorRefreshToken.value.trim()) {
+      appStore.showError('请输入 Cursor refresh token')
+      return
+    }
+    await submitProvisionCursorAccount({
+      name: form.name.trim(),
+      notes: form.notes?.trim() || null,
+      email: cursorEmail.value.trim(),
+      access_token: cursorAccessToken.value.trim(),
+      refresh_token: cursorRefreshToken.value.trim(),
+      cursor_token_expires_at: cursorTokenExpiresAt.value.trim() || undefined,
+      account_uuid: cursorAccountUuid.value.trim() || undefined,
+      cursor_service_machine_id: cursorServiceMachineId.value.trim() || undefined,
+      cursor_client_version: cursorClientVersion.value.trim() || undefined,
+      cursor_config_version: cursorConfigVersion.value.trim() || undefined,
+      cursor_client_id: cursorClientId.value.trim() || undefined,
+      cursor_membership_type: cursorMembershipType.value.trim() || undefined,
+      proxy_id: form.proxy_id,
+      concurrency: form.concurrency,
+      load_factor: form.load_factor,
+      priority: form.priority,
+      rate_multiplier: form.rate_multiplier,
+      group_ids: form.group_ids,
+      expires_at: form.expires_at,
+      auto_pause_on_expired: autoPauseOnExpired.value
     })
     return
   }
