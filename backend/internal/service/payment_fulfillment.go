@@ -282,7 +282,7 @@ func (s *PaymentService) doBalance(ctx context.Context, o *dbent.PaymentOrder) e
 	case redeemActionRedeem:
 		// Code exists but unused — skip creation, proceed to redeem
 	}
-	if _, err := s.redeemService.Redeem(ctx, o.UserID, o.RechargeCode); err != nil {
+	if _, err := s.redeemService.Redeem(ContextSkipRedeemAffiliate(ctx), o.UserID, o.RechargeCode); err != nil {
 		return fmt.Errorf("redeem balance: %w", err)
 	}
 	if err := s.applyAffiliateRebateForOrder(ctx, o); err != nil {
@@ -319,7 +319,7 @@ func (s *PaymentService) ExecuteSubscriptionFulfillment(ctx context.Context, oid
 	if o.Status != OrderStatusPaid && o.Status != OrderStatusFailed {
 		return infraerrors.BadRequest("INVALID_STATUS", "order cannot fulfill in status "+o.Status)
 	}
-	if o.SubscriptionGroupID == nil || o.SubscriptionDays == nil {
+	if o.SubscriptionDays == nil || (o.SubscriptionGroupID == nil && o.PlanID == nil) {
 		return infraerrors.BadRequest("INVALID_STATUS", "missing subscription info")
 	}
 	c, err := s.entClient.PaymentOrder.Update().Where(paymentorder.IDEQ(oid), paymentorder.StatusIn(OrderStatusPaid, OrderStatusFailed)).SetStatus(OrderStatusRecharging).Save(ctx)
@@ -337,22 +337,58 @@ func (s *PaymentService) ExecuteSubscriptionFulfillment(ctx context.Context, oid
 }
 
 func (s *PaymentService) doSub(ctx context.Context, o *dbent.PaymentOrder) error {
-	gid := *o.SubscriptionGroupID
 	days := *o.SubscriptionDays
+	// Idempotency: check audit log to see if subscription was already assigned.
+	// Prevents double-extension on retry after markCompleted fails.
+	if s.hasAuditLog(ctx, o.ID, "SUBSCRIPTION_SUCCESS") {
+		slog.Info("subscription already assigned for order, skipping", "orderID", o.ID)
+		return s.markCompleted(ctx, o, "SUBSCRIPTION_SUCCESS")
+	}
+	orderNote := fmt.Sprintf("payment order %d", o.ID)
+
+	if o.SubscriptionGroupID == nil {
+		return s.doWalletSub(ctx, o, days, orderNote)
+	}
+
+	gid := *o.SubscriptionGroupID
 	g, err := s.groupRepo.GetByID(ctx, gid)
 	if err != nil || g.Status != payment.EntityStatusActive {
 		return fmt.Errorf("group %d no longer exists or inactive", gid)
 	}
-	// Idempotency: check audit log to see if subscription was already assigned.
-	// Prevents double-extension on retry after markCompleted fails.
-	if s.hasAuditLog(ctx, o.ID, "SUBSCRIPTION_SUCCESS") {
-		slog.Info("subscription already assigned for order, skipping", "orderID", o.ID, "groupID", gid)
-		return s.markCompleted(ctx, o, "SUBSCRIPTION_SUCCESS")
-	}
-	orderNote := fmt.Sprintf("payment order %d", o.ID)
 	_, _, err = s.subscriptionSvc.AssignOrExtendSubscription(ctx, &AssignSubscriptionInput{UserID: o.UserID, GroupID: gid, ValidityDays: days, AssignedBy: 0, Notes: orderNote})
 	if err != nil {
 		return fmt.Errorf("assign subscription: %w", err)
+	}
+	return s.markCompleted(ctx, o, "SUBSCRIPTION_SUCCESS")
+}
+
+func (s *PaymentService) doWalletSub(ctx context.Context, o *dbent.PaymentOrder, days int, orderNote string) error {
+	if o.PlanID == nil {
+		return infraerrors.BadRequest("INVALID_STATUS", "missing wallet subscription plan")
+	}
+	plan, err := s.entClient.SubscriptionPlan.Get(ctx, *o.PlanID)
+	if err != nil {
+		return fmt.Errorf("wallet plan %d not found: %w", *o.PlanID, err)
+	}
+	if plan.WalletQuotaUsd == nil || *plan.WalletQuotaUsd <= 0 {
+		return infraerrors.BadRequest("INVALID_STATUS", "subscription plan is not a wallet plan")
+	}
+
+	walletInitial := *plan.WalletQuotaUsd
+	planID := plan.ID
+	// plan_type 透传给 service：credits → 永久 expires_at；subscription/"" → 按 days 计算。
+	planType := plan.PlanType
+	_, err = s.subscriptionSvc.AssignSubscription(ctx, &AssignSubscriptionInput{
+		UserID:           o.UserID,
+		ValidityDays:     days,
+		AssignedBy:       0,
+		Notes:            orderNote,
+		WalletInitialUSD: &walletInitial,
+		PlanID:           &planID,
+		PlanType:         planType,
+	})
+	if err != nil {
+		return fmt.Errorf("assign wallet subscription: %w", err)
 	}
 	return s.markCompleted(ctx, o, "SUBSCRIPTION_SUCCESS")
 }
@@ -394,7 +430,8 @@ func (s *PaymentService) applyAffiliateRebateForOrder(ctx context.Context, o *db
 		return nil
 	}
 
-	rebateAmount, err := s.affiliateService.AccrueInviteRebate(txCtx, o.UserID, o.Amount)
+	sourceOrderID := o.ID
+	rebateAmount, err := s.affiliateService.AccrueInviteRebateForOrder(txCtx, o.UserID, o.Amount, &sourceOrderID)
 	if err != nil {
 		s.writeAuditLog(ctx, o.ID, "AFFILIATE_REBATE_FAILED", "system", map[string]any{
 			"error": err.Error(),

@@ -117,6 +117,8 @@ export interface SubscriptionPlan {
   features: string[]
   for_sale: boolean
   sort_order: number
+  /** 月卡 / 额度卡。subscription = 月卡，validity_days 控时长；credits = 额度卡，永久有效。 */
+  plan_type?: 'subscription' | 'credits'
 }
 
 export interface PaymentChannel {

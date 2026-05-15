@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -45,6 +47,8 @@ type SubscriptionService struct {
 	userSubRepo         UserSubscriptionRepository
 	billingCacheService *BillingCacheService
 	entClient           *dbent.Client
+	walletKeyService    WalletGroupKeyService
+	walletTopupService  WalletTopupService
 
 	// L1 缓存：加速中间件热路径的订阅查询
 	subCacheL1     *ristretto.Cache
@@ -53,6 +57,26 @@ type SubscriptionService struct {
 	subCacheJitter int // 抖动百分比
 
 	maintenanceQueue *SubscriptionMaintenanceQueue
+}
+
+// WalletGroupKeyService 钱包 key 服务接口。
+//
+// 5/14 反转决策（参见 docs/plans/2026-05-14-wallet-single-key-reversal.md）：
+// 激活流程走 EnsureWalletUniversalKey 单 key 路径，建 1 把 group_id=NULL 通用 key，
+// 靠 model_router (B1.1/B1.2) 按调用模型自动路由到对应 group。
+// EnsureWalletGroupKeys 多 key 路径保留作底层能力，激活不再调用（不删，将来要切回快速）。
+type WalletGroupKeyService interface {
+	EnsureWalletGroupKeys(ctx context.Context, userID int64, groupIDs []int64) ([]APIKey, int, error)
+	EnsureWalletUniversalKey(ctx context.Context, userID int64) (*APIKey, bool, error)
+}
+
+// WalletTopupService 钱包叠加充值接口（B2.4）：把 deltaUSD 同时累加到现有钱包订阅的
+// wallet_balance_usd 和 wallet_initial_usd，并写一条 reason='topup' 流水。
+//
+// SubscriptionService 在「用户已有 active 钱包 + 本次是额度卡 (plan_type='credits')」
+// 场景下调用，避开 partial unique index 撞车。WalletService 实现此接口。
+type WalletTopupService interface {
+	Topup(ctx context.Context, subscriptionID int64, deltaUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error)
 }
 
 // NewSubscriptionService 创建订阅服务
@@ -66,6 +90,16 @@ func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscript
 	svc.initSubCache(cfg)
 	svc.initMaintenanceQueue(cfg)
 	return svc
+}
+
+func (s *SubscriptionService) SetWalletGroupKeyService(keyService WalletGroupKeyService) {
+	s.walletKeyService = keyService
+}
+
+// SetWalletTopupService 注入钱包叠加服务。未注入时，已有 active 钱包 + 再来一张额度卡
+// 直接返回 ErrSubscriptionAssignConflict（B2.4 之前的旧行为）。
+func (s *SubscriptionService) SetWalletTopupService(topup WalletTopupService) {
+	s.walletTopupService = topup
 }
 
 func (s *SubscriptionService) initMaintenanceQueue(cfg *config.Config) {
@@ -143,12 +177,40 @@ func (s *SubscriptionService) InvalidateSubCache(userID, groupID int64) {
 }
 
 // AssignSubscriptionInput 分配订阅输入
+//
+// 两种模式：
+//   - Group 模式（v3）：GroupID > 0, WalletInitialUSD == nil
+//   - 钱包模式 (v4)：WalletInitialUSD != nil, GroupID 忽略；用户级，与 group 解耦
 type AssignSubscriptionInput struct {
 	UserID       int64
 	GroupID      int64
 	ValidityDays int
 	AssignedBy   int64
 	Notes        string
+
+	// WalletInitialUSD 非 nil → 走钱包路径：创建一条 group_id=NULL 的钱包订阅，
+	// 初始余额=该值（同时写入 wallet_initial_usd 和 wallet_balance_usd）。
+	// schema 上的 partial unique index 保证一个用户最多一条 active 钱包订阅。
+	WalletInitialUSD *float64
+
+	// PlanID 钱包模式下用于查 subscription_plan_groups 决定建哪些 group 的 key。
+	// 为 nil 时跳过自动建 key（仅创建钱包订阅，admin 手动开通场景）。
+	PlanID *int64
+
+	// PlanType 钱包模式 plan 形态：subscription (月卡) / credits (额度卡)。
+	// 空串视为 subscription。credits 走永久 expires_at（截断到 MaxExpiresAt 2099）。
+	// 来源：payment_fulfillment.doWalletSub 读 SubscriptionPlan.PlanType 透传。
+	PlanType string
+}
+
+// IsCreditsAssign 当前 input 是否为额度卡（永久有效）分配。
+func (i *AssignSubscriptionInput) IsCreditsAssign() bool {
+	return i != nil && i.PlanType == PlanTypeCredits
+}
+
+// IsWalletAssign 判断当前 input 是否为钱包模式分配。
+func (i *AssignSubscriptionInput) IsWalletAssign() bool {
+	return i != nil && i.WalletInitialUSD != nil
 }
 
 // AssignSubscription 分配订阅给用户（不允许重复分配）
@@ -300,9 +362,10 @@ func (s *SubscriptionService) createSubscription(ctx context.Context, input *Ass
 		expiresAt = MaxExpiresAt
 	}
 
+	groupID := input.GroupID
 	sub := &UserSubscription{
 		UserID:     input.UserID,
-		GroupID:    input.GroupID,
+		GroupID:    &groupID,
 		StartsAt:   now,
 		ExpiresAt:  expiresAt,
 		Status:     SubscriptionStatusActive,
@@ -321,6 +384,183 @@ func (s *SubscriptionService) createSubscription(ctx context.Context, input *Ass
 	}
 
 	// 重新获取完整订阅信息（包含关联）
+	return s.userSubRepo.GetByID(ctx, sub.ID)
+}
+
+// assignWalletSubscriptionWithReuse 钱包模式分配（v4）。
+//
+// 三条分支：
+//  1. 用户没有 active 钱包 → 新建。
+//  2. 已有 active 钱包 + 本次是额度卡 (PlanType='credits') →
+//     调用 walletTopupService.Topup，把 quota 合入现有钱包（balance+initial 双 +delta，
+//     ledger 写 reason='topup'）；不新建 user_subscriptions 行。设计 §2.3。
+//  3. 已有 active 钱包 + 本次是月卡（或未注入 topup 服务）→
+//     返回 ErrSubscriptionAssignConflict（conflict_reason=wallet_already_active 或
+//     wallet_topup_unsupported）；partial unique index 兜底拦截。
+//
+// 不复用 group 路径的 ExistsByUserIDAndGroupID 是因为钱包订阅 group_id=NULL，
+// 复合查询用 group_id=0 拿不到；改用 GetActiveWalletByUserID。
+func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, bool, error) {
+	if input.WalletInitialUSD == nil || *input.WalletInitialUSD <= 0 {
+		return nil, false, fmt.Errorf("wallet_initial_usd must be > 0")
+	}
+
+	existing, err := s.userSubRepo.GetActiveWalletByUserID(ctx, input.UserID)
+	if err != nil && !errors.Is(err, ErrSubscriptionNotFound) {
+		return nil, false, err
+	}
+	if existing != nil {
+		return s.topupExistingWallet(ctx, input, existing)
+	}
+
+	sub, err := s.createWalletSubscription(ctx, input)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := s.ensureWalletGroupKeys(ctx, input, sub); err != nil {
+		return nil, false, err
+	}
+
+	// 钱包订阅与 group 解耦，不需要按 (user, group) 失效订阅缓存；
+	// 中间件下次请求会直接 GetActiveWalletByUserID 命中。
+	return sub, false, nil
+}
+
+// topupExistingWallet 用户已有 active 钱包 → 走 B2.4 叠加路径或拒绝。
+//
+// 仅当 input.PlanType='credits' 且注入了 walletTopupService 时才叠加；否则按老逻辑
+// 返回 conflict，避免月卡叠月卡 / 月卡叠 trial 等语义混乱。
+//
+// 返回 reused=true，sub.ID 不变（叠加在 existing 行上），但 WalletBalanceUSD /
+// WalletInitialUSD 字段已更新到叠加后的值；同时 ensureWalletGroupKeys 也会跑一遍
+// （幂等：缺哪把补哪把），保证额度卡新关联的 group 也能拿到 key。
+func (s *SubscriptionService) topupExistingWallet(ctx context.Context, input *AssignSubscriptionInput, existing *UserSubscription) (*UserSubscription, bool, error) {
+	if !input.IsCreditsAssign() {
+		return nil, false, ErrSubscriptionAssignConflict.WithMetadata(map[string]string{
+			"conflict_reason": "wallet_already_active",
+		})
+	}
+	if s.walletTopupService == nil {
+		return nil, false, ErrSubscriptionAssignConflict.WithMetadata(map[string]string{
+			"conflict_reason": "wallet_topup_unsupported",
+		})
+	}
+
+	delta := *input.WalletInitialUSD
+	notes := fmt.Sprintf("credits topup: %s", strings.TrimSpace(input.Notes))
+	var operator *int64
+	if input.AssignedBy > 0 {
+		op := input.AssignedBy
+		operator = &op
+	}
+	entry, err := s.walletTopupService.Topup(ctx, existing.ID, delta, operator, notes)
+	if err != nil {
+		return nil, false, fmt.Errorf("topup wallet: %w", err)
+	}
+
+	// 同步内存字段（避免再读一次 DB）。balance_after 来自 ledger 返回，权威。
+	newBalance := entry.BalanceAfter
+	newInitial := *existing.WalletInitialUSD + delta
+	existing.WalletBalanceUSD = &newBalance
+	existing.WalletInitialUSD = &newInitial
+
+	// 额度卡新关联的 group 可能没建 key —— 跑一遍 ensureWalletGroupKeys 补缺。
+	// 已有 key 复用，不重复建。
+	if err := s.ensureWalletGroupKeys(ctx, input, existing); err != nil {
+		return nil, false, err
+	}
+
+	return existing, true, nil
+}
+
+// ensureWalletGroupKeys 钱包激活/topup 时为用户建 1 把通用 key（group_id=NULL），
+// 靠 model_router (B1.1/B1.2) 按调用模型自动路由。
+//
+// 5/14 反转决策（参见 docs/plans/2026-05-14-wallet-single-key-reversal.md）：
+// 撤销 B2.2 多 key 改造，回到 B1.4 单 key 形态。多 key 路径 (EnsureWalletGroupKeys)
+// 保留作底层能力，激活不再调用，函数名保留 ensureWalletGroupKeys 减少调用方改动。
+//
+// 失败策略：建 key 失败返回错误，钱包订阅在外层事务中应一并回滚。
+func (s *SubscriptionService) ensureWalletGroupKeys(ctx context.Context, input *AssignSubscriptionInput, sub *UserSubscription) error {
+	if s.walletKeyService == nil || sub == nil || input == nil {
+		return nil
+	}
+	key, created, err := s.walletKeyService.EnsureWalletUniversalKey(ctx, input.UserID)
+	if err != nil {
+		return fmt.Errorf("ensure wallet universal api key: %w", err)
+	}
+	sub.WalletUniversalKey = key
+	sub.WalletUniversalKeyCreated = created
+	return nil
+}
+
+// lookupPlanGroupIDs 查询 plan 关联的 group ID 列表（subscription_plan_groups 表）。
+//
+// 5/14 反转决策后单 key 路径不再调用本方法；保留作多 key 路径（B2.2 EnsureWalletGroupKeys）
+// 的底层能力，将来若切回多 key 形态直接复用，避免重写。
+//
+//nolint:unused // 反转决策保留底层能力，见 docs/plans/2026-05-14-wallet-single-key-reversal.md
+func (s *SubscriptionService) lookupPlanGroupIDs(ctx context.Context, planID int64) ([]int64, error) {
+	if s.entClient == nil {
+		return nil, nil
+	}
+	rows, err := s.entClient.SubscriptionPlanGroup.Query().
+		Where(subscriptionplangroup.PlanIDEQ(planID)).
+		Select(subscriptionplangroup.FieldGroupID).
+		Ints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int64, 0, len(rows))
+	for _, v := range rows {
+		out = append(out, int64(v))
+	}
+	return out, nil
+}
+
+// createWalletSubscription 创建新钱包订阅（内部方法）。group_id=NULL，
+// wallet_initial_usd 和 wallet_balance_usd 都设为 input 给定的初始值。
+//
+// 月卡 (plan_type='subscription'，含空串默认)：expires_at = now + validity_days。
+// 额度卡 (plan_type='credits')：expires_at = MaxExpiresAt (2099-12-31)，validity_days 忽略。
+// 见 docs/plans/2026-05-13-wallet-multikey-credits-design.md §2.2。
+func (s *SubscriptionService) createWalletSubscription(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, error) {
+	validityDays := normalizeAssignValidityDays(input.ValidityDays)
+
+	now := time.Now()
+	var expiresAt time.Time
+	if input.IsCreditsAssign() {
+		// 额度卡永久有效：直接拉到 MaxExpiresAt，cron 不会到期，余额烧完为止。
+		expiresAt = MaxExpiresAt
+	} else {
+		expiresAt = now.AddDate(0, 0, validityDays)
+		if expiresAt.After(MaxExpiresAt) {
+			expiresAt = MaxExpiresAt
+		}
+	}
+
+	initial := *input.WalletInitialUSD
+	balance := initial
+	sub := &UserSubscription{
+		UserID:           input.UserID,
+		GroupID:          nil,
+		StartsAt:         now,
+		ExpiresAt:        expiresAt,
+		Status:           SubscriptionStatusActive,
+		WalletInitialUSD: &initial,
+		WalletBalanceUSD: &balance,
+		AssignedAt:       now,
+		Notes:            input.Notes,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if input.AssignedBy > 0 {
+		sub.AssignedBy = &input.AssignedBy
+	}
+
+	if err := s.userSubRepo.Create(ctx, sub); err != nil {
+		return nil, err
+	}
 	return s.userSubRepo.GetByID(ctx, sub.ID)
 }
 
@@ -381,6 +621,11 @@ func (s *SubscriptionService) BulkAssignSubscription(ctx context.Context, input 
 }
 
 func (s *SubscriptionService) assignSubscriptionWithReuse(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, bool, error) {
+	// 钱包模式 (v4)：跳过 group 校验，按 user 维度幂等
+	if input.IsWalletAssign() {
+		return s.assignWalletSubscriptionWithReuse(ctx, input)
+	}
+
 	// 检查分组是否存在且为订阅类型
 	group, err := s.groupRepo.GetByID(ctx, input.GroupID)
 	if err != nil {
@@ -474,15 +719,17 @@ func (s *SubscriptionService) RevokeSubscription(ctx context.Context, subscripti
 		return err
 	}
 
-	// 失效订阅缓存
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
-	if s.billingCacheService != nil {
-		userID, groupID := sub.UserID, sub.GroupID
-		go func() {
-			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-		}()
+	// 失效订阅缓存（钱包模式 sub.GroupID == nil，跳过 group 维度缓存）
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+		if s.billingCacheService != nil {
+			userID, groupID := sub.UserID, *sub.GroupID
+			go func() {
+				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
+			}()
+		}
 	}
 
 	return nil
@@ -541,15 +788,17 @@ func (s *SubscriptionService) ExtendSubscription(ctx context.Context, subscripti
 		}
 	}
 
-	// 失效订阅缓存
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
-	if s.billingCacheService != nil {
-		userID, groupID := sub.UserID, sub.GroupID
-		go func() {
-			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-		}()
+	// 失效订阅缓存（钱包模式 sub.GroupID == nil，跳过 group 维度缓存）
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+		if s.billingCacheService != nil {
+			userID, groupID := sub.UserID, *sub.GroupID
+			go func() {
+				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
+			}()
+		}
 	}
 
 	return s.userSubRepo.GetByID(ctx, subscriptionID)
@@ -598,6 +847,18 @@ func (s *SubscriptionService) GetActiveSubscription(ctx context.Context, userID,
 	}
 	cp := *sub
 	return &cp, nil
+}
+
+// GetActiveWalletSubscription 查找用户当前 active 钱包订阅 (v4)。
+// 钱包订阅独立于 api_key.group_id：用户只要持有一条 wallet_balance_usd != NULL
+// 的 active 订阅，所有 group 请求都走钱包扣费。schema 上有 partial unique
+// index 保证最多一条，repo 直接 Only() 即可。
+//
+// 不命中 L1 缓存：钱包订阅频率低（一用户最多一条）且扣款会在事务里 FOR UPDATE
+// 重新查，缓存收益有限。返回 ErrSubscriptionNotFound 表示用户没钱包订阅，
+// 调用方应回退到 (user, group) 老路径或主余额检查。
+func (s *SubscriptionService) GetActiveWalletSubscription(ctx context.Context, userID int64) (*UserSubscription, error) {
+	return s.userSubRepo.GetActiveWalletByUserID(ctx, userID)
 }
 
 // ListUserSubscriptions 获取用户的所有订阅
@@ -725,12 +986,15 @@ func (s *SubscriptionService) AdminResetQuota(ctx context.Context, subscriptionI
 	// Invalidate L1 ristretto cache. Ristretto's Del() is asynchronous by design,
 	// so call Wait() immediately after to flush pending operations and guarantee
 	// the deleted key is not returned on the very next Get() call.
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
-	if s.subCacheL1 != nil {
-		s.subCacheL1.Wait()
-	}
-	if s.billingCacheService != nil {
-		_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, sub.GroupID)
+	// 钱包模式 sub.GroupID == nil，跳过 group 维度缓存
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+		if s.subCacheL1 != nil {
+			s.subCacheL1.Wait()
+		}
+		if s.billingCacheService != nil {
+			_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, *sub.GroupID)
+		}
 	}
 	// Return the refreshed subscription from DB
 	return s.userSubRepo.GetByID(ctx, subscriptionID)
@@ -772,11 +1036,11 @@ func (s *SubscriptionService) CheckAndResetWindows(ctx context.Context, sub *Use
 		needsInvalidateCache = true
 	}
 
-	// 如果有窗口被重置，失效缓存以保持一致性
-	if needsInvalidateCache {
-		s.InvalidateSubCache(sub.UserID, sub.GroupID)
+	// 如果有窗口被重置，失效缓存以保持一致性（钱包模式 sub.GroupID == nil，跳过 group 维度缓存）
+	if needsInvalidateCache && sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
 		if s.billingCacheService != nil {
-			_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, sub.GroupID)
+			_ = s.billingCacheService.InvalidateSubscription(ctx, sub.UserID, *sub.GroupID)
 		}
 	}
 
@@ -883,8 +1147,10 @@ func (s *SubscriptionService) doWindowMaintenance(sub *UserSubscription) {
 		log.Printf("Failed to reset subscription windows: %v", err)
 	}
 
-	// 失效 L1 缓存，确保后续请求拿到更新后的数据
-	s.InvalidateSubCache(sub.UserID, sub.GroupID)
+	// 失效 L1 缓存（钱包模式 sub.GroupID == nil，跳过）
+	if sub.GroupID != nil {
+		s.InvalidateSubCache(sub.UserID, *sub.GroupID)
+	}
 }
 
 // RecordUsage 记录使用量到订阅
@@ -921,9 +1187,14 @@ func (s *SubscriptionService) GetSubscriptionProgress(ctx context.Context, subsc
 		return nil, ErrSubscriptionNotFound
 	}
 
+	// 钱包模式 (v4) 没有单 group 概念，进度需另算（暂不支持，A2 阶段补全）
+	if sub.GroupID == nil {
+		return nil, infraerrors.BadRequest("WALLET_MODE_NOT_SUPPORTED", "wallet-mode subscription progress not yet implemented")
+	}
+
 	group := sub.Group
 	if group == nil {
-		group, err = s.groupRepo.GetByID(ctx, sub.GroupID)
+		group, err = s.groupRepo.GetByID(ctx, *sub.GroupID)
 		if err != nil {
 			return nil, err
 		}

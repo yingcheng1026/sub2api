@@ -493,6 +493,36 @@
           </div>
         </div>
         <div>
+          <label class="input-label">{{ t('admin.subscriptions.form.mode') }}</label>
+          <div class="inline-flex rounded-lg border border-gray-300 dark:border-gray-600 overflow-hidden">
+            <button
+              type="button"
+              @click="assignForm.mode = 'group'"
+              :class="[
+                'px-4 py-2 text-sm font-medium transition-colors',
+                assignForm.mode === 'group'
+                  ? 'bg-primary-600 text-white'
+                  : 'bg-white text-gray-700 hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+              ]"
+            >
+              {{ t('admin.subscriptions.form.modeGroup') }}
+            </button>
+            <button
+              type="button"
+              @click="assignForm.mode = 'wallet'"
+              :class="[
+                'px-4 py-2 text-sm font-medium transition-colors border-l border-gray-300 dark:border-gray-600',
+                assignForm.mode === 'wallet'
+                  ? 'bg-primary-600 text-white'
+                  : 'bg-white text-gray-700 hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+              ]"
+            >
+              {{ t('admin.subscriptions.form.modeWallet') }}
+            </button>
+          </div>
+          <p class="input-hint">{{ t('admin.subscriptions.form.modeHint') }}</p>
+        </div>
+        <div v-if="assignForm.mode === 'group'">
           <label class="input-label">{{ t('admin.subscriptions.form.group') }}</label>
           <Select
             v-model="assignForm.group_id"
@@ -521,6 +551,18 @@
             </template>
           </Select>
           <p class="input-hint">{{ t('admin.subscriptions.groupHint') }}</p>
+        </div>
+        <div v-else>
+          <label class="input-label">{{ t('admin.subscriptions.form.walletInitialUSD') }}</label>
+          <input
+            v-model.number="assignForm.wallet_initial_usd"
+            type="number"
+            min="0.01"
+            step="0.01"
+            class="input"
+            placeholder="1500.00"
+          />
+          <p class="input-hint">{{ t('admin.subscriptions.form.walletInitialHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.subscriptions.form.validityDays') }}</label>
@@ -742,7 +784,13 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
-import type { UserSubscription, Group, GroupPlatform, SubscriptionType } from '@/types'
+import type {
+  UserSubscription,
+  Group,
+  GroupPlatform,
+  SubscriptionType,
+  AssignSubscriptionRequest
+} from '@/types'
 import type { SimpleUser } from '@/api/admin/usage'
 import type { Column } from '@/components/common/types'
 import { formatDateOnly } from '@/utils/format'
@@ -948,8 +996,11 @@ const revokingSubscription = ref<UserSubscription | null>(null)
 
 const assignForm = reactive({
   user_id: null as number | null,
+  // 'group' = v3 单 group 订阅；'wallet' = v4 钱包模式（用户级共享额度）
+  mode: 'group' as 'group' | 'wallet',
   group_id: null as number | null,
-  validity_days: 30
+  validity_days: 30,
+  wallet_initial_usd: null as number | null
 })
 
 const extendForm = reactive({
@@ -1159,8 +1210,10 @@ const handleSort = (key: string, order: 'asc' | 'desc') => {
 const closeAssignModal = () => {
   showAssignModal.value = false
   assignForm.user_id = null
+  assignForm.mode = 'group'
   assignForm.group_id = null
   assignForm.validity_days = 30
+  assignForm.wallet_initial_usd = null
   // Clear user search state
   selectedUser.value = null
   userSearchKeyword.value = ''
@@ -1173,9 +1226,16 @@ const handleAssignSubscription = async () => {
     appStore.showError(t('admin.subscriptions.pleaseSelectUser'))
     return
   }
-  if (!assignForm.group_id) {
-    appStore.showError(t('admin.subscriptions.pleaseSelectGroup'))
-    return
+  if (assignForm.mode === 'group') {
+    if (!assignForm.group_id) {
+      appStore.showError(t('admin.subscriptions.pleaseSelectGroup'))
+      return
+    }
+  } else {
+    if (!assignForm.wallet_initial_usd || assignForm.wallet_initial_usd <= 0) {
+      appStore.showError(t('admin.subscriptions.walletInitialRequired'))
+      return
+    }
   }
   if (!assignForm.validity_days || assignForm.validity_days < 1) {
     appStore.showError(t('admin.subscriptions.validityDaysRequired'))
@@ -1184,11 +1244,16 @@ const handleAssignSubscription = async () => {
 
   submitting.value = true
   try {
-    await adminAPI.subscriptions.assign({
+    const payload: AssignSubscriptionRequest = {
       user_id: assignForm.user_id,
-      group_id: assignForm.group_id,
       validity_days: assignForm.validity_days
-    })
+    }
+    if (assignForm.mode === 'wallet') {
+      payload.wallet_initial_usd = assignForm.wallet_initial_usd ?? undefined
+    } else {
+      payload.group_id = assignForm.group_id ?? undefined
+    }
+    await adminAPI.subscriptions.assign(payload)
     appStore.showSuccess(t('admin.subscriptions.subscriptionAssigned'))
     closeAssignModal()
     loadSubscriptions()

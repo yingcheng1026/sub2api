@@ -33,6 +33,7 @@ func (r *redeemCodeRepository) Create(ctx context.Context, code *service.RedeemC
 		SetNillableUsedBy(code.UsedBy).
 		SetNillableUsedAt(code.UsedAt).
 		SetNillableGroupID(code.GroupID).
+		SetNillablePlanID(code.PlanID).
 		Save(ctx)
 	if err == nil {
 		code.ID = created.ID
@@ -58,7 +59,8 @@ func (r *redeemCodeRepository) CreateBatch(ctx context.Context, codes []service.
 			SetValidityDays(c.ValidityDays).
 			SetNillableUsedBy(c.UsedBy).
 			SetNillableUsedAt(c.UsedAt).
-			SetNillableGroupID(c.GroupID)
+			SetNillableGroupID(c.GroupID).
+			SetNillablePlanID(c.PlanID)
 		builders = append(builders, b)
 	}
 
@@ -194,6 +196,11 @@ func (r *redeemCodeRepository) Update(ctx context.Context, code *service.RedeemC
 	} else {
 		up.ClearGroupID()
 	}
+	if code.PlanID != nil {
+		up.SetPlanID(*code.PlanID)
+	} else {
+		up.ClearPlanID()
+	}
 
 	updated, err := up.Save(ctx)
 	if err != nil {
@@ -309,6 +316,7 @@ func redeemCodeEntityToService(m *dbent.RedeemCode) *service.RedeemCode {
 		CreatedAt:    m.CreatedAt,
 		GroupID:      m.GroupID,
 		ValidityDays: m.ValidityDays,
+		PlanID:       m.PlanID,
 	}
 	if m.Edges.User != nil {
 		out.User = userEntityToService(m.Edges.User)

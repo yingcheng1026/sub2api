@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func ptrInt64(v int64) *int64 { return &v }
+
 type groupRepoNoop struct{}
 
 func (groupRepoNoop) Create(context.Context, *Group) error { panic("unexpected Create call") }
@@ -79,6 +81,9 @@ func (userSubRepoNoop) GetByUserIDAndGroupID(context.Context, int64, int64) (*Us
 func (userSubRepoNoop) GetActiveByUserIDAndGroupID(context.Context, int64, int64) (*UserSubscription, error) {
 	panic("unexpected GetActiveByUserIDAndGroupID call")
 }
+func (userSubRepoNoop) GetActiveWalletByUserID(context.Context, int64) (*UserSubscription, error) {
+	panic("unexpected GetActiveWalletByUserID call")
+}
 func (userSubRepoNoop) Update(context.Context, *UserSubscription) error {
 	panic("unexpected Update call")
 }
@@ -129,17 +134,19 @@ func (userSubRepoNoop) BatchUpdateExpiredStatus(context.Context) (int64, error) 
 type subscriptionUserSubRepoStub struct {
 	userSubRepoNoop
 
-	nextID      int64
-	byID        map[int64]*UserSubscription
-	byUserGroup map[string]*UserSubscription
-	createCalls int
+	nextID        int64
+	byID          map[int64]*UserSubscription
+	byUserGroup   map[string]*UserSubscription
+	activeWallets map[int64]*UserSubscription // userID → wallet sub（同时间一个用户最多一条 active）
+	createCalls   int
 }
 
 func newSubscriptionUserSubRepoStub() *subscriptionUserSubRepoStub {
 	return &subscriptionUserSubRepoStub{
-		nextID:      1,
-		byID:        make(map[int64]*UserSubscription),
-		byUserGroup: make(map[string]*UserSubscription),
+		nextID:        1,
+		byID:          make(map[int64]*UserSubscription),
+		byUserGroup:   make(map[string]*UserSubscription),
+		activeWallets: make(map[int64]*UserSubscription),
 	}
 }
 
@@ -157,7 +164,12 @@ func (s *subscriptionUserSubRepoStub) seed(sub *UserSubscription) {
 		s.nextID++
 	}
 	s.byID[cp.ID] = &cp
-	s.byUserGroup[s.key(cp.UserID, cp.GroupID)] = &cp
+	if cp.GroupID != nil {
+		s.byUserGroup[s.key(cp.UserID, *cp.GroupID)] = &cp
+	}
+	if cp.WalletBalanceUSD != nil && cp.Status == SubscriptionStatusActive {
+		s.activeWallets[cp.UserID] = &cp
+	}
 }
 
 func (s *subscriptionUserSubRepoStub) ExistsByUserIDAndGroupID(_ context.Context, userID, groupID int64) (bool, error) {
@@ -186,8 +198,22 @@ func (s *subscriptionUserSubRepoStub) Create(_ context.Context, sub *UserSubscri
 	}
 	sub.ID = cp.ID
 	s.byID[cp.ID] = &cp
-	s.byUserGroup[s.key(cp.UserID, cp.GroupID)] = &cp
+	if cp.GroupID != nil {
+		s.byUserGroup[s.key(cp.UserID, *cp.GroupID)] = &cp
+	}
+	if cp.WalletBalanceUSD != nil && cp.Status == SubscriptionStatusActive {
+		s.activeWallets[cp.UserID] = &cp
+	}
 	return nil
+}
+
+func (s *subscriptionUserSubRepoStub) GetActiveWalletByUserID(_ context.Context, userID int64) (*UserSubscription, error) {
+	sub := s.activeWallets[userID]
+	if sub == nil {
+		return nil, ErrSubscriptionNotFound
+	}
+	cp := *sub
+	return &cp, nil
 }
 
 func (s *subscriptionUserSubRepoStub) GetByID(_ context.Context, id int64) (*UserSubscription, error) {
@@ -208,7 +234,7 @@ func TestAssignSubscriptionReuseWhenSemanticsMatch(t *testing.T) {
 	subRepo.seed(&UserSubscription{
 		ID:        10,
 		UserID:    1001,
-		GroupID:   1,
+		GroupID:   ptrInt64(1),
 		StartsAt:  start,
 		ExpiresAt: start.AddDate(0, 0, 30),
 		Notes:     "init",
@@ -235,7 +261,7 @@ func TestAssignSubscriptionConflictWhenSemanticsMismatch(t *testing.T) {
 	subRepo.seed(&UserSubscription{
 		ID:        11,
 		UserID:    2001,
-		GroupID:   1,
+		GroupID:   ptrInt64(1),
 		StartsAt:  start,
 		ExpiresAt: start.AddDate(0, 0, 30),
 		Notes:     "old-note",
@@ -263,7 +289,7 @@ func TestBulkAssignSubscriptionCreatedReusedAndConflict(t *testing.T) {
 	subRepo.seed(&UserSubscription{
 		ID:        21,
 		UserID:    1,
-		GroupID:   1,
+		GroupID:   ptrInt64(1),
 		StartsAt:  start,
 		ExpiresAt: start.AddDate(0, 0, 30),
 		Notes:     "same-note",
@@ -272,7 +298,7 @@ func TestBulkAssignSubscriptionCreatedReusedAndConflict(t *testing.T) {
 	subRepo.seed(&UserSubscription{
 		ID:        23,
 		UserID:    3,
-		GroupID:   1,
+		GroupID:   ptrInt64(1),
 		StartsAt:  start,
 		ExpiresAt: start.AddDate(0, 0, 60),
 		Notes:     "same-note",
@@ -330,7 +356,7 @@ func TestDetectAssignSemanticConflictCases(t *testing.T) {
 	start := time.Date(2026, 2, 20, 10, 0, 0, 0, time.UTC)
 	base := &UserSubscription{
 		UserID:    1,
-		GroupID:   1,
+		GroupID:   ptrInt64(1),
 		StartsAt:  start,
 		ExpiresAt: start.AddDate(0, 0, 30),
 		Notes:     "same",

@@ -177,6 +177,9 @@ func groupFromServiceBase(g *service.Group) Group {
 		DailyLimitUSD:                   g.DailyLimitUSD,
 		WeeklyLimitUSD:                  g.WeeklyLimitUSD,
 		MonthlyLimitUSD:                 g.MonthlyLimitUSD,
+		AllowImageGeneration:            g.AllowImageGeneration,
+		ImageRateIndependent:            g.ImageRateIndependent,
+		ImageRateMultiplier:             g.ImageRateMultiplier,
 		ImagePrice1K:                    g.ImagePrice1K,
 		ImagePrice2K:                    g.ImagePrice2K,
 		ImagePrice4K:                    g.ImagePrice4K,
@@ -712,12 +715,38 @@ func UserSubscriptionFromServiceAdmin(sub *service.UserSubscription) *AdminUserS
 	if sub == nil {
 		return nil
 	}
+	var walletGroupKeys []APIKey
+	var createdCount *int
+	if len(sub.WalletGroupKeys) > 0 {
+		walletGroupKeys = make([]APIKey, 0, len(sub.WalletGroupKeys))
+		for i := range sub.WalletGroupKeys {
+			if dtoKey := APIKeyFromService(&sub.WalletGroupKeys[i]); dtoKey != nil {
+				walletGroupKeys = append(walletGroupKeys, *dtoKey)
+			}
+		}
+		c := sub.WalletGroupKeysCreatedCount
+		createdCount = &c
+	}
+
+	// 单 key 模式（5/14 反转决策）：钱包激活/topup 时建 1 把通用 key 走 model_router 路由。
+	var walletUniversalKey *APIKey
+	var walletUniversalKeyCreated *bool
+	if sub.WalletUniversalKey != nil {
+		walletUniversalKey = APIKeyFromService(sub.WalletUniversalKey)
+		c := sub.WalletUniversalKeyCreated
+		walletUniversalKeyCreated = &c
+	}
+
 	return &AdminUserSubscription{
-		UserSubscription: userSubscriptionFromServiceBase(sub),
-		AssignedBy:       sub.AssignedBy,
-		AssignedAt:       sub.AssignedAt,
-		Notes:            sub.Notes,
-		AssignedByUser:   UserFromServiceShallow(sub.AssignedByUser),
+		UserSubscription:            userSubscriptionFromServiceBase(sub),
+		AssignedBy:                  sub.AssignedBy,
+		AssignedAt:                  sub.AssignedAt,
+		Notes:                       sub.Notes,
+		AssignedByUser:              UserFromServiceShallow(sub.AssignedByUser),
+		WalletGroupKeys:             walletGroupKeys,
+		WalletGroupKeysCreatedCount: createdCount,
+		WalletUniversalKey:          walletUniversalKey,
+		WalletUniversalKeyCreated:   walletUniversalKeyCreated,
 	}
 }
 
@@ -735,6 +764,8 @@ func userSubscriptionFromServiceBase(sub *service.UserSubscription) UserSubscrip
 		DailyUsageUSD:      sub.DailyUsageUSD,
 		WeeklyUsageUSD:     sub.WeeklyUsageUSD,
 		MonthlyUsageUSD:    sub.MonthlyUsageUSD,
+		WalletBalanceUSD:   sub.WalletBalanceUSD,
+		WalletInitialUSD:   sub.WalletInitialUSD,
 		CreatedAt:          sub.CreatedAt,
 		UpdatedAt:          sub.UpdatedAt,
 		User:               UserFromServiceShallow(sub.User),

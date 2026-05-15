@@ -104,7 +104,7 @@ func TestUsageBillingRepositoryApply_DeduplicatesSubscriptionBilling(t *testing.
 	})
 	subscription := mustCreateSubscription(t, client, &service.UserSubscription{
 		UserID:  user.ID,
-		GroupID: group.ID,
+		GroupID: repositoryInt64Ptr(group.ID),
 	})
 
 	requestID := uuid.NewString()

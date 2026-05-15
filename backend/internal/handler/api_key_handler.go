@@ -3,6 +3,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -18,13 +19,19 @@ import (
 
 // APIKeyHandler handles API key-related requests
 type APIKeyHandler struct {
-	apiKeyService *service.APIKeyService
+	apiKeyService      *service.APIKeyService
+	modelRouteProvider service.ModelRouteProvider
 }
 
 // NewAPIKeyHandler creates a new APIKeyHandler
 func NewAPIKeyHandler(apiKeyService *service.APIKeyService) *APIKeyHandler {
+	return NewAPIKeyHandlerWithModelRoutes(apiKeyService, nil)
+}
+
+func NewAPIKeyHandlerWithModelRoutes(apiKeyService *service.APIKeyService, modelRouteProvider service.ModelRouteProvider) *APIKeyHandler {
 	return &APIKeyHandler{
-		apiKeyService: apiKeyService,
+		apiKeyService:      apiKeyService,
+		modelRouteProvider: modelRouteProvider,
 	}
 }
 
@@ -106,6 +113,27 @@ func (h *APIKeyHandler) List(c *gin.Context) {
 		out = append(out, *dto.APIKeyFromService(&keys[i]))
 	}
 	response.Paginated(c, out, result.Total, page, pageSize)
+}
+
+// GetChatDefaultAPIKey returns the active API key used by chat.handsfreeclub.com.
+func (h *APIKeyHandler) GetChatDefaultAPIKey(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		c.JSON(401, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	key, err := h.apiKeyService.DefaultChatAPIKey(c.Request.Context(), subject.UserID)
+	if err != nil {
+		if errors.Is(err, service.ErrAPIKeyNotFound) {
+			c.JSON(404, gin.H{"error": "default api key not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"api_key": key})
 }
 
 // GetByID handles getting a single API key
@@ -308,4 +336,26 @@ func (h *APIKeyHandler) GetUserGroupRates(c *gin.Context) {
 	}
 
 	response.Success(c, rates)
+}
+
+// GetWalletModelRoutes returns the model-name routes available to wallet universal keys.
+// GET /api/v1/groups/model-routes
+func (h *APIKeyHandler) GetWalletModelRoutes(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	routes := service.DefaultModelRoutes()
+	if h.modelRouteProvider != nil {
+		routes = h.modelRouteProvider.Routes()
+	}
+
+	out, err := h.apiKeyService.GetWalletModelRoutes(c.Request.Context(), subject.UserID, routes)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, out)
 }

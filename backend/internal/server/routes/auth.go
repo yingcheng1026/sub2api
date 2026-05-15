@@ -63,6 +63,22 @@ func RegisterAuthRoutes(
 			FailureMode: middleware.RateLimitFailClose,
 		}), h.Auth.ResetPassword)
 		auth.GET("/oauth/linuxdo/start", h.Auth.LinuxDoOAuthStart)
+		auth.GET("/oauth/github/start", h.Auth.GitHubOAuthStart)
+		auth.GET("/oauth/github/callback", h.Auth.GitHubOAuthCallback)
+		auth.POST("/oauth/github/complete-registration",
+			rateLimiter.LimitWithOptions("oauth-github-complete", 10, time.Minute, middleware.RateLimitOptions{
+				FailureMode: middleware.RateLimitFailClose,
+			}),
+			h.Auth.CompleteGitHubOAuthRegistration,
+		)
+		auth.GET("/oauth/google/start", h.Auth.GoogleOAuthStart)
+		auth.GET("/oauth/google/callback", h.Auth.GoogleOAuthCallback)
+		auth.POST("/oauth/google/complete-registration",
+			rateLimiter.LimitWithOptions("oauth-google-complete", 10, time.Minute, middleware.RateLimitOptions{
+				FailureMode: middleware.RateLimitFailClose,
+			}),
+			h.Auth.CompleteGoogleOAuthRegistration,
+		)
 		auth.GET("/oauth/linuxdo/bind/start", func(c *gin.Context) {
 			query := c.Request.URL.Query()
 			query.Set("intent", "bind_current_user")
@@ -183,5 +199,21 @@ func RegisterAuthRoutes(
 		// 撤销所有会话（需要认证）
 		authenticated.POST("/auth/revoke-all-sessions", h.Auth.RevokeAllSessions)
 		authenticated.POST("/auth/oauth/bind-token", h.Auth.PrepareOAuthBindAccessTokenCookie)
+	}
+
+	// Chat 子域一次性登录桥接。创建短码需要用户登录；兑换短码由 chat 服务端调用，不依赖 admin 子域 localStorage。
+	chatBridge := v1.Group("/chat/bridge")
+	{
+		chatBridge.POST("/exchange", rateLimiter.LimitWithOptions("chat-bridge-exchange", 60, time.Minute, middleware.RateLimitOptions{
+			FailureMode: middleware.RateLimitFailClose,
+		}), h.Auth.ExchangeChatBridgeCode)
+	}
+
+	authenticatedChatBridge := v1.Group("/chat/bridge")
+	authenticatedChatBridge.Use(gin.HandlerFunc(jwtAuth))
+	{
+		authenticatedChatBridge.POST("/code", rateLimiter.LimitWithOptions("chat-bridge-code", 30, time.Minute, middleware.RateLimitOptions{
+			FailureMode: middleware.RateLimitFailClose,
+		}), h.Auth.CreateChatBridgeCode)
 	}
 }

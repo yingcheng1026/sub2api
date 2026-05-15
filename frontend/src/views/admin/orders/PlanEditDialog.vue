@@ -35,15 +35,20 @@
 
       <div><label class="input-label">{{ t('payment.admin.planDescription') }} <span class="text-red-500">*</span></label><textarea v-model="planForm.description" rows="2" class="input" required></textarea></div>
       <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="input-label">{{ t('payment.admin.planType') }} <span class="text-red-500">*</span></label>
+          <Select v-model="planForm.plan_type" :options="planTypeOptions" />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ planTypeHint }}</p>
+        </div>
         <div><label class="input-label">{{ t('payment.admin.price') }} <span class="text-red-500">*</span></label><input v-model.number="planForm.price" type="number" step="0.01" min="0.01" class="input" required /></div>
-        <div><label class="input-label">{{ t('payment.admin.originalPrice') }}</label><input v-model.number="planForm.original_price" type="number" step="0.01" min="0" class="input" /></div>
       </div>
       <div class="grid grid-cols-2 gap-4">
+        <div><label class="input-label">{{ t('payment.admin.originalPrice') }}</label><input v-model.number="planForm.original_price" type="number" step="0.01" min="0" class="input" /></div>
+        <div><label class="input-label">{{ t('payment.admin.sortOrder') }}</label><input v-model.number="planForm.sort_order" type="number" min="0" class="input" /></div>
+      </div>
+      <div class="grid grid-cols-2 gap-4" v-if="planForm.plan_type !== 'credits'">
         <div><label class="input-label">{{ t('payment.admin.validityDays') }} <span class="text-red-500">*</span></label><input v-model.number="planForm.validity_days" type="number" min="1" class="input" required /></div>
         <div><label class="input-label">{{ t('payment.admin.validityUnit') }} <span class="text-red-500">*</span></label><Select v-model="planForm.validity_unit" :options="validityUnitOptions" /></div>
-      </div>
-      <div class="grid grid-cols-2 gap-4">
-        <div><label class="input-label">{{ t('payment.admin.sortOrder') }}</label><input v-model.number="planForm.sort_order" type="number" min="0" class="input" /></div>
       </div>
       <div>
         <label class="input-label">{{ t('payment.admin.features') }}</label>
@@ -105,7 +110,18 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const saving = ref(false)
-const planForm = reactive({ name: '', group_id: null as number | null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
+const planForm = reactive({
+  name: '',
+  group_id: null as number | null,
+  description: '',
+  price: 0,
+  original_price: 0,
+  validity_days: 30,
+  validity_unit: 'days',
+  sort_order: 0,
+  for_sale: true,
+  plan_type: 'subscription' as 'subscription' | 'credits',
+})
 const planFeaturesText = ref('')
 
 const validityUnitOptions = computed(() => [
@@ -113,6 +129,17 @@ const validityUnitOptions = computed(() => [
   { value: 'weeks', label: t('payment.admin.weeks') },
   { value: 'months', label: t('payment.admin.months') },
 ])
+
+const planTypeOptions = computed(() => [
+  { value: 'subscription', label: t('payment.admin.planTypeSubscription') },
+  { value: 'credits', label: t('payment.admin.planTypeCredits') },
+])
+
+const planTypeHint = computed(() =>
+  planForm.plan_type === 'credits'
+    ? t('payment.admin.planTypeCreditsHint')
+    : t('payment.admin.planTypeSubscriptionHint'),
+)
 
 const groupOptions = computed(() =>
   props.groups
@@ -133,10 +160,21 @@ const selectedGroupInfo = computed(() => {
 watch(() => props.show, (visible) => {
   if (!visible) return
   if (props.plan) {
-    Object.assign(planForm, { name: props.plan.name, group_id: props.plan.group_id, description: props.plan.description, price: props.plan.price, original_price: props.plan.original_price || 0, validity_days: props.plan.validity_days, validity_unit: props.plan.validity_unit || 'days', sort_order: props.plan.sort_order || 0, for_sale: props.plan.for_sale })
+    Object.assign(planForm, {
+      name: props.plan.name,
+      group_id: props.plan.group_id,
+      description: props.plan.description,
+      price: props.plan.price,
+      original_price: props.plan.original_price || 0,
+      validity_days: props.plan.validity_days,
+      validity_unit: props.plan.validity_unit || 'days',
+      sort_order: props.plan.sort_order || 0,
+      for_sale: props.plan.for_sale,
+      plan_type: props.plan.plan_type || 'subscription',
+    })
     planFeaturesText.value = (props.plan.features || []).join('\n')
   } else {
-    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
+    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true, plan_type: 'subscription' })
     planFeaturesText.value = ''
   }
 })
@@ -144,17 +182,21 @@ watch(() => props.show, (visible) => {
 /** Build request payload with snake_case keys matching backend JSON tags */
 function buildPlanPayload() {
   const features = planFeaturesText.value.split('\n').map(f => f.trim()).filter(Boolean).join('\n')
+  // 额度卡永久有效，后端 expires_at = MaxExpiresAt（2099）；validity_days 字段仍写一个
+  // 远大于普通月卡的占位（36500 ≈ 100 年），让后端 NOT NULL CHECK 通过。
+  const isCredits = planForm.plan_type === 'credits'
   return {
     name: planForm.name,
     group_id: planForm.group_id,
     description: planForm.description,
     price: planForm.price,
     original_price: planForm.original_price || 0,
-    validity_days: planForm.validity_days,
-    validity_unit: planForm.validity_unit,
+    validity_days: isCredits ? 36500 : planForm.validity_days,
+    validity_unit: isCredits ? 'days' : planForm.validity_unit,
     sort_order: planForm.sort_order,
     for_sale: planForm.for_sale,
     features,
+    plan_type: planForm.plan_type,
   }
 }
 
@@ -167,7 +209,7 @@ async function handleSavePlan() {
     appStore.showError(t('payment.admin.priceRequired'))
     return
   }
-  if (!planForm.validity_days || planForm.validity_days < 1) {
+  if (planForm.plan_type !== 'credits' && (!planForm.validity_days || planForm.validity_days < 1)) {
     appStore.showError(t('payment.admin.validityDaysRequired'))
     return
   }

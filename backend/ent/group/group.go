@@ -44,6 +44,12 @@ const (
 	FieldMonthlyLimitUsd = "monthly_limit_usd"
 	// FieldDefaultValidityDays holds the string denoting the default_validity_days field in the database.
 	FieldDefaultValidityDays = "default_validity_days"
+	// FieldAllowImageGeneration holds the string denoting the allow_image_generation field in the database.
+	FieldAllowImageGeneration = "allow_image_generation"
+	// FieldImageRateIndependent holds the string denoting the image_rate_independent field in the database.
+	FieldImageRateIndependent = "image_rate_independent"
+	// FieldImageRateMultiplier holds the string denoting the image_rate_multiplier field in the database.
+	FieldImageRateMultiplier = "image_rate_multiplier"
 	// FieldImagePrice1k holds the string denoting the image_price_1k field in the database.
 	FieldImagePrice1k = "image_price_1k"
 	// FieldImagePrice2k holds the string denoting the image_price_2k field in the database.
@@ -86,6 +92,8 @@ const (
 	EdgeSubscriptions = "subscriptions"
 	// EdgeUsageLogs holds the string denoting the usage_logs edge name in mutations.
 	EdgeUsageLogs = "usage_logs"
+	// EdgePlanGroups holds the string denoting the plan_groups edge name in mutations.
+	EdgePlanGroups = "plan_groups"
 	// EdgeAccounts holds the string denoting the accounts edge name in mutations.
 	EdgeAccounts = "accounts"
 	// EdgeAllowedUsers holds the string denoting the allowed_users edge name in mutations.
@@ -124,6 +132,13 @@ const (
 	UsageLogsInverseTable = "usage_logs"
 	// UsageLogsColumn is the table column denoting the usage_logs relation/edge.
 	UsageLogsColumn = "group_id"
+	// PlanGroupsTable is the table that holds the plan_groups relation/edge.
+	PlanGroupsTable = "subscription_plan_groups"
+	// PlanGroupsInverseTable is the table name for the SubscriptionPlanGroup entity.
+	// It exists in this package in order to avoid circular dependency with the "subscriptionplangroup" package.
+	PlanGroupsInverseTable = "subscription_plan_groups"
+	// PlanGroupsColumn is the table column denoting the plan_groups relation/edge.
+	PlanGroupsColumn = "group_id"
 	// AccountsTable is the table that holds the accounts relation/edge. The primary key declared below.
 	AccountsTable = "account_groups"
 	// AccountsInverseTable is the table name for the Account entity.
@@ -167,6 +182,9 @@ var Columns = []string{
 	FieldWeeklyLimitUsd,
 	FieldMonthlyLimitUsd,
 	FieldDefaultValidityDays,
+	FieldAllowImageGeneration,
+	FieldImageRateIndependent,
+	FieldImageRateMultiplier,
 	FieldImagePrice1k,
 	FieldImagePrice2k,
 	FieldImagePrice4k,
@@ -239,6 +257,12 @@ var (
 	SubscriptionTypeValidator func(string) error
 	// DefaultDefaultValidityDays holds the default value on creation for the "default_validity_days" field.
 	DefaultDefaultValidityDays int
+	// DefaultAllowImageGeneration holds the default value on creation for the "allow_image_generation" field.
+	DefaultAllowImageGeneration bool
+	// DefaultImageRateIndependent holds the default value on creation for the "image_rate_independent" field.
+	DefaultImageRateIndependent bool
+	// DefaultImageRateMultiplier holds the default value on creation for the "image_rate_multiplier" field.
+	DefaultImageRateMultiplier float64
 	// DefaultClaudeCodeOnly holds the default value on creation for the "claude_code_only" field.
 	DefaultClaudeCodeOnly bool
 	// DefaultModelRoutingEnabled holds the default value on creation for the "model_routing_enabled" field.
@@ -341,6 +365,21 @@ func ByMonthlyLimitUsd(opts ...sql.OrderTermOption) OrderOption {
 // ByDefaultValidityDays orders the results by the default_validity_days field.
 func ByDefaultValidityDays(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDefaultValidityDays, opts...).ToFunc()
+}
+
+// ByAllowImageGeneration orders the results by the allow_image_generation field.
+func ByAllowImageGeneration(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAllowImageGeneration, opts...).ToFunc()
+}
+
+// ByImageRateIndependent orders the results by the image_rate_independent field.
+func ByImageRateIndependent(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldImageRateIndependent, opts...).ToFunc()
+}
+
+// ByImageRateMultiplier orders the results by the image_rate_multiplier field.
+func ByImageRateMultiplier(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldImageRateMultiplier, opts...).ToFunc()
 }
 
 // ByImagePrice1k orders the results by the image_price_1k field.
@@ -469,6 +508,20 @@ func ByUsageLogs(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 	}
 }
 
+// ByPlanGroupsCount orders the results by plan_groups count.
+func ByPlanGroupsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newPlanGroupsStep(), opts...)
+	}
+}
+
+// ByPlanGroups orders the results by plan_groups terms.
+func ByPlanGroups(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newPlanGroupsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
+
 // ByAccountsCount orders the results by accounts count.
 func ByAccountsCount(opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -550,6 +603,13 @@ func newUsageLogsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(UsageLogsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, UsageLogsTable, UsageLogsColumn),
+	)
+}
+func newPlanGroupsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(PlanGroupsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, PlanGroupsTable, PlanGroupsColumn),
 	)
 }
 func newAccountsStep() *sqlgraph.Step {

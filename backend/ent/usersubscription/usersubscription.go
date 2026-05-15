@@ -43,6 +43,10 @@ const (
 	FieldWeeklyUsageUsd = "weekly_usage_usd"
 	// FieldMonthlyUsageUsd holds the string denoting the monthly_usage_usd field in the database.
 	FieldMonthlyUsageUsd = "monthly_usage_usd"
+	// FieldWalletBalanceUsd holds the string denoting the wallet_balance_usd field in the database.
+	FieldWalletBalanceUsd = "wallet_balance_usd"
+	// FieldWalletInitialUsd holds the string denoting the wallet_initial_usd field in the database.
+	FieldWalletInitialUsd = "wallet_initial_usd"
 	// FieldAssignedBy holds the string denoting the assigned_by field in the database.
 	FieldAssignedBy = "assigned_by"
 	// FieldAssignedAt holds the string denoting the assigned_at field in the database.
@@ -57,6 +61,8 @@ const (
 	EdgeAssignedByUser = "assigned_by_user"
 	// EdgeUsageLogs holds the string denoting the usage_logs edge name in mutations.
 	EdgeUsageLogs = "usage_logs"
+	// EdgeWalletLedgerEntries holds the string denoting the wallet_ledger_entries edge name in mutations.
+	EdgeWalletLedgerEntries = "wallet_ledger_entries"
 	// Table holds the table name of the usersubscription in the database.
 	Table = "user_subscriptions"
 	// UserTable is the table that holds the user relation/edge.
@@ -87,6 +93,13 @@ const (
 	UsageLogsInverseTable = "usage_logs"
 	// UsageLogsColumn is the table column denoting the usage_logs relation/edge.
 	UsageLogsColumn = "subscription_id"
+	// WalletLedgerEntriesTable is the table that holds the wallet_ledger_entries relation/edge.
+	WalletLedgerEntriesTable = "subscription_wallet_ledger"
+	// WalletLedgerEntriesInverseTable is the table name for the SubscriptionWalletLedger entity.
+	// It exists in this package in order to avoid circular dependency with the "subscriptionwalletledger" package.
+	WalletLedgerEntriesInverseTable = "subscription_wallet_ledger"
+	// WalletLedgerEntriesColumn is the table column denoting the wallet_ledger_entries relation/edge.
+	WalletLedgerEntriesColumn = "subscription_id"
 )
 
 // Columns holds all SQL columns for usersubscription fields.
@@ -106,6 +119,8 @@ var Columns = []string{
 	FieldDailyUsageUsd,
 	FieldWeeklyUsageUsd,
 	FieldMonthlyUsageUsd,
+	FieldWalletBalanceUsd,
+	FieldWalletInitialUsd,
 	FieldAssignedBy,
 	FieldAssignedAt,
 	FieldNotes,
@@ -227,6 +242,16 @@ func ByMonthlyUsageUsd(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMonthlyUsageUsd, opts...).ToFunc()
 }
 
+// ByWalletBalanceUsd orders the results by the wallet_balance_usd field.
+func ByWalletBalanceUsd(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWalletBalanceUsd, opts...).ToFunc()
+}
+
+// ByWalletInitialUsd orders the results by the wallet_initial_usd field.
+func ByWalletInitialUsd(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWalletInitialUsd, opts...).ToFunc()
+}
+
 // ByAssignedBy orders the results by the assigned_by field.
 func ByAssignedBy(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAssignedBy, opts...).ToFunc()
@@ -276,6 +301,20 @@ func ByUsageLogs(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newUsageLogsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByWalletLedgerEntriesCount orders the results by wallet_ledger_entries count.
+func ByWalletLedgerEntriesCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newWalletLedgerEntriesStep(), opts...)
+	}
+}
+
+// ByWalletLedgerEntries orders the results by wallet_ledger_entries terms.
+func ByWalletLedgerEntries(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newWalletLedgerEntriesStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newUserStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -302,5 +341,12 @@ func newUsageLogsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(UsageLogsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, UsageLogsTable, UsageLogsColumn),
+	)
+}
+func newWalletLedgerEntriesStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(WalletLedgerEntriesInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, WalletLedgerEntriesTable, WalletLedgerEntriesColumn),
 	)
 }

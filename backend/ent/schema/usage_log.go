@@ -172,6 +172,7 @@ func (UsageLog) Edges() []ent.Edge {
 			Ref("usage_logs").
 			Field("subscription_id").
 			Unique(),
+		edge.To("wallet_ledger_entries", SubscriptionWalletLedger.Type),
 	}
 }
 

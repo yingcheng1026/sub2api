@@ -23,7 +23,18 @@
         </p>
       </div>
 
-      <!-- Subscriptions Grid -->
+      <!-- 钱包模式 (v4)：钱包卡 + 全 group 倍率列表 -->
+      <div v-else-if="walletSubscriptions.length > 0" class="grid gap-6 lg:grid-cols-2">
+        <WalletBalanceCard
+          v-for="sub in walletSubscriptions"
+          :key="sub.id"
+          :subscription="sub"
+          @renew="goRenew(sub)"
+        />
+        <GroupRateMultiplierList />
+      </div>
+
+      <!-- 老 group 订阅 (v3) Grid -->
       <div v-else class="grid gap-6 lg:grid-cols-2">
         <div
           v-for="subscription in subscriptions"
@@ -246,7 +257,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
@@ -254,6 +265,8 @@ import subscriptionsAPI from '@/api/subscriptions'
 import type { UserSubscription } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
+import WalletBalanceCard from '@/components/user/WalletBalanceCard.vue'
+import GroupRateMultiplierList from '@/components/user/GroupRateMultiplierList.vue'
 import { formatDateOnly } from '@/utils/format'
 import { platformBorderClass, platformBadgeClass, platformButtonClass, platformLabel } from '@/utils/platformColors'
 
@@ -273,6 +286,16 @@ const appStore = useAppStore()
 
 const subscriptions = ref<UserSubscription[]>([])
 const loading = ref(true)
+
+// 钱包模式订阅（v4）：wallet_balance_usd 非空。与老 group 订阅互斥，
+// 只要存在任意一条钱包订阅，整页就切到钱包视图。
+const walletSubscriptions = computed(() =>
+  subscriptions.value.filter((s) => s.wallet_balance_usd != null)
+)
+
+function goRenew(sub: UserSubscription) {
+  router.push({ path: '/purchase', query: { tab: 'subscription', wallet: '1', sub: String(sub.id) } })
+}
 
 async function loadSubscriptions() {
   try {

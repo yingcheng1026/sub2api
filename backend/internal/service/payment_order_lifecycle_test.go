@@ -208,6 +208,7 @@ func TestVerifyOrderByOutTradeNoBackfillsTradeNoFromPaidQuery(t *testing.T) {
 		nil,
 		client,
 		nil,
+		nil,
 	)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
@@ -308,6 +309,7 @@ func TestVerifyOrderByOutTradeNoRetriesZeroAmountPaidQueryOnce(t *testing.T) {
 		nil,
 		client,
 		nil,
+		nil,
 	)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
@@ -397,6 +399,7 @@ func TestVerifyOrderByOutTradeNoRejectsPaidQueryWithZeroAmount(t *testing.T) {
 		nil,
 		nil,
 		client,
+		nil,
 		nil,
 	)
 	registry := payment.NewRegistry()
@@ -496,6 +499,7 @@ func TestVerifyOrderByOutTradeNoUsesOutTradeNoWhenPaymentTradeNoAlreadyExistsFor
 		nil,
 		client,
 		nil,
+		nil,
 	)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
@@ -556,6 +560,71 @@ func TestPaymentOrderQueryReferenceUsesOutTradeNoForOfficialProviders(t *testing
 	require.Equal(t, "sub2_out_trade_no", paymentOrderQueryReference(order, paymentFulfillmentTestProvider{
 		key: payment.TypeWxpay,
 	}))
+}
+
+func TestExecuteSubscriptionFulfillmentWalletPlanAssignsWalletSubscription(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentOrderLifecycleTestClient(t)
+
+	user, err := client.User.Create().
+		SetEmail("wallet-order@example.com").
+		SetPasswordHash("hash").
+		SetUsername("wallet-order-user").
+		Save(ctx)
+	require.NoError(t, err)
+
+	walletQuota := 1500.0
+	plan, err := client.SubscriptionPlan.Create().
+		SetName("Standard Wallet").
+		SetPrice(299).
+		SetWalletQuotaUsd(walletQuota).
+		SetValidityDays(30).
+		SetValidityUnit("day").
+		Save(ctx)
+	require.NoError(t, err)
+
+	order, err := client.PaymentOrder.Create().
+		SetUserID(user.ID).
+		SetUserEmail(user.Email).
+		SetUserName(user.Username).
+		SetAmount(299).
+		SetPayAmount(299).
+		SetFeeRate(0).
+		SetRechargeCode("WALLET-ORDER-NO-CODE").
+		SetOutTradeNo("sub2_wallet_order_paid").
+		SetPaymentType(payment.TypeAlipay).
+		SetPaymentTradeNo("trade-wallet-paid").
+		SetOrderType(payment.OrderTypeSubscription).
+		SetPlanID(plan.ID).
+		SetSubscriptionDays(30).
+		SetStatus(OrderStatusPaid).
+		SetExpiresAt(time.Now().Add(time.Hour)).
+		SetClientIP("127.0.0.1").
+		SetSrcHost("api.example.com").
+		Save(ctx)
+	require.NoError(t, err)
+	require.Nil(t, order.SubscriptionGroupID)
+
+	subRepo := newSubscriptionUserSubRepoStub()
+	subscriptionSvc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	svc := &PaymentService{
+		entClient:       client,
+		subscriptionSvc: subscriptionSvc,
+	}
+
+	require.NoError(t, svc.ExecuteSubscriptionFulfillment(ctx, order.ID))
+
+	sub, err := subRepo.GetActiveWalletByUserID(ctx, user.ID)
+	require.NoError(t, err)
+	require.Nil(t, sub.GroupID)
+	require.NotNil(t, sub.WalletInitialUSD)
+	require.NotNil(t, sub.WalletBalanceUSD)
+	require.InDelta(t, walletQuota, *sub.WalletInitialUSD, 0.000001)
+	require.InDelta(t, walletQuota, *sub.WalletBalanceUSD, 0.000001)
+
+	reloaded, err := client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, err)
+	require.Equal(t, OrderStatusCompleted, reloaded.Status)
 }
 
 func newPaymentOrderLifecycleTestClient(t *testing.T) *dbent.Client {

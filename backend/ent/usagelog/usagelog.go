@@ -98,6 +98,8 @@ const (
 	EdgeGroup = "group"
 	// EdgeSubscription holds the string denoting the subscription edge name in mutations.
 	EdgeSubscription = "subscription"
+	// EdgeWalletLedgerEntries holds the string denoting the wallet_ledger_entries edge name in mutations.
+	EdgeWalletLedgerEntries = "wallet_ledger_entries"
 	// Table holds the table name of the usagelog in the database.
 	Table = "usage_logs"
 	// UserTable is the table that holds the user relation/edge.
@@ -135,6 +137,13 @@ const (
 	SubscriptionInverseTable = "user_subscriptions"
 	// SubscriptionColumn is the table column denoting the subscription relation/edge.
 	SubscriptionColumn = "subscription_id"
+	// WalletLedgerEntriesTable is the table that holds the wallet_ledger_entries relation/edge.
+	WalletLedgerEntriesTable = "subscription_wallet_ledger"
+	// WalletLedgerEntriesInverseTable is the table name for the SubscriptionWalletLedger entity.
+	// It exists in this package in order to avoid circular dependency with the "subscriptionwalletledger" package.
+	WalletLedgerEntriesInverseTable = "subscription_wallet_ledger"
+	// WalletLedgerEntriesColumn is the table column denoting the wallet_ledger_entries relation/edge.
+	WalletLedgerEntriesColumn = "usage_log_id"
 )
 
 // Columns holds all SQL columns for usagelog fields.
@@ -475,6 +484,20 @@ func BySubscriptionField(field string, opts ...sql.OrderTermOption) OrderOption 
 		sqlgraph.OrderByNeighborTerms(s, newSubscriptionStep(), sql.OrderByField(field, opts...))
 	}
 }
+
+// ByWalletLedgerEntriesCount orders the results by wallet_ledger_entries count.
+func ByWalletLedgerEntriesCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newWalletLedgerEntriesStep(), opts...)
+	}
+}
+
+// ByWalletLedgerEntries orders the results by wallet_ledger_entries terms.
+func ByWalletLedgerEntries(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newWalletLedgerEntriesStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newUserStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -508,5 +531,12 @@ func newSubscriptionStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(SubscriptionInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.M2O, true, SubscriptionTable, SubscriptionColumn),
+	)
+}
+func newWalletLedgerEntriesStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(WalletLedgerEntriesInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, WalletLedgerEntriesTable, WalletLedgerEntriesColumn),
 	)
 }

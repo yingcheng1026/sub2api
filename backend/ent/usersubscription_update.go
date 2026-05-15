@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionwalletledger"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
@@ -82,6 +83,12 @@ func (_u *UserSubscriptionUpdate) SetNillableGroupID(v *int64) *UserSubscription
 	if v != nil {
 		_u.SetGroupID(*v)
 	}
+	return _u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (_u *UserSubscriptionUpdate) ClearGroupID() *UserSubscriptionUpdate {
+	_u.mutation.ClearGroupID()
 	return _u
 }
 
@@ -250,6 +257,60 @@ func (_u *UserSubscriptionUpdate) AddMonthlyUsageUsd(v float64) *UserSubscriptio
 	return _u
 }
 
+// SetWalletBalanceUsd sets the "wallet_balance_usd" field.
+func (_u *UserSubscriptionUpdate) SetWalletBalanceUsd(v float64) *UserSubscriptionUpdate {
+	_u.mutation.ResetWalletBalanceUsd()
+	_u.mutation.SetWalletBalanceUsd(v)
+	return _u
+}
+
+// SetNillableWalletBalanceUsd sets the "wallet_balance_usd" field if the given value is not nil.
+func (_u *UserSubscriptionUpdate) SetNillableWalletBalanceUsd(v *float64) *UserSubscriptionUpdate {
+	if v != nil {
+		_u.SetWalletBalanceUsd(*v)
+	}
+	return _u
+}
+
+// AddWalletBalanceUsd adds value to the "wallet_balance_usd" field.
+func (_u *UserSubscriptionUpdate) AddWalletBalanceUsd(v float64) *UserSubscriptionUpdate {
+	_u.mutation.AddWalletBalanceUsd(v)
+	return _u
+}
+
+// ClearWalletBalanceUsd clears the value of the "wallet_balance_usd" field.
+func (_u *UserSubscriptionUpdate) ClearWalletBalanceUsd() *UserSubscriptionUpdate {
+	_u.mutation.ClearWalletBalanceUsd()
+	return _u
+}
+
+// SetWalletInitialUsd sets the "wallet_initial_usd" field.
+func (_u *UserSubscriptionUpdate) SetWalletInitialUsd(v float64) *UserSubscriptionUpdate {
+	_u.mutation.ResetWalletInitialUsd()
+	_u.mutation.SetWalletInitialUsd(v)
+	return _u
+}
+
+// SetNillableWalletInitialUsd sets the "wallet_initial_usd" field if the given value is not nil.
+func (_u *UserSubscriptionUpdate) SetNillableWalletInitialUsd(v *float64) *UserSubscriptionUpdate {
+	if v != nil {
+		_u.SetWalletInitialUsd(*v)
+	}
+	return _u
+}
+
+// AddWalletInitialUsd adds value to the "wallet_initial_usd" field.
+func (_u *UserSubscriptionUpdate) AddWalletInitialUsd(v float64) *UserSubscriptionUpdate {
+	_u.mutation.AddWalletInitialUsd(v)
+	return _u
+}
+
+// ClearWalletInitialUsd clears the value of the "wallet_initial_usd" field.
+func (_u *UserSubscriptionUpdate) ClearWalletInitialUsd() *UserSubscriptionUpdate {
+	_u.mutation.ClearWalletInitialUsd()
+	return _u
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (_u *UserSubscriptionUpdate) SetAssignedBy(v int64) *UserSubscriptionUpdate {
 	_u.mutation.SetAssignedBy(v)
@@ -348,6 +409,21 @@ func (_u *UserSubscriptionUpdate) AddUsageLogs(v ...*UsageLog) *UserSubscription
 	return _u.AddUsageLogIDs(ids...)
 }
 
+// AddWalletLedgerEntryIDs adds the "wallet_ledger_entries" edge to the SubscriptionWalletLedger entity by IDs.
+func (_u *UserSubscriptionUpdate) AddWalletLedgerEntryIDs(ids ...int64) *UserSubscriptionUpdate {
+	_u.mutation.AddWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// AddWalletLedgerEntries adds the "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UserSubscriptionUpdate) AddWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UserSubscriptionUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWalletLedgerEntryIDs(ids...)
+}
+
 // Mutation returns the UserSubscriptionMutation object of the builder.
 func (_u *UserSubscriptionUpdate) Mutation() *UserSubscriptionMutation {
 	return _u.mutation
@@ -390,6 +466,27 @@ func (_u *UserSubscriptionUpdate) RemoveUsageLogs(v ...*UsageLog) *UserSubscript
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveUsageLogIDs(ids...)
+}
+
+// ClearWalletLedgerEntries clears all "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UserSubscriptionUpdate) ClearWalletLedgerEntries() *UserSubscriptionUpdate {
+	_u.mutation.ClearWalletLedgerEntries()
+	return _u
+}
+
+// RemoveWalletLedgerEntryIDs removes the "wallet_ledger_entries" edge to SubscriptionWalletLedger entities by IDs.
+func (_u *UserSubscriptionUpdate) RemoveWalletLedgerEntryIDs(ids ...int64) *UserSubscriptionUpdate {
+	_u.mutation.RemoveWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// RemoveWalletLedgerEntries removes "wallet_ledger_entries" edges to SubscriptionWalletLedger entities.
+func (_u *UserSubscriptionUpdate) RemoveWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UserSubscriptionUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWalletLedgerEntryIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -443,9 +540,6 @@ func (_u *UserSubscriptionUpdate) check() error {
 	}
 	if _u.mutation.UserCleared() && len(_u.mutation.UserIDs()) > 0 {
 		return errors.New(`ent: clearing a required unique edge "UserSubscription.user"`)
-	}
-	if _u.mutation.GroupCleared() && len(_u.mutation.GroupIDs()) > 0 {
-		return errors.New(`ent: clearing a required unique edge "UserSubscription.group"`)
 	}
 	return nil
 }
@@ -515,6 +609,24 @@ func (_u *UserSubscriptionUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if value, ok := _u.mutation.AddedMonthlyUsageUsd(); ok {
 		_spec.AddField(usersubscription.FieldMonthlyUsageUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.WalletBalanceUsd(); ok {
+		_spec.SetField(usersubscription.FieldWalletBalanceUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedWalletBalanceUsd(); ok {
+		_spec.AddField(usersubscription.FieldWalletBalanceUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.WalletBalanceUsdCleared() {
+		_spec.ClearField(usersubscription.FieldWalletBalanceUsd, field.TypeFloat64)
+	}
+	if value, ok := _u.mutation.WalletInitialUsd(); ok {
+		_spec.SetField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedWalletInitialUsd(); ok {
+		_spec.AddField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.WalletInitialUsdCleared() {
+		_spec.ClearField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64)
 	}
 	if value, ok := _u.mutation.AssignedAt(); ok {
 		_spec.SetField(usersubscription.FieldAssignedAt, field.TypeTime, value)
@@ -657,6 +769,51 @@ func (_u *UserSubscriptionUpdate) sqlSave(ctx context.Context) (_node int, err e
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usersubscription.WalletLedgerEntriesTable,
+			Columns: []string{usersubscription.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWalletLedgerEntriesIDs(); len(nodes) > 0 && !_u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usersubscription.WalletLedgerEntriesTable,
+			Columns: []string{usersubscription.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WalletLedgerEntriesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usersubscription.WalletLedgerEntriesTable,
+			Columns: []string{usersubscription.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{usersubscription.Label}
@@ -728,6 +885,12 @@ func (_u *UserSubscriptionUpdateOne) SetNillableGroupID(v *int64) *UserSubscript
 	if v != nil {
 		_u.SetGroupID(*v)
 	}
+	return _u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (_u *UserSubscriptionUpdateOne) ClearGroupID() *UserSubscriptionUpdateOne {
+	_u.mutation.ClearGroupID()
 	return _u
 }
 
@@ -896,6 +1059,60 @@ func (_u *UserSubscriptionUpdateOne) AddMonthlyUsageUsd(v float64) *UserSubscrip
 	return _u
 }
 
+// SetWalletBalanceUsd sets the "wallet_balance_usd" field.
+func (_u *UserSubscriptionUpdateOne) SetWalletBalanceUsd(v float64) *UserSubscriptionUpdateOne {
+	_u.mutation.ResetWalletBalanceUsd()
+	_u.mutation.SetWalletBalanceUsd(v)
+	return _u
+}
+
+// SetNillableWalletBalanceUsd sets the "wallet_balance_usd" field if the given value is not nil.
+func (_u *UserSubscriptionUpdateOne) SetNillableWalletBalanceUsd(v *float64) *UserSubscriptionUpdateOne {
+	if v != nil {
+		_u.SetWalletBalanceUsd(*v)
+	}
+	return _u
+}
+
+// AddWalletBalanceUsd adds value to the "wallet_balance_usd" field.
+func (_u *UserSubscriptionUpdateOne) AddWalletBalanceUsd(v float64) *UserSubscriptionUpdateOne {
+	_u.mutation.AddWalletBalanceUsd(v)
+	return _u
+}
+
+// ClearWalletBalanceUsd clears the value of the "wallet_balance_usd" field.
+func (_u *UserSubscriptionUpdateOne) ClearWalletBalanceUsd() *UserSubscriptionUpdateOne {
+	_u.mutation.ClearWalletBalanceUsd()
+	return _u
+}
+
+// SetWalletInitialUsd sets the "wallet_initial_usd" field.
+func (_u *UserSubscriptionUpdateOne) SetWalletInitialUsd(v float64) *UserSubscriptionUpdateOne {
+	_u.mutation.ResetWalletInitialUsd()
+	_u.mutation.SetWalletInitialUsd(v)
+	return _u
+}
+
+// SetNillableWalletInitialUsd sets the "wallet_initial_usd" field if the given value is not nil.
+func (_u *UserSubscriptionUpdateOne) SetNillableWalletInitialUsd(v *float64) *UserSubscriptionUpdateOne {
+	if v != nil {
+		_u.SetWalletInitialUsd(*v)
+	}
+	return _u
+}
+
+// AddWalletInitialUsd adds value to the "wallet_initial_usd" field.
+func (_u *UserSubscriptionUpdateOne) AddWalletInitialUsd(v float64) *UserSubscriptionUpdateOne {
+	_u.mutation.AddWalletInitialUsd(v)
+	return _u
+}
+
+// ClearWalletInitialUsd clears the value of the "wallet_initial_usd" field.
+func (_u *UserSubscriptionUpdateOne) ClearWalletInitialUsd() *UserSubscriptionUpdateOne {
+	_u.mutation.ClearWalletInitialUsd()
+	return _u
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (_u *UserSubscriptionUpdateOne) SetAssignedBy(v int64) *UserSubscriptionUpdateOne {
 	_u.mutation.SetAssignedBy(v)
@@ -994,6 +1211,21 @@ func (_u *UserSubscriptionUpdateOne) AddUsageLogs(v ...*UsageLog) *UserSubscript
 	return _u.AddUsageLogIDs(ids...)
 }
 
+// AddWalletLedgerEntryIDs adds the "wallet_ledger_entries" edge to the SubscriptionWalletLedger entity by IDs.
+func (_u *UserSubscriptionUpdateOne) AddWalletLedgerEntryIDs(ids ...int64) *UserSubscriptionUpdateOne {
+	_u.mutation.AddWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// AddWalletLedgerEntries adds the "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UserSubscriptionUpdateOne) AddWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UserSubscriptionUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWalletLedgerEntryIDs(ids...)
+}
+
 // Mutation returns the UserSubscriptionMutation object of the builder.
 func (_u *UserSubscriptionUpdateOne) Mutation() *UserSubscriptionMutation {
 	return _u.mutation
@@ -1036,6 +1268,27 @@ func (_u *UserSubscriptionUpdateOne) RemoveUsageLogs(v ...*UsageLog) *UserSubscr
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveUsageLogIDs(ids...)
+}
+
+// ClearWalletLedgerEntries clears all "wallet_ledger_entries" edges to the SubscriptionWalletLedger entity.
+func (_u *UserSubscriptionUpdateOne) ClearWalletLedgerEntries() *UserSubscriptionUpdateOne {
+	_u.mutation.ClearWalletLedgerEntries()
+	return _u
+}
+
+// RemoveWalletLedgerEntryIDs removes the "wallet_ledger_entries" edge to SubscriptionWalletLedger entities by IDs.
+func (_u *UserSubscriptionUpdateOne) RemoveWalletLedgerEntryIDs(ids ...int64) *UserSubscriptionUpdateOne {
+	_u.mutation.RemoveWalletLedgerEntryIDs(ids...)
+	return _u
+}
+
+// RemoveWalletLedgerEntries removes "wallet_ledger_entries" edges to SubscriptionWalletLedger entities.
+func (_u *UserSubscriptionUpdateOne) RemoveWalletLedgerEntries(v ...*SubscriptionWalletLedger) *UserSubscriptionUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWalletLedgerEntryIDs(ids...)
 }
 
 // Where appends a list predicates to the UserSubscriptionUpdate builder.
@@ -1102,9 +1355,6 @@ func (_u *UserSubscriptionUpdateOne) check() error {
 	}
 	if _u.mutation.UserCleared() && len(_u.mutation.UserIDs()) > 0 {
 		return errors.New(`ent: clearing a required unique edge "UserSubscription.user"`)
-	}
-	if _u.mutation.GroupCleared() && len(_u.mutation.GroupIDs()) > 0 {
-		return errors.New(`ent: clearing a required unique edge "UserSubscription.group"`)
 	}
 	return nil
 }
@@ -1191,6 +1441,24 @@ func (_u *UserSubscriptionUpdateOne) sqlSave(ctx context.Context) (_node *UserSu
 	}
 	if value, ok := _u.mutation.AddedMonthlyUsageUsd(); ok {
 		_spec.AddField(usersubscription.FieldMonthlyUsageUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.WalletBalanceUsd(); ok {
+		_spec.SetField(usersubscription.FieldWalletBalanceUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedWalletBalanceUsd(); ok {
+		_spec.AddField(usersubscription.FieldWalletBalanceUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.WalletBalanceUsdCleared() {
+		_spec.ClearField(usersubscription.FieldWalletBalanceUsd, field.TypeFloat64)
+	}
+	if value, ok := _u.mutation.WalletInitialUsd(); ok {
+		_spec.SetField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedWalletInitialUsd(); ok {
+		_spec.AddField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64, value)
+	}
+	if _u.mutation.WalletInitialUsdCleared() {
+		_spec.ClearField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64)
 	}
 	if value, ok := _u.mutation.AssignedAt(); ok {
 		_spec.SetField(usersubscription.FieldAssignedAt, field.TypeTime, value)
@@ -1326,6 +1594,51 @@ func (_u *UserSubscriptionUpdateOne) sqlSave(ctx context.Context) (_node *UserSu
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usagelog.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usersubscription.WalletLedgerEntriesTable,
+			Columns: []string{usersubscription.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWalletLedgerEntriesIDs(); len(nodes) > 0 && !_u.mutation.WalletLedgerEntriesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usersubscription.WalletLedgerEntriesTable,
+			Columns: []string{usersubscription.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WalletLedgerEntriesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   usersubscription.WalletLedgerEntriesTable,
+			Columns: []string{usersubscription.WalletLedgerEntriesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

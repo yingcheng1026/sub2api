@@ -12,7 +12,7 @@ import (
 // SubscriptionSummaryItem represents a subscription item in summary
 type SubscriptionSummaryItem struct {
 	ID              int64   `json:"id"`
-	GroupID         int64   `json:"group_id"`
+	GroupID         *int64  `json:"group_id"`
 	GroupName       string  `json:"group_name"`
 	Status          string  `json:"status"`
 	DailyUsedUSD    float64 `json:"daily_used_usd,omitempty"`
@@ -22,6 +22,9 @@ type SubscriptionSummaryItem struct {
 	MonthlyUsedUSD  float64 `json:"monthly_used_usd,omitempty"`
 	MonthlyLimitUSD float64 `json:"monthly_limit_usd,omitempty"`
 	ExpiresAt       *string `json:"expires_at,omitempty"`
+	// 钱包模式 (v4) 字段
+	WalletBalanceUSD *float64 `json:"wallet_balance_usd,omitempty"`
+	WalletInitialUSD *float64 `json:"wallet_initial_usd,omitempty"`
 }
 
 // SubscriptionProgressInfo represents subscription with progress info
@@ -140,12 +143,14 @@ func (h *SubscriptionHandler) GetSummary(c *gin.Context) {
 
 	for _, sub := range subscriptions {
 		item := SubscriptionSummaryItem{
-			ID:             sub.ID,
-			GroupID:        sub.GroupID,
-			Status:         sub.Status,
-			DailyUsedUSD:   sub.DailyUsageUSD,
-			WeeklyUsedUSD:  sub.WeeklyUsageUSD,
-			MonthlyUsedUSD: sub.MonthlyUsageUSD,
+			ID:               sub.ID,
+			GroupID:          sub.GroupID,
+			Status:           sub.Status,
+			DailyUsedUSD:     sub.DailyUsageUSD,
+			WeeklyUsedUSD:    sub.WeeklyUsageUSD,
+			MonthlyUsedUSD:   sub.MonthlyUsageUSD,
+			WalletBalanceUSD: sub.WalletBalanceUSD,
+			WalletInitialUSD: sub.WalletInitialUSD,
 		}
 
 		// Add group info if preloaded

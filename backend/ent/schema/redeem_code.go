@@ -68,6 +68,12 @@ func (RedeemCode) Fields() []ent.Field {
 			Nillable(),
 		field.Int("validity_days").
 			Default(30),
+		// plan_id 钱包模式额度卡用：兑换时按 plan.WalletQuotaUsd 创建 wallet 订阅，
+		// plan_type='credits' → 永久 expires_at；group_id 此时应为 NULL。
+		// 链动小铺额度卡 SKU 走此路径（B2.7）。
+		field.Int64("plan_id").
+			Optional().
+			Nillable(),
 	}
 }
 

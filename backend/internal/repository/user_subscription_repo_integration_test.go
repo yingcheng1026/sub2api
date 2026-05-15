@@ -90,7 +90,7 @@ func (s *UserSubscriptionRepoSuite) TestCreate() {
 
 	sub := &service.UserSubscription{
 		UserID:    user.ID,
-		GroupID:   group.ID,
+		GroupID:   repositoryInt64Ptr(group.ID),
 		Status:    service.SubscriptionStatusActive,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -302,7 +302,8 @@ func (s *UserSubscriptionRepoSuite) TestList_FilterByGroupID() {
 	subs, _, err := s.repo.List(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, nil, &g1.ID, "", "", "", "")
 	s.Require().NoError(err)
 	s.Require().Len(subs, 1)
-	s.Require().Equal(g1.ID, subs[0].GroupID)
+	s.Require().NotNil(subs[0].GroupID, "v3 月卡订阅 group_id 非空")
+	s.Require().Equal(g1.ID, *subs[0].GroupID)
 }
 
 func (s *UserSubscriptionRepoSuite) TestList_FilterByStatus() {
@@ -730,7 +731,7 @@ func (s *UserSubscriptionRepoSuite) TestTxContext_RollbackIsolation() {
 	repo := NewUserSubscriptionRepository(baseClient)
 	sub := &service.UserSubscription{
 		UserID:     userEnt.ID,
-		GroupID:    groupEnt.ID,
+		GroupID:    repositoryInt64Ptr(groupEnt.ID),
 		ExpiresAt:  time.Now().AddDate(0, 0, 30),
 		Status:     service.SubscriptionStatusActive,
 		AssignedAt: time.Now(),

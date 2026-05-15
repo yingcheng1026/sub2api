@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 )
 
 // SubscriptionPlanCreate is the builder for creating a SubscriptionPlan entity.
@@ -25,6 +26,42 @@ type SubscriptionPlanCreate struct {
 // SetGroupID sets the "group_id" field.
 func (_c *SubscriptionPlanCreate) SetGroupID(v int64) *SubscriptionPlanCreate {
 	_c.mutation.SetGroupID(v)
+	return _c
+}
+
+// SetNillableGroupID sets the "group_id" field if the given value is not nil.
+func (_c *SubscriptionPlanCreate) SetNillableGroupID(v *int64) *SubscriptionPlanCreate {
+	if v != nil {
+		_c.SetGroupID(*v)
+	}
+	return _c
+}
+
+// SetWalletQuotaUsd sets the "wallet_quota_usd" field.
+func (_c *SubscriptionPlanCreate) SetWalletQuotaUsd(v float64) *SubscriptionPlanCreate {
+	_c.mutation.SetWalletQuotaUsd(v)
+	return _c
+}
+
+// SetNillableWalletQuotaUsd sets the "wallet_quota_usd" field if the given value is not nil.
+func (_c *SubscriptionPlanCreate) SetNillableWalletQuotaUsd(v *float64) *SubscriptionPlanCreate {
+	if v != nil {
+		_c.SetWalletQuotaUsd(*v)
+	}
+	return _c
+}
+
+// SetPlanType sets the "plan_type" field.
+func (_c *SubscriptionPlanCreate) SetPlanType(v string) *SubscriptionPlanCreate {
+	_c.mutation.SetPlanType(v)
+	return _c
+}
+
+// SetNillablePlanType sets the "plan_type" field if the given value is not nil.
+func (_c *SubscriptionPlanCreate) SetNillablePlanType(v *string) *SubscriptionPlanCreate {
+	if v != nil {
+		_c.SetPlanType(*v)
+	}
 	return _c
 }
 
@@ -180,6 +217,21 @@ func (_c *SubscriptionPlanCreate) SetNillableUpdatedAt(v *time.Time) *Subscripti
 	return _c
 }
 
+// AddPlanGroupIDs adds the "plan_groups" edge to the SubscriptionPlanGroup entity by IDs.
+func (_c *SubscriptionPlanCreate) AddPlanGroupIDs(ids ...int64) *SubscriptionPlanCreate {
+	_c.mutation.AddPlanGroupIDs(ids...)
+	return _c
+}
+
+// AddPlanGroups adds the "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_c *SubscriptionPlanCreate) AddPlanGroups(v ...*SubscriptionPlanGroup) *SubscriptionPlanCreate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddPlanGroupIDs(ids...)
+}
+
 // Mutation returns the SubscriptionPlanMutation object of the builder.
 func (_c *SubscriptionPlanCreate) Mutation() *SubscriptionPlanMutation {
 	return _c.mutation
@@ -215,6 +267,10 @@ func (_c *SubscriptionPlanCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *SubscriptionPlanCreate) defaults() {
+	if _, ok := _c.mutation.PlanType(); !ok {
+		v := subscriptionplan.DefaultPlanType
+		_c.mutation.SetPlanType(v)
+	}
 	if _, ok := _c.mutation.Description(); !ok {
 		v := subscriptionplan.DefaultDescription
 		_c.mutation.SetDescription(v)
@@ -255,8 +311,13 @@ func (_c *SubscriptionPlanCreate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_c *SubscriptionPlanCreate) check() error {
-	if _, ok := _c.mutation.GroupID(); !ok {
-		return &ValidationError{Name: "group_id", err: errors.New(`ent: missing required field "SubscriptionPlan.group_id"`)}
+	if _, ok := _c.mutation.PlanType(); !ok {
+		return &ValidationError{Name: "plan_type", err: errors.New(`ent: missing required field "SubscriptionPlan.plan_type"`)}
+	}
+	if v, ok := _c.mutation.PlanType(); ok {
+		if err := subscriptionplan.PlanTypeValidator(v); err != nil {
+			return &ValidationError{Name: "plan_type", err: fmt.Errorf(`ent: validator failed for field "SubscriptionPlan.plan_type": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.Name(); !ok {
 		return &ValidationError{Name: "name", err: errors.New(`ent: missing required field "SubscriptionPlan.name"`)}
@@ -335,7 +396,15 @@ func (_c *SubscriptionPlanCreate) createSpec() (*SubscriptionPlan, *sqlgraph.Cre
 	_spec.OnConflict = _c.conflict
 	if value, ok := _c.mutation.GroupID(); ok {
 		_spec.SetField(subscriptionplan.FieldGroupID, field.TypeInt64, value)
-		_node.GroupID = value
+		_node.GroupID = &value
+	}
+	if value, ok := _c.mutation.WalletQuotaUsd(); ok {
+		_spec.SetField(subscriptionplan.FieldWalletQuotaUsd, field.TypeFloat64, value)
+		_node.WalletQuotaUsd = &value
+	}
+	if value, ok := _c.mutation.PlanType(); ok {
+		_spec.SetField(subscriptionplan.FieldPlanType, field.TypeString, value)
+		_node.PlanType = value
 	}
 	if value, ok := _c.mutation.Name(); ok {
 		_spec.SetField(subscriptionplan.FieldName, field.TypeString, value)
@@ -384,6 +453,22 @@ func (_c *SubscriptionPlanCreate) createSpec() (*SubscriptionPlan, *sqlgraph.Cre
 	if value, ok := _c.mutation.UpdatedAt(); ok {
 		_spec.SetField(subscriptionplan.FieldUpdatedAt, field.TypeTime, value)
 		_node.UpdatedAt = value
+	}
+	if nodes := _c.mutation.PlanGroupsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   subscriptionplan.PlanGroupsTable,
+			Columns: []string{subscriptionplan.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
 	}
 	return _node, _spec
 }
@@ -452,6 +537,48 @@ func (u *SubscriptionPlanUpsert) UpdateGroupID() *SubscriptionPlanUpsert {
 // AddGroupID adds v to the "group_id" field.
 func (u *SubscriptionPlanUpsert) AddGroupID(v int64) *SubscriptionPlanUpsert {
 	u.Add(subscriptionplan.FieldGroupID, v)
+	return u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *SubscriptionPlanUpsert) ClearGroupID() *SubscriptionPlanUpsert {
+	u.SetNull(subscriptionplan.FieldGroupID)
+	return u
+}
+
+// SetWalletQuotaUsd sets the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsert) SetWalletQuotaUsd(v float64) *SubscriptionPlanUpsert {
+	u.Set(subscriptionplan.FieldWalletQuotaUsd, v)
+	return u
+}
+
+// UpdateWalletQuotaUsd sets the "wallet_quota_usd" field to the value that was provided on create.
+func (u *SubscriptionPlanUpsert) UpdateWalletQuotaUsd() *SubscriptionPlanUpsert {
+	u.SetExcluded(subscriptionplan.FieldWalletQuotaUsd)
+	return u
+}
+
+// AddWalletQuotaUsd adds v to the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsert) AddWalletQuotaUsd(v float64) *SubscriptionPlanUpsert {
+	u.Add(subscriptionplan.FieldWalletQuotaUsd, v)
+	return u
+}
+
+// ClearWalletQuotaUsd clears the value of the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsert) ClearWalletQuotaUsd() *SubscriptionPlanUpsert {
+	u.SetNull(subscriptionplan.FieldWalletQuotaUsd)
+	return u
+}
+
+// SetPlanType sets the "plan_type" field.
+func (u *SubscriptionPlanUpsert) SetPlanType(v string) *SubscriptionPlanUpsert {
+	u.Set(subscriptionplan.FieldPlanType, v)
+	return u
+}
+
+// UpdatePlanType sets the "plan_type" field to the value that was provided on create.
+func (u *SubscriptionPlanUpsert) UpdatePlanType() *SubscriptionPlanUpsert {
+	u.SetExcluded(subscriptionplan.FieldPlanType)
 	return u
 }
 
@@ -680,6 +807,55 @@ func (u *SubscriptionPlanUpsertOne) AddGroupID(v int64) *SubscriptionPlanUpsertO
 func (u *SubscriptionPlanUpsertOne) UpdateGroupID() *SubscriptionPlanUpsertOne {
 	return u.Update(func(s *SubscriptionPlanUpsert) {
 		s.UpdateGroupID()
+	})
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *SubscriptionPlanUpsertOne) ClearGroupID() *SubscriptionPlanUpsertOne {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.ClearGroupID()
+	})
+}
+
+// SetWalletQuotaUsd sets the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsertOne) SetWalletQuotaUsd(v float64) *SubscriptionPlanUpsertOne {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.SetWalletQuotaUsd(v)
+	})
+}
+
+// AddWalletQuotaUsd adds v to the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsertOne) AddWalletQuotaUsd(v float64) *SubscriptionPlanUpsertOne {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.AddWalletQuotaUsd(v)
+	})
+}
+
+// UpdateWalletQuotaUsd sets the "wallet_quota_usd" field to the value that was provided on create.
+func (u *SubscriptionPlanUpsertOne) UpdateWalletQuotaUsd() *SubscriptionPlanUpsertOne {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.UpdateWalletQuotaUsd()
+	})
+}
+
+// ClearWalletQuotaUsd clears the value of the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsertOne) ClearWalletQuotaUsd() *SubscriptionPlanUpsertOne {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.ClearWalletQuotaUsd()
+	})
+}
+
+// SetPlanType sets the "plan_type" field.
+func (u *SubscriptionPlanUpsertOne) SetPlanType(v string) *SubscriptionPlanUpsertOne {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.SetPlanType(v)
+	})
+}
+
+// UpdatePlanType sets the "plan_type" field to the value that was provided on create.
+func (u *SubscriptionPlanUpsertOne) UpdatePlanType() *SubscriptionPlanUpsertOne {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.UpdatePlanType()
 	})
 }
 
@@ -1101,6 +1277,55 @@ func (u *SubscriptionPlanUpsertBulk) AddGroupID(v int64) *SubscriptionPlanUpsert
 func (u *SubscriptionPlanUpsertBulk) UpdateGroupID() *SubscriptionPlanUpsertBulk {
 	return u.Update(func(s *SubscriptionPlanUpsert) {
 		s.UpdateGroupID()
+	})
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *SubscriptionPlanUpsertBulk) ClearGroupID() *SubscriptionPlanUpsertBulk {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.ClearGroupID()
+	})
+}
+
+// SetWalletQuotaUsd sets the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsertBulk) SetWalletQuotaUsd(v float64) *SubscriptionPlanUpsertBulk {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.SetWalletQuotaUsd(v)
+	})
+}
+
+// AddWalletQuotaUsd adds v to the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsertBulk) AddWalletQuotaUsd(v float64) *SubscriptionPlanUpsertBulk {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.AddWalletQuotaUsd(v)
+	})
+}
+
+// UpdateWalletQuotaUsd sets the "wallet_quota_usd" field to the value that was provided on create.
+func (u *SubscriptionPlanUpsertBulk) UpdateWalletQuotaUsd() *SubscriptionPlanUpsertBulk {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.UpdateWalletQuotaUsd()
+	})
+}
+
+// ClearWalletQuotaUsd clears the value of the "wallet_quota_usd" field.
+func (u *SubscriptionPlanUpsertBulk) ClearWalletQuotaUsd() *SubscriptionPlanUpsertBulk {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.ClearWalletQuotaUsd()
+	})
+}
+
+// SetPlanType sets the "plan_type" field.
+func (u *SubscriptionPlanUpsertBulk) SetPlanType(v string) *SubscriptionPlanUpsertBulk {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.SetPlanType(v)
+	})
+}
+
+// UpdatePlanType sets the "plan_type" field to the value that was provided on create.
+func (u *SubscriptionPlanUpsertBulk) UpdatePlanType() *SubscriptionPlanUpsertBulk {
+	return u.Update(func(s *SubscriptionPlanUpsert) {
+		s.UpdatePlanType()
 	})
 }
 

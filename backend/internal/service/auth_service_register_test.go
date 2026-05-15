@@ -80,7 +80,8 @@ func (s *defaultSubscriptionAssignerStub) AssignOrExtendSubscription(_ context.C
 	if s.err != nil {
 		return nil, false, s.err
 	}
-	return &UserSubscription{UserID: input.UserID, GroupID: input.GroupID}, false, nil
+	gid := input.GroupID
+	return &UserSubscription{UserID: input.UserID, GroupID: &gid}, false, nil
 }
 
 func (s *refreshTokenCacheStub) StoreRefreshToken(context.Context, string, *RefreshTokenData, time.Duration) error {

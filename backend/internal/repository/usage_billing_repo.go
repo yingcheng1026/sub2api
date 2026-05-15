@@ -112,6 +112,23 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 		}
 	}
 
+	// 钱包模式 (v4) 扣款：FOR UPDATE 锁住 user_subscriptions 行扣减 wallet_balance_usd
+	// 并落 ledger 流水。SubscriptionCost 与 WalletCost 由 buildUsageBillingCommand 保证互斥。
+	if cmd.WalletCost > 0 && cmd.SubscriptionID != nil {
+		newBalance, insufficient, err := deductUsageBillingWallet(ctx, tx, *cmd.SubscriptionID, cmd.WalletCost)
+		if err != nil {
+			return err
+		}
+		if insufficient {
+			// 余额不足：本次请求已经被上游服务响应（detached billing 在响应后跑），
+			// 这里只标记 flag 给监控用，不强行扣到 -0.01 以下违反 CHECK 约束。
+			// 真正的预防在 CheckBillingEligibility (A4) 里 ≤ 0 直接 402 拒绝。
+			result.WalletInsufficient = true
+		} else {
+			result.NewWalletBalance = &newBalance
+		}
+	}
+
 	if cmd.BalanceCost > 0 {
 		newBalance, err := deductUsageBillingBalance(ctx, tx, cmd.UserID, cmd.BalanceCost)
 		if err != nil {
@@ -171,6 +188,58 @@ func incrementUsageBillingSubscription(ctx context.Context, tx *sql.Tx, subscrip
 		return nil
 	}
 	return service.ErrSubscriptionNotFound
+}
+
+// deductUsageBillingWallet 钱包模式 (v4) 在共享 billing 事务内扣款 + 落 ledger。
+//
+// 返回值：
+//   - newBalance: 扣款后余额；insufficient=true 时为扣款前余额（未扣）。
+//   - insufficient: balance < cost 即标 true，调用方决定是否标 flag 走告警。
+//
+// 不会返回 service.ErrWalletInsufficient — 这一层不拒事务，把决策权交给调用方
+// （usage_logs 已经写入，钱包扣款失败应当作可观察异常而非阻断 billing 提交）。
+func deductUsageBillingWallet(ctx context.Context, tx *sql.Tx, subscriptionID int64, costUSD float64) (float64, bool, error) {
+	var balance sql.NullFloat64
+	err := tx.QueryRowContext(ctx, `
+		SELECT wallet_balance_usd
+		FROM user_subscriptions
+		WHERE id = $1 AND deleted_at IS NULL
+		FOR UPDATE
+	`, subscriptionID).Scan(&balance)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, service.ErrSubscriptionNotFound
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if !balance.Valid {
+		// wallet_balance_usd IS NULL → 老的 group 订阅，不该走到这条路径。
+		// 上游 buildUsageBillingCommand 已经按 IsWalletMode 分流；这里兜底返错。
+		return 0, false, service.ErrSubscriptionNotFound
+	}
+
+	if balance.Float64 < costUSD {
+		return balance.Float64, true, nil
+	}
+
+	newBalance := balance.Float64 - costUSD
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE user_subscriptions
+		SET wallet_balance_usd = $1, updated_at = NOW()
+		WHERE id = $2
+	`, newBalance, subscriptionID); err != nil {
+		return 0, false, err
+	}
+
+	var notes sql.NullString
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO subscription_wallet_ledger
+			(subscription_id, delta_usd, balance_after, reason, usage_log_id, operator_id, notes)
+		VALUES ($1, $2, $3, 'usage', NULL, NULL, $4)
+	`, subscriptionID, -costUSD, newBalance, notes); err != nil {
+		return 0, false, err
+	}
+	return newBalance, false, nil
 }
 
 func deductUsageBillingBalance(ctx context.Context, tx *sql.Tx, userID int64, amount float64) (float64, error) {

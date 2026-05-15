@@ -38,12 +38,19 @@ func NewSubscriptionHandler(subscriptionService *service.SubscriptionService) *S
 	}
 }
 
-// AssignSubscriptionRequest represents assign subscription request
+// AssignSubscriptionRequest represents assign subscription request.
+//
+// 两种模式二选一：
+//   - Group 模式（v3）：填 group_id，wallet_initial_usd 留空
+//   - 钱包模式 (v4)：填 wallet_initial_usd（>0），group_id 忽略；用户级钱包
+//     additionally 可填 plan_id → 自动按 plan 关联 groups 建 N 把分组 key
 type AssignSubscriptionRequest struct {
-	UserID       int64  `json:"user_id" binding:"required"`
-	GroupID      int64  `json:"group_id" binding:"required"`
-	ValidityDays int    `json:"validity_days" binding:"omitempty,max=36500"` // max 100 years
-	Notes        string `json:"notes"`
+	UserID           int64    `json:"user_id" binding:"required"`
+	GroupID          int64    `json:"group_id"`
+	ValidityDays     int      `json:"validity_days" binding:"omitempty,max=36500"` // max 100 years
+	Notes            string   `json:"notes"`
+	WalletInitialUSD *float64 `json:"wallet_initial_usd" binding:"omitempty,gt=0,lte=10000000"` // 钱包模式初始余额 USD
+	PlanID           *int64   `json:"plan_id" binding:"omitempty,gt=0"`                         // 钱包模式：plan 关联 groups → 自动建 N 把分组 key
 }
 
 // BulkAssignSubscriptionRequest represents bulk assign subscription request
@@ -141,15 +148,23 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 		return
 	}
 
+	// 钱包模式 ↔ group 模式互斥校验：必须提供其一
+	if req.WalletInitialUSD == nil && req.GroupID <= 0 {
+		response.BadRequest(c, "either group_id or wallet_initial_usd is required")
+		return
+	}
+
 	// Get admin user ID from context
 	adminID := getAdminIDFromContext(c)
 
 	subscription, err := h.subscriptionService.AssignSubscription(c.Request.Context(), &service.AssignSubscriptionInput{
-		UserID:       req.UserID,
-		GroupID:      req.GroupID,
-		ValidityDays: req.ValidityDays,
-		AssignedBy:   adminID,
-		Notes:        req.Notes,
+		UserID:           req.UserID,
+		GroupID:          req.GroupID,
+		ValidityDays:     req.ValidityDays,
+		AssignedBy:       adminID,
+		Notes:            req.Notes,
+		WalletInitialUSD: req.WalletInitialUSD,
+		PlanID:           req.PlanID,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)

@@ -94,9 +94,12 @@ type Group struct {
 	MonthlyLimitUSD  *float64 `json:"monthly_limit_usd"`
 
 	// 图片生成计费配置（仅 antigravity 平台使用）
-	ImagePrice1K *float64 `json:"image_price_1k"`
-	ImagePrice2K *float64 `json:"image_price_2k"`
-	ImagePrice4K *float64 `json:"image_price_4k"`
+	AllowImageGeneration bool     `json:"allow_image_generation"`
+	ImageRateIndependent bool     `json:"image_rate_independent"`
+	ImageRateMultiplier  float64  `json:"image_rate_multiplier"`
+	ImagePrice1K         *float64 `json:"image_price_1k"`
+	ImagePrice2K         *float64 `json:"image_price_2k"`
+	ImagePrice4K         *float64 `json:"image_price_4k"`
 
 	// Claude Code 客户端限制
 	ClaudeCodeOnly  bool   `json:"claude_code_only"`
@@ -488,9 +491,10 @@ type Setting struct {
 }
 
 type UserSubscription struct {
-	ID      int64 `json:"id"`
-	UserID  int64 `json:"user_id"`
-	GroupID int64 `json:"group_id"`
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+	// GroupID 钱包模式 (v4) 下为 nil；老的单 group 订阅 (v3) 下必填。
+	GroupID *int64 `json:"group_id"`
 
 	StartsAt  time.Time `json:"starts_at"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -503,6 +507,10 @@ type UserSubscription struct {
 	DailyUsageUSD   float64 `json:"daily_usage_usd"`
 	WeeklyUsageUSD  float64 `json:"weekly_usage_usd"`
 	MonthlyUsageUSD float64 `json:"monthly_usage_usd"`
+
+	// WalletBalanceUSD / WalletInitialUSD 钱包模式 (v4) 字段；nil = 老 group 订阅。
+	WalletBalanceUSD *float64 `json:"wallet_balance_usd,omitempty"`
+	WalletInitialUSD *float64 `json:"wallet_initial_usd,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -521,6 +529,16 @@ type AdminUserSubscription struct {
 	Notes      string    `json:"notes"`
 
 	AssignedByUser *User `json:"assigned_by_user,omitempty"`
+
+	// 钱包激活返回的 N 把分组 key（命名 "钱包-{group.Name}"）。
+	// 5/14 反转决策后不再写入（多 key 已废弃），字段保留作历史兼容。
+	WalletGroupKeys             []APIKey `json:"wallet_group_keys,omitempty"`
+	WalletGroupKeysCreatedCount *int     `json:"wallet_group_keys_created_count,omitempty"`
+
+	// 钱包激活返回的 1 把通用 key（命名 "钱包通用 key（自动路由）"）。
+	// 5/14 反转决策后激活流程走单 key 路径，多 key 字段降为兼容用。
+	WalletUniversalKey        *APIKey `json:"wallet_universal_key,omitempty"`
+	WalletUniversalKeyCreated *bool   `json:"wallet_universal_key_created,omitempty"`
 }
 
 type BulkAssignResult struct {

@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
@@ -272,6 +273,55 @@ func (_u *GroupUpdate) SetNillableDefaultValidityDays(v *int) *GroupUpdate {
 // AddDefaultValidityDays adds value to the "default_validity_days" field.
 func (_u *GroupUpdate) AddDefaultValidityDays(v int) *GroupUpdate {
 	_u.mutation.AddDefaultValidityDays(v)
+	return _u
+}
+
+// SetAllowImageGeneration sets the "allow_image_generation" field.
+func (_u *GroupUpdate) SetAllowImageGeneration(v bool) *GroupUpdate {
+	_u.mutation.SetAllowImageGeneration(v)
+	return _u
+}
+
+// SetNillableAllowImageGeneration sets the "allow_image_generation" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableAllowImageGeneration(v *bool) *GroupUpdate {
+	if v != nil {
+		_u.SetAllowImageGeneration(*v)
+	}
+	return _u
+}
+
+// SetImageRateIndependent sets the "image_rate_independent" field.
+func (_u *GroupUpdate) SetImageRateIndependent(v bool) *GroupUpdate {
+	_u.mutation.SetImageRateIndependent(v)
+	return _u
+}
+
+// SetNillableImageRateIndependent sets the "image_rate_independent" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableImageRateIndependent(v *bool) *GroupUpdate {
+	if v != nil {
+		_u.SetImageRateIndependent(*v)
+	}
+	return _u
+}
+
+// SetImageRateMultiplier sets the "image_rate_multiplier" field.
+func (_u *GroupUpdate) SetImageRateMultiplier(v float64) *GroupUpdate {
+	_u.mutation.ResetImageRateMultiplier()
+	_u.mutation.SetImageRateMultiplier(v)
+	return _u
+}
+
+// SetNillableImageRateMultiplier sets the "image_rate_multiplier" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableImageRateMultiplier(v *float64) *GroupUpdate {
+	if v != nil {
+		_u.SetImageRateMultiplier(*v)
+	}
+	return _u
+}
+
+// AddImageRateMultiplier adds value to the "image_rate_multiplier" field.
+func (_u *GroupUpdate) AddImageRateMultiplier(v float64) *GroupUpdate {
+	_u.mutation.AddImageRateMultiplier(v)
 	return _u
 }
 
@@ -648,6 +698,21 @@ func (_u *GroupUpdate) AddUsageLogs(v ...*UsageLog) *GroupUpdate {
 	return _u.AddUsageLogIDs(ids...)
 }
 
+// AddPlanGroupIDs adds the "plan_groups" edge to the SubscriptionPlanGroup entity by IDs.
+func (_u *GroupUpdate) AddPlanGroupIDs(ids ...int64) *GroupUpdate {
+	_u.mutation.AddPlanGroupIDs(ids...)
+	return _u
+}
+
+// AddPlanGroups adds the "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *GroupUpdate) AddPlanGroups(v ...*SubscriptionPlanGroup) *GroupUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddPlanGroupIDs(ids...)
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *GroupUpdate) AddAccountIDs(ids ...int64) *GroupUpdate {
 	_u.mutation.AddAccountIDs(ids...)
@@ -765,6 +830,27 @@ func (_u *GroupUpdate) RemoveUsageLogs(v ...*UsageLog) *GroupUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveUsageLogIDs(ids...)
+}
+
+// ClearPlanGroups clears all "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *GroupUpdate) ClearPlanGroups() *GroupUpdate {
+	_u.mutation.ClearPlanGroups()
+	return _u
+}
+
+// RemovePlanGroupIDs removes the "plan_groups" edge to SubscriptionPlanGroup entities by IDs.
+func (_u *GroupUpdate) RemovePlanGroupIDs(ids ...int64) *GroupUpdate {
+	_u.mutation.RemovePlanGroupIDs(ids...)
+	return _u
+}
+
+// RemovePlanGroups removes "plan_groups" edges to SubscriptionPlanGroup entities.
+func (_u *GroupUpdate) RemovePlanGroups(v ...*SubscriptionPlanGroup) *GroupUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemovePlanGroupIDs(ids...)
 }
 
 // ClearAccounts clears all "accounts" edges to the Account entity.
@@ -961,6 +1047,18 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedDefaultValidityDays(); ok {
 		_spec.AddField(group.FieldDefaultValidityDays, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AllowImageGeneration(); ok {
+		_spec.SetField(group.FieldAllowImageGeneration, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ImageRateIndependent(); ok {
+		_spec.SetField(group.FieldImageRateIndependent, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ImageRateMultiplier(); ok {
+		_spec.SetField(group.FieldImageRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedImageRateMultiplier(); ok {
+		_spec.AddField(group.FieldImageRateMultiplier, field.TypeFloat64, value)
 	}
 	if value, ok := _u.mutation.ImagePrice1k(); ok {
 		_spec.SetField(group.FieldImagePrice1k, field.TypeFloat64, value)
@@ -1230,6 +1328,51 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usagelog.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   group.PlanGroupsTable,
+			Columns: []string{group.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedPlanGroupsIDs(); len(nodes) > 0 && !_u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   group.PlanGroupsTable,
+			Columns: []string{group.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.PlanGroupsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   group.PlanGroupsTable,
+			Columns: []string{group.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {
@@ -1610,6 +1753,55 @@ func (_u *GroupUpdateOne) AddDefaultValidityDays(v int) *GroupUpdateOne {
 	return _u
 }
 
+// SetAllowImageGeneration sets the "allow_image_generation" field.
+func (_u *GroupUpdateOne) SetAllowImageGeneration(v bool) *GroupUpdateOne {
+	_u.mutation.SetAllowImageGeneration(v)
+	return _u
+}
+
+// SetNillableAllowImageGeneration sets the "allow_image_generation" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableAllowImageGeneration(v *bool) *GroupUpdateOne {
+	if v != nil {
+		_u.SetAllowImageGeneration(*v)
+	}
+	return _u
+}
+
+// SetImageRateIndependent sets the "image_rate_independent" field.
+func (_u *GroupUpdateOne) SetImageRateIndependent(v bool) *GroupUpdateOne {
+	_u.mutation.SetImageRateIndependent(v)
+	return _u
+}
+
+// SetNillableImageRateIndependent sets the "image_rate_independent" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableImageRateIndependent(v *bool) *GroupUpdateOne {
+	if v != nil {
+		_u.SetImageRateIndependent(*v)
+	}
+	return _u
+}
+
+// SetImageRateMultiplier sets the "image_rate_multiplier" field.
+func (_u *GroupUpdateOne) SetImageRateMultiplier(v float64) *GroupUpdateOne {
+	_u.mutation.ResetImageRateMultiplier()
+	_u.mutation.SetImageRateMultiplier(v)
+	return _u
+}
+
+// SetNillableImageRateMultiplier sets the "image_rate_multiplier" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableImageRateMultiplier(v *float64) *GroupUpdateOne {
+	if v != nil {
+		_u.SetImageRateMultiplier(*v)
+	}
+	return _u
+}
+
+// AddImageRateMultiplier adds value to the "image_rate_multiplier" field.
+func (_u *GroupUpdateOne) AddImageRateMultiplier(v float64) *GroupUpdateOne {
+	_u.mutation.AddImageRateMultiplier(v)
+	return _u
+}
+
 // SetImagePrice1k sets the "image_price_1k" field.
 func (_u *GroupUpdateOne) SetImagePrice1k(v float64) *GroupUpdateOne {
 	_u.mutation.ResetImagePrice1k()
@@ -1983,6 +2175,21 @@ func (_u *GroupUpdateOne) AddUsageLogs(v ...*UsageLog) *GroupUpdateOne {
 	return _u.AddUsageLogIDs(ids...)
 }
 
+// AddPlanGroupIDs adds the "plan_groups" edge to the SubscriptionPlanGroup entity by IDs.
+func (_u *GroupUpdateOne) AddPlanGroupIDs(ids ...int64) *GroupUpdateOne {
+	_u.mutation.AddPlanGroupIDs(ids...)
+	return _u
+}
+
+// AddPlanGroups adds the "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *GroupUpdateOne) AddPlanGroups(v ...*SubscriptionPlanGroup) *GroupUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddPlanGroupIDs(ids...)
+}
+
 // AddAccountIDs adds the "accounts" edge to the Account entity by IDs.
 func (_u *GroupUpdateOne) AddAccountIDs(ids ...int64) *GroupUpdateOne {
 	_u.mutation.AddAccountIDs(ids...)
@@ -2100,6 +2307,27 @@ func (_u *GroupUpdateOne) RemoveUsageLogs(v ...*UsageLog) *GroupUpdateOne {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveUsageLogIDs(ids...)
+}
+
+// ClearPlanGroups clears all "plan_groups" edges to the SubscriptionPlanGroup entity.
+func (_u *GroupUpdateOne) ClearPlanGroups() *GroupUpdateOne {
+	_u.mutation.ClearPlanGroups()
+	return _u
+}
+
+// RemovePlanGroupIDs removes the "plan_groups" edge to SubscriptionPlanGroup entities by IDs.
+func (_u *GroupUpdateOne) RemovePlanGroupIDs(ids ...int64) *GroupUpdateOne {
+	_u.mutation.RemovePlanGroupIDs(ids...)
+	return _u
+}
+
+// RemovePlanGroups removes "plan_groups" edges to SubscriptionPlanGroup entities.
+func (_u *GroupUpdateOne) RemovePlanGroups(v ...*SubscriptionPlanGroup) *GroupUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemovePlanGroupIDs(ids...)
 }
 
 // ClearAccounts clears all "accounts" edges to the Account entity.
@@ -2326,6 +2554,18 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.AddedDefaultValidityDays(); ok {
 		_spec.AddField(group.FieldDefaultValidityDays, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AllowImageGeneration(); ok {
+		_spec.SetField(group.FieldAllowImageGeneration, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ImageRateIndependent(); ok {
+		_spec.SetField(group.FieldImageRateIndependent, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ImageRateMultiplier(); ok {
+		_spec.SetField(group.FieldImageRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.AddedImageRateMultiplier(); ok {
+		_spec.AddField(group.FieldImageRateMultiplier, field.TypeFloat64, value)
 	}
 	if value, ok := _u.mutation.ImagePrice1k(); ok {
 		_spec.SetField(group.FieldImagePrice1k, field.TypeFloat64, value)
@@ -2595,6 +2835,51 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usagelog.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   group.PlanGroupsTable,
+			Columns: []string{group.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedPlanGroupsIDs(); len(nodes) > 0 && !_u.mutation.PlanGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   group.PlanGroupsTable,
+			Columns: []string{group.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.PlanGroupsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   group.PlanGroupsTable,
+			Columns: []string{group.PlanGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionplangroup.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

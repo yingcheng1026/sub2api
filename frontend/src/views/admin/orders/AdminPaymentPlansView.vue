@@ -33,8 +33,21 @@
             <span v-if="row.original_price" class="ml-1 text-xs text-gray-400 line-through">${{ row.original_price.toFixed(2) }}</span>
           </div>
         </template>
+        <template #cell-plan_type="{ value }">
+          <span
+            class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
+            :class="value === 'credits'
+              ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'
+              : 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200'"
+          >
+            {{ value === 'credits' ? t('payment.admin.planTypeCredits') : t('payment.admin.planTypeSubscription') }}
+          </span>
+        </template>
         <template #cell-validity_days="{ value, row }">
-          <span class="text-sm">{{ value }} {{ t('payment.admin.' + (row.validity_unit || 'days')) }}</span>
+          <span v-if="row.plan_type === 'credits'" class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('payment.admin.planTypeCredits') }}
+          </span>
+          <span v-else class="text-sm">{{ value }} {{ t('payment.admin.' + (row.validity_unit || 'days')) }}</span>
         </template>
         <template #cell-for_sale="{ value, row }">
           <button
@@ -130,6 +143,7 @@ const deletingPlanId = ref<number | null>(null)
 const planColumns = computed((): Column[] => [
   { key: 'id', label: 'ID' },
   { key: 'name', label: t('payment.admin.planName') },
+  { key: 'plan_type', label: t('payment.admin.planType') },
   { key: 'group_id', label: t('payment.admin.group') },
   { key: 'price', label: t('payment.admin.price') },
   { key: 'validity_days', label: t('payment.admin.validityDays') },

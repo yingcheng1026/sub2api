@@ -137,7 +137,7 @@ func TestEntSoftDelete_UserSubscription_DefaultFilterAndSkip(t *testing.T) {
 	repo := NewUserSubscriptionRepository(client)
 	sub := &service.UserSubscription{
 		UserID:    u.ID,
-		GroupID:   g.ID,
+		GroupID:   repositoryInt64Ptr(g.ID),
 		Status:    service.SubscriptionStatusActive,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -169,7 +169,7 @@ func TestEntSoftDelete_UserSubscription_DeleteIdempotent(t *testing.T) {
 	repo := NewUserSubscriptionRepository(client)
 	sub := &service.UserSubscription{
 		UserID:    u.ID,
-		GroupID:   g.ID,
+		GroupID:   repositoryInt64Ptr(g.ID),
 		Status:    service.SubscriptionStatusActive,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -191,7 +191,7 @@ func TestEntSoftDelete_UserSubscription_ListExcludesDeleted(t *testing.T) {
 
 	sub1 := &service.UserSubscription{
 		UserID:    u.ID,
-		GroupID:   g1.ID,
+		GroupID:   repositoryInt64Ptr(g1.ID),
 		Status:    service.SubscriptionStatusActive,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -199,7 +199,7 @@ func TestEntSoftDelete_UserSubscription_ListExcludesDeleted(t *testing.T) {
 
 	sub2 := &service.UserSubscription{
 		UserID:    u.ID,
-		GroupID:   g2.ID,
+		GroupID:   repositoryInt64Ptr(g2.ID),
 		Status:    service.SubscriptionStatusActive,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}

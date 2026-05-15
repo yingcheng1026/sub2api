@@ -20,6 +20,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionwalletledger"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
@@ -470,6 +471,21 @@ func (_u *UserUpdate) AddAssignedSubscriptions(v ...*UserSubscription) *UserUpda
 	return _u.AddAssignedSubscriptionIDs(ids...)
 }
 
+// AddWalletLedgerOperationIDs adds the "wallet_ledger_operations" edge to the SubscriptionWalletLedger entity by IDs.
+func (_u *UserUpdate) AddWalletLedgerOperationIDs(ids ...int64) *UserUpdate {
+	_u.mutation.AddWalletLedgerOperationIDs(ids...)
+	return _u
+}
+
+// AddWalletLedgerOperations adds the "wallet_ledger_operations" edges to the SubscriptionWalletLedger entity.
+func (_u *UserUpdate) AddWalletLedgerOperations(v ...*SubscriptionWalletLedger) *UserUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWalletLedgerOperationIDs(ids...)
+}
+
 // AddAnnouncementReadIDs adds the "announcement_reads" edge to the AnnouncementRead entity by IDs.
 func (_u *UserUpdate) AddAnnouncementReadIDs(ids ...int64) *UserUpdate {
 	_u.mutation.AddAnnouncementReadIDs(ids...)
@@ -677,6 +693,27 @@ func (_u *UserUpdate) RemoveAssignedSubscriptions(v ...*UserSubscription) *UserU
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveAssignedSubscriptionIDs(ids...)
+}
+
+// ClearWalletLedgerOperations clears all "wallet_ledger_operations" edges to the SubscriptionWalletLedger entity.
+func (_u *UserUpdate) ClearWalletLedgerOperations() *UserUpdate {
+	_u.mutation.ClearWalletLedgerOperations()
+	return _u
+}
+
+// RemoveWalletLedgerOperationIDs removes the "wallet_ledger_operations" edge to SubscriptionWalletLedger entities by IDs.
+func (_u *UserUpdate) RemoveWalletLedgerOperationIDs(ids ...int64) *UserUpdate {
+	_u.mutation.RemoveWalletLedgerOperationIDs(ids...)
+	return _u
+}
+
+// RemoveWalletLedgerOperations removes "wallet_ledger_operations" edges to SubscriptionWalletLedger entities.
+func (_u *UserUpdate) RemoveWalletLedgerOperations(v ...*SubscriptionWalletLedger) *UserUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWalletLedgerOperationIDs(ids...)
 }
 
 // ClearAnnouncementReads clears all "announcement_reads" edges to the AnnouncementRead entity.
@@ -1208,6 +1245,51 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usersubscription.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.WalletLedgerOperationsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.WalletLedgerOperationsTable,
+			Columns: []string{user.WalletLedgerOperationsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWalletLedgerOperationsIDs(); len(nodes) > 0 && !_u.mutation.WalletLedgerOperationsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.WalletLedgerOperationsTable,
+			Columns: []string{user.WalletLedgerOperationsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WalletLedgerOperationsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.WalletLedgerOperationsTable,
+			Columns: []string{user.WalletLedgerOperationsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {
@@ -2038,6 +2120,21 @@ func (_u *UserUpdateOne) AddAssignedSubscriptions(v ...*UserSubscription) *UserU
 	return _u.AddAssignedSubscriptionIDs(ids...)
 }
 
+// AddWalletLedgerOperationIDs adds the "wallet_ledger_operations" edge to the SubscriptionWalletLedger entity by IDs.
+func (_u *UserUpdateOne) AddWalletLedgerOperationIDs(ids ...int64) *UserUpdateOne {
+	_u.mutation.AddWalletLedgerOperationIDs(ids...)
+	return _u
+}
+
+// AddWalletLedgerOperations adds the "wallet_ledger_operations" edges to the SubscriptionWalletLedger entity.
+func (_u *UserUpdateOne) AddWalletLedgerOperations(v ...*SubscriptionWalletLedger) *UserUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWalletLedgerOperationIDs(ids...)
+}
+
 // AddAnnouncementReadIDs adds the "announcement_reads" edge to the AnnouncementRead entity by IDs.
 func (_u *UserUpdateOne) AddAnnouncementReadIDs(ids ...int64) *UserUpdateOne {
 	_u.mutation.AddAnnouncementReadIDs(ids...)
@@ -2245,6 +2342,27 @@ func (_u *UserUpdateOne) RemoveAssignedSubscriptions(v ...*UserSubscription) *Us
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveAssignedSubscriptionIDs(ids...)
+}
+
+// ClearWalletLedgerOperations clears all "wallet_ledger_operations" edges to the SubscriptionWalletLedger entity.
+func (_u *UserUpdateOne) ClearWalletLedgerOperations() *UserUpdateOne {
+	_u.mutation.ClearWalletLedgerOperations()
+	return _u
+}
+
+// RemoveWalletLedgerOperationIDs removes the "wallet_ledger_operations" edge to SubscriptionWalletLedger entities by IDs.
+func (_u *UserUpdateOne) RemoveWalletLedgerOperationIDs(ids ...int64) *UserUpdateOne {
+	_u.mutation.RemoveWalletLedgerOperationIDs(ids...)
+	return _u
+}
+
+// RemoveWalletLedgerOperations removes "wallet_ledger_operations" edges to SubscriptionWalletLedger entities.
+func (_u *UserUpdateOne) RemoveWalletLedgerOperations(v ...*SubscriptionWalletLedger) *UserUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWalletLedgerOperationIDs(ids...)
 }
 
 // ClearAnnouncementReads clears all "announcement_reads" edges to the AnnouncementRead entity.
@@ -2806,6 +2924,51 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usersubscription.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.WalletLedgerOperationsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.WalletLedgerOperationsTable,
+			Columns: []string{user.WalletLedgerOperationsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWalletLedgerOperationsIDs(); len(nodes) > 0 && !_u.mutation.WalletLedgerOperationsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.WalletLedgerOperationsTable,
+			Columns: []string{user.WalletLedgerOperationsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WalletLedgerOperationsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   user.WalletLedgerOperationsTable,
+			Columns: []string{user.WalletLedgerOperationsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(subscriptionwalletledger.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

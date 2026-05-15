@@ -34,7 +34,8 @@ func (s *emailBindDefaultSubAssignerStub) AssignOrExtendSubscription(
 ) (*service.UserSubscription, bool, error) {
 	cloned := *input
 	s.calls = append(s.calls, &cloned)
-	return &service.UserSubscription{UserID: input.UserID, GroupID: input.GroupID}, false, nil
+	gid := input.GroupID
+	return &service.UserSubscription{UserID: input.UserID, GroupID: &gid}, false, nil
 }
 
 type flakyEmailBindDefaultSubAssignerStub struct {
@@ -819,6 +820,9 @@ func (s *emailBindUserRepoStub) ExistsByEmail(_ context.Context, email string) (
 	_, ok := s.usersByEmail[email]
 	return ok, nil
 }
+
+func (s *emailBindUserRepoStub) BatchSetConcurrency(context.Context, []int64, int) (int, error) { return 0, nil }
+func (s *emailBindUserRepoStub) BatchAddConcurrency(context.Context, []int64, int) (int, error) { return 0, nil }
 
 func (s *emailBindUserRepoStub) RemoveGroupFromAllowedGroups(context.Context, int64) (int64, error) {
 	return 0, nil

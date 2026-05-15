@@ -52,3 +52,12 @@ func TestBillingErrorDetails_UnknownErrorFallsBackTo403(t *testing.T) {
 	require.Equal(t, "billing_error", code)
 	require.NotEmpty(t, msg)
 }
+
+// 钱包模式 (v4) 余额耗尽必须 → 402，前端据此跳「续费」流程。
+func TestBillingErrorDetails_WalletInsufficientMapsTo402(t *testing.T) {
+	status, code, msg, retryAfter := billingErrorDetails(service.ErrWalletInsufficient)
+	require.Equal(t, http.StatusPaymentRequired, status)
+	require.Equal(t, "wallet_insufficient", code)
+	require.NotEmpty(t, msg)
+	require.Equal(t, 0, retryAfter)
+}

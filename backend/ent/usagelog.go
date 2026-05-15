@@ -114,9 +114,11 @@ type UsageLogEdges struct {
 	Group *Group `json:"group,omitempty"`
 	// Subscription holds the value of the subscription edge.
 	Subscription *UserSubscription `json:"subscription,omitempty"`
+	// WalletLedgerEntries holds the value of the wallet_ledger_entries edge.
+	WalletLedgerEntries []*SubscriptionWalletLedger `json:"wallet_ledger_entries,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [5]bool
+	loadedTypes [6]bool
 }
 
 // UserOrErr returns the User value or an error if the edge
@@ -172,6 +174,15 @@ func (e UsageLogEdges) SubscriptionOrErr() (*UserSubscription, error) {
 		return nil, &NotFoundError{label: usersubscription.Label}
 	}
 	return nil, &NotLoadedError{edge: "subscription"}
+}
+
+// WalletLedgerEntriesOrErr returns the WalletLedgerEntries value or an error if the edge
+// was not loaded in eager-loading.
+func (e UsageLogEdges) WalletLedgerEntriesOrErr() ([]*SubscriptionWalletLedger, error) {
+	if e.loadedTypes[5] {
+		return e.WalletLedgerEntries, nil
+	}
+	return nil, &NotLoadedError{edge: "wallet_ledger_entries"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -482,6 +493,11 @@ func (_m *UsageLog) QueryGroup() *GroupQuery {
 // QuerySubscription queries the "subscription" edge of the UsageLog entity.
 func (_m *UsageLog) QuerySubscription() *UserSubscriptionQuery {
 	return NewUsageLogClient(_m.config).QuerySubscription(_m)
+}
+
+// QueryWalletLedgerEntries queries the "wallet_ledger_entries" edge of the UsageLog entity.
+func (_m *UsageLog) QueryWalletLedgerEntries() *SubscriptionWalletLedgerQuery {
+	return NewUsageLogClient(_m.config).QueryWalletLedgerEntries(_m)
 }
 
 // Update returns a builder for updating this UsageLog.

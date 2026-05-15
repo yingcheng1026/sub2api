@@ -87,6 +87,13 @@
           <template #cell-name="{ value, row }">
             <div class="flex items-center gap-1.5">
               <span class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
+              <span
+                v-if="isWalletKeyName(value)"
+                class="inline-flex items-center rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800"
+                :title="t('keys.walletKeyBadgeHint')"
+              >
+                {{ t('keys.walletKeyBadge') }}
+              </span>
               <Icon
                 v-if="row.ip_whitelist?.length > 0 || row.ip_blacklist?.length > 0"
                 name="shield"
@@ -101,9 +108,10 @@
             <div class="group/dropdown relative">
               <button
                 :ref="(el) => setGroupButtonRef(row.id, el)"
-                @click="openGroupSelector(row)"
-                class="-mx-2 -my-1 flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 transition-all duration-200 hover:bg-gray-100 dark:hover:bg-dark-700"
-                :title="t('keys.clickToChangeGroup')"
+                @click="!isRowWalletUniversalKey(row) && openGroupSelector(row)"
+                class="-mx-2 -my-1 flex items-center gap-2 rounded-lg px-2 py-1 transition-all duration-200"
+                :class="isRowWalletUniversalKey(row) ? 'cursor-default' : 'cursor-pointer hover:bg-gray-100 dark:hover:bg-dark-700'"
+                :title="isRowWalletUniversalKey(row) ? t('keys.walletAnyKeyHint') : t('keys.clickToChangeGroup')"
               >
                 <GroupBadge
                   v-if="row.group"
@@ -113,11 +121,18 @@
                   :rate-multiplier="row.group.rate_multiplier"
                   :user-rate-multiplier="userGroupRates[row.group.id]"
                 />
+                <span
+                  v-else-if="isRowWalletUniversalKey(row)"
+                  class="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800"
+                >
+                  {{ t('keys.walletAnyKeyBadge') }}
+                </span>
                 <span v-else class="text-sm text-gray-400 dark:text-dark-500">{{
                   t('keys.noGroup')
                 }}</span>
-                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.selectGroup') }}</span>
+                <span v-if="!isRowWalletUniversalKey(row)" class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.selectGroup') }}</span>
                 <svg
+                  v-if="!isRowWalletUniversalKey(row)"
                   class="h-3.5 w-3.5 text-gray-400 opacity-60 transition-opacity group-hover/dropdown:opacity-100"
                   fill="none"
                   stroke="currentColor"
@@ -406,17 +421,42 @@
 
         <div>
           <label class="input-label">{{ t('keys.groupLabel') }}</label>
+          <label
+            v-if="!showEditModal && hasActiveWalletSubscription"
+            class="mb-3 flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-sm dark:border-emerald-800 dark:bg-emerald-900/20"
+          >
+            <input
+              v-model="formData.wallet_any_key"
+              type="checkbox"
+              class="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 dark:border-dark-600 dark:bg-dark-800"
+            />
+            <span>
+              <span class="block font-medium text-emerald-800 dark:text-emerald-200">
+                {{ t('keys.walletAnyKey') }}
+              </span>
+              <span class="mt-0.5 block text-xs leading-5 text-emerald-700 dark:text-emerald-300">
+                {{ t('keys.walletAnyKeyHint') }}
+              </span>
+            </span>
+          </label>
           <Select
             v-model="formData.group_id"
             :options="groupOptions"
-            :placeholder="t('keys.selectGroup')"
+            :placeholder="formData.wallet_any_key ? t('keys.walletAnyKeySelectPlaceholder') : t('keys.selectGroup')"
+            :disabled="formData.wallet_any_key"
             :searchable="true"
             :search-placeholder="t('keys.searchGroup')"
             data-tour="key-form-group"
           >
             <template #selected="{ option }">
+              <span
+                v-if="formData.wallet_any_key"
+                class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800"
+              >
+                {{ t('keys.walletAnyKeyBadge') }}
+              </span>
               <GroupBadge
-                v-if="option"
+                v-else-if="option"
                 :name="(option as unknown as GroupOption).label"
                 :platform="(option as unknown as GroupOption).platform"
                 :subscription-type="(option as unknown as GroupOption).subscriptionType"
@@ -1045,34 +1085,36 @@
 </template>
 
 <script setup lang="ts">
-	import { ref, computed, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
-	import { useI18n } from 'vue-i18n'
-	import { useAppStore } from '@/stores/app'
-	import { useOnboardingStore } from '@/stores/onboarding'
-	import { useClipboard } from '@/composables/useClipboard'
+import { ref, computed, onMounted, onUnmounted, watch, type ComponentPublicInstance } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useAppStore } from '@/stores/app'
+import { useOnboardingStore } from '@/stores/onboarding'
+import { useClipboard } from '@/composables/useClipboard'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const { t } = useI18n()
 import { keysAPI, authAPI, usageAPI, userGroupsAPI } from '@/api'
+import subscriptionsAPI from '@/api/subscriptions'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
-	import DataTable from '@/components/common/DataTable.vue'
-	import Pagination from '@/components/common/Pagination.vue'
-	import BaseDialog from '@/components/common/BaseDialog.vue'
-	import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
-	import EmptyState from '@/components/common/EmptyState.vue'
-	import Select from '@/components/common/Select.vue'
-	import SearchInput from '@/components/common/SearchInput.vue'
-	import Icon from '@/components/icons/Icon.vue'
-	import UseKeyModal from '@/components/keys/UseKeyModal.vue'
-	import EndpointPopover from '@/components/keys/EndpointPopover.vue'
-	import GroupBadge from '@/components/common/GroupBadge.vue'
-	import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
-	import type { ApiKey, Group, PublicSettings, SubscriptionType, GroupPlatform } from '@/types'
+import DataTable from '@/components/common/DataTable.vue'
+import Pagination from '@/components/common/Pagination.vue'
+import BaseDialog from '@/components/common/BaseDialog.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
+import Select from '@/components/common/Select.vue'
+import SearchInput from '@/components/common/SearchInput.vue'
+import Icon from '@/components/icons/Icon.vue'
+import UseKeyModal from '@/components/keys/UseKeyModal.vue'
+import EndpointPopover from '@/components/keys/EndpointPopover.vue'
+import GroupBadge from '@/components/common/GroupBadge.vue'
+import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
+import type { ApiKey, Group, PublicSettings, SubscriptionType, GroupPlatform, UserSubscription } from '@/types'
 import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
+import { getCreateKeyGroupId, isWalletKeyName, isWalletUniversalKey, shouldRequireGroupForKeySubmit } from '@/utils/walletKeys'
 
 // Helper to format date for datetime-local input
 const formatDateTimeLocal = (isoDate: string): string => {
@@ -1116,6 +1158,9 @@ const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
 const usageStats = ref<Record<string, BatchApiKeyUsageStats>>({})
 const userGroupRates = ref<Record<number, number>>({})
+const activeWalletSubscription = ref<UserSubscription | null>(null)
+const hasActiveWalletSubscription = computed(() => activeWalletSubscription.value !== null)
+const isRowWalletUniversalKey = (key: ApiKey) => isWalletUniversalKey(key, hasActiveWalletSubscription.value)
 
 const pagination = ref({
   page: 1,
@@ -1167,6 +1212,7 @@ const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance 
 const formData = ref({
   name: '',
   group_id: null as number | null,
+  wallet_any_key: false,
   status: 'active' as 'active' | 'inactive',
   use_custom_key: false,
   custom_key: '',
@@ -1184,6 +1230,18 @@ const formData = ref({
   enable_expiration: false,
   expiration_preset: '30' as '7' | '30' | '90' | 'custom',
   expiration_date: ''
+})
+
+watch(() => formData.value.wallet_any_key, (enabled) => {
+  if (enabled) {
+    formData.value.group_id = null
+  }
+})
+
+watch(hasActiveWalletSubscription, (hasWallet) => {
+  if (!hasWallet) {
+    formData.value.wallet_any_key = false
+  }
 })
 
 // 自定义Key验证
@@ -1347,6 +1405,18 @@ const loadUserGroupRates = async () => {
   }
 }
 
+const loadWalletSubscription = async () => {
+  try {
+    const subscriptions = await subscriptionsAPI.getActiveSubscriptions()
+    activeWalletSubscription.value = subscriptions.find((sub) =>
+      sub.status === 'active' && sub.wallet_balance_usd != null
+    ) ?? null
+  } catch (error) {
+    console.error('Failed to load wallet subscription:', error)
+    activeWalletSubscription.value = null
+  }
+}
+
 const loadPublicSettings = async () => {
   try {
     publicSettings.value = await authAPI.getPublicSettings()
@@ -1390,6 +1460,7 @@ const editKey = (key: ApiKey) => {
   formData.value = {
     name: key.name,
     group_id: key.group_id,
+    wallet_any_key: false,
     status: key.status === 'quota_exhausted' || key.status === 'expired' ? 'inactive' : key.status,
     use_custom_key: false,
     custom_key: '',
@@ -1482,8 +1553,13 @@ const confirmDelete = (key: ApiKey) => {
 }
 
 const handleSubmit = async () => {
-  // Validate group_id is required
-  if (formData.value.group_id === null) {
+  const needsGroup = shouldRequireGroupForKeySubmit({
+    isEdit: showEditModal.value,
+    hasActiveWallet: hasActiveWalletSubscription.value,
+    walletAnyKey: formData.value.wallet_any_key,
+    groupId: formData.value.group_id
+  })
+  if (needsGroup) {
     appStore.showError(t('keys.groupRequired'))
     return
   }
@@ -1553,9 +1629,14 @@ const handleSubmit = async () => {
       appStore.showSuccess(t('keys.keyUpdatedSuccess'))
     } else {
       const customKey = formData.value.use_custom_key ? formData.value.custom_key : undefined
+      const createGroupId = getCreateKeyGroupId({
+        hasActiveWallet: hasActiveWalletSubscription.value,
+        walletAnyKey: formData.value.wallet_any_key,
+        groupId: formData.value.group_id
+      })
       await keysAPI.create(
         formData.value.name,
-        formData.value.group_id,
+        createGroupId,
         customKey,
         ipWhitelist,
         ipBlacklist,
@@ -1607,6 +1688,7 @@ const closeModals = () => {
   formData.value = {
     name: '',
     group_id: null,
+    wallet_any_key: false,
     status: 'active',
     use_custom_key: false,
     custom_key: '',
@@ -1804,6 +1886,7 @@ onMounted(() => {
   loadApiKeys()
   loadGroups()
   loadUserGroupRates()
+  loadWalletSubscription()
   loadPublicSettings()
   document.addEventListener('click', closeGroupSelector)
   resetTimer = setInterval(() => { now.value = new Date() }, 60000)

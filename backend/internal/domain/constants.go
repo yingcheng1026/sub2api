@@ -40,6 +40,9 @@ const (
 	RedeemTypeConcurrency  = "concurrency"
 	RedeemTypeSubscription = "subscription"
 	RedeemTypeInvitation   = "invitation"
+	// RedeemTypeWallet 钱包模式额度卡兑换码：兑换时按 plan.WalletQuotaUsd 建 wallet 订阅。
+	// 链动小铺 credits-100 / credits-500 / credits-1500 SKU 走此路径（B2.7）。
+	RedeemTypeWallet = "wallet"
 )
 
 // PromoCode status constants
