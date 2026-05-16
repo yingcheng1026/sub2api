@@ -275,6 +275,33 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 	response.Success(c, systemSettingsResponseData(payload, authSourceDefaults))
 }
 
+// GetAdminUISettings returns the small settings subset used by admin layout.
+// GET /api/v1/admin/settings/admin-ui
+func (h *SettingHandler) GetAdminUISettings(c *gin.Context) {
+	settings, err := h.settingService.GetAllSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	opsEnabled := h.opsService != nil && h.opsService.IsMonitoringEnabled(c.Request.Context())
+
+	var paymentEnabled bool
+	if h.paymentConfigService != nil {
+		if paymentCfg, err := h.paymentConfigService.GetPaymentConfig(c.Request.Context()); err == nil && paymentCfg != nil {
+			paymentEnabled = paymentCfg.Enabled
+		}
+	}
+
+	response.Success(c, dto.AdminUISettings{
+		OpsMonitoringEnabled:         opsEnabled && settings.OpsMonitoringEnabled,
+		OpsRealtimeMonitoringEnabled: settings.OpsRealtimeMonitoringEnabled,
+		OpsQueryModeDefault:          settings.OpsQueryModeDefault,
+		CustomMenuItems:              dto.ParseCustomMenuItems(settings.CustomMenuItems),
+		PaymentEnabled:               paymentEnabled,
+	})
+}
+
 // openaiFastPolicySettingsToDTO converts service -> dto for OpenAI fast policy.
 func openaiFastPolicySettingsToDTO(s *service.OpenAIFastPolicySettings) *dto.OpenAIFastPolicySettings {
 	if s == nil {

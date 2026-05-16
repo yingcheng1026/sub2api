@@ -78,6 +78,8 @@ type Config struct {
 	RateLimit               RateLimitConfig               `mapstructure:"rate_limit"`
 	Pricing                 PricingConfig                 `mapstructure:"pricing"`
 	Gateway                 GatewayConfig                 `mapstructure:"gateway"`
+	Kiro                    KiroConfig                    `mapstructure:"kiro"`
+	Cursor                  CursorConfig                  `mapstructure:"cursor"`
 	APIKeyAuth              APIKeyAuthCacheConfig         `mapstructure:"api_key_auth_cache"`
 	SubscriptionCache       SubscriptionCacheConfig       `mapstructure:"subscription_cache"`
 	SubscriptionMaintenance SubscriptionMaintenanceConfig `mapstructure:"subscription_maintenance"`
@@ -171,6 +173,43 @@ type IdempotencyConfig struct {
 	CleanupIntervalSeconds int `mapstructure:"cleanup_interval_seconds"`
 	// CleanupBatchSize 每次清理的最大记录数。
 	CleanupBatchSize int `mapstructure:"cleanup_batch_size"`
+}
+
+type KiroConfig struct {
+	// Enabled is the global kill switch for the Kiro channel. It defaults to
+	// false so production deploys can carry the code without exposing traffic.
+	Enabled bool `mapstructure:"enabled"`
+	// RouteEnabled controls the dedicated /kiro routes independently from the
+	// global switch. Both flags must be true before Kiro routes are registered.
+	RouteEnabled bool `mapstructure:"route_enabled"`
+	// AutoRouteOnV1 is reserved for a later cutover where /v1 can dispatch a
+	// kiro group automatically. The first rollout keeps it false.
+	AutoRouteOnV1 bool `mapstructure:"auto_route_on_v1"`
+	// SidecarURL points at the local Kiro sidecar once it exists.
+	SidecarURL string `mapstructure:"sidecar_url"`
+	// MaxConcurrency caps sidecar requests when forwarding is implemented.
+	MaxConcurrency int `mapstructure:"max_concurrency"`
+	// RequestTimeoutSeconds is the Kiro sidecar request timeout.
+	RequestTimeoutSeconds int `mapstructure:"request_timeout_seconds"`
+}
+
+type CursorConfig struct {
+	// Enabled is the global kill switch for the Cursor upstream channel.
+	Enabled bool `mapstructure:"enabled"`
+	// RouteEnabled controls the dedicated /cursor routes independently from the
+	// global switch. The first rollout keeps shared /v1 routing disabled.
+	RouteEnabled bool `mapstructure:"route_enabled"`
+	// AutoRouteOnV1 is reserved for a later cutover where /v1 can dispatch a
+	// cursor group automatically. It must stay false for the canary phase.
+	AutoRouteOnV1 bool `mapstructure:"auto_route_on_v1"`
+	// SidecarURL points at the local Cursor sidecar.
+	SidecarURL string `mapstructure:"sidecar_url"`
+	// SidecarAPIKey is an internal-only secret passed from sub2api to the sidecar.
+	SidecarAPIKey string `mapstructure:"sidecar_api_key"`
+	// MaxConcurrency caps sidecar requests.
+	MaxConcurrency int `mapstructure:"max_concurrency"`
+	// RequestTimeoutSeconds is the Cursor sidecar request timeout.
+	RequestTimeoutSeconds int `mapstructure:"request_timeout_seconds"`
 }
 
 type LinuxDoConnectConfig struct {
@@ -1328,6 +1367,9 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	cfg.Log.StacktraceLevel = strings.ToLower(strings.TrimSpace(cfg.Log.StacktraceLevel))
 	cfg.Log.Output.FilePath = strings.TrimSpace(cfg.Log.Output.FilePath)
 	cfg.Gateway.ForcedCodexInstructionsTemplateFile = strings.TrimSpace(cfg.Gateway.ForcedCodexInstructionsTemplateFile)
+	cfg.Kiro.SidecarURL = strings.TrimSpace(cfg.Kiro.SidecarURL)
+	cfg.Cursor.SidecarURL = strings.TrimSpace(cfg.Cursor.SidecarURL)
+	cfg.Cursor.SidecarAPIKey = strings.TrimSpace(cfg.Cursor.SidecarAPIKey)
 	if cfg.Gateway.ForcedCodexInstructionsTemplateFile != "" {
 		content, err := os.ReadFile(cfg.Gateway.ForcedCodexInstructionsTemplateFile)
 		if err != nil {
@@ -1786,6 +1828,20 @@ func setDefaults() {
 	viper.SetDefault("gateway.tls_fingerprint.enabled", true)
 	viper.SetDefault("concurrency.ping_interval", 10)
 
+	viper.SetDefault("kiro.enabled", false)
+	viper.SetDefault("kiro.route_enabled", false)
+	viper.SetDefault("kiro.auto_route_on_v1", false)
+	viper.SetDefault("kiro.sidecar_url", "")
+	viper.SetDefault("kiro.max_concurrency", 1)
+	viper.SetDefault("kiro.request_timeout_seconds", 90)
+	viper.SetDefault("cursor.enabled", false)
+	viper.SetDefault("cursor.route_enabled", false)
+	viper.SetDefault("cursor.auto_route_on_v1", false)
+	viper.SetDefault("cursor.sidecar_url", "")
+	viper.SetDefault("cursor.sidecar_api_key", "")
+	viper.SetDefault("cursor.max_concurrency", 1)
+	viper.SetDefault("cursor.request_timeout_seconds", 90)
+
 	// TokenRefresh
 	viper.SetDefault("token_refresh.enabled", true)
 	viper.SetDefault("token_refresh.check_interval_minutes", 5)        // 每5分钟检查一次
@@ -1879,6 +1935,52 @@ func (c *Config) Validate() error {
 	geminiClientSecret := strings.TrimSpace(c.Gemini.OAuth.ClientSecret)
 	if (geminiClientID == "") != (geminiClientSecret == "") {
 		return fmt.Errorf("gemini.oauth.client_id and gemini.oauth.client_secret must be both set or both empty")
+	}
+	if c.Kiro.Enabled || c.Kiro.RouteEnabled || c.Kiro.AutoRouteOnV1 {
+		if c.Kiro.MaxConcurrency <= 0 {
+			return fmt.Errorf("kiro.max_concurrency must be positive")
+		}
+		if c.Kiro.RequestTimeoutSeconds <= 0 {
+			return fmt.Errorf("kiro.request_timeout_seconds must be positive")
+		}
+		if strings.TrimSpace(c.Kiro.SidecarURL) != "" {
+			if err := ValidateAbsoluteHTTPURL(c.Kiro.SidecarURL); err != nil {
+				return fmt.Errorf("kiro.sidecar_url invalid: %w", err)
+			}
+			u, err := url.Parse(strings.TrimSpace(c.Kiro.SidecarURL))
+			if err != nil {
+				return fmt.Errorf("kiro.sidecar_url invalid: %w", err)
+			}
+			if u.RawQuery != "" || u.ForceQuery {
+				return fmt.Errorf("kiro.sidecar_url invalid: must not include query")
+			}
+			if u.User != nil {
+				return fmt.Errorf("kiro.sidecar_url invalid: must not include userinfo")
+			}
+		}
+	}
+	if c.Cursor.Enabled || c.Cursor.RouteEnabled || c.Cursor.AutoRouteOnV1 {
+		if c.Cursor.MaxConcurrency <= 0 {
+			return fmt.Errorf("cursor.max_concurrency must be positive")
+		}
+		if c.Cursor.RequestTimeoutSeconds <= 0 {
+			return fmt.Errorf("cursor.request_timeout_seconds must be positive")
+		}
+		if strings.TrimSpace(c.Cursor.SidecarURL) != "" {
+			if err := ValidateAbsoluteHTTPURL(c.Cursor.SidecarURL); err != nil {
+				return fmt.Errorf("cursor.sidecar_url invalid: %w", err)
+			}
+			u, err := url.Parse(strings.TrimSpace(c.Cursor.SidecarURL))
+			if err != nil {
+				return fmt.Errorf("cursor.sidecar_url invalid: %w", err)
+			}
+			if u.RawQuery != "" || u.ForceQuery {
+				return fmt.Errorf("cursor.sidecar_url invalid: must not include query")
+			}
+			if u.User != nil {
+				return fmt.Errorf("cursor.sidecar_url invalid: must not include userinfo")
+			}
+		}
 	}
 
 	if strings.TrimSpace(c.Server.FrontendURL) != "" {

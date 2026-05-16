@@ -574,6 +574,31 @@ Antigravity accounts support optional **hybrid scheduling**. When enabled, the g
 
 In Claude Code, Plan Mode cannot exit automatically. (Normally when using the native Claude API, after planning is complete, Claude Code will pop up options for users to approve or reject the plan.)
 
+---
+
+## Kiro Support
+
+Kiro is exposed as a Claude-compatible upstream platform. Add upstream Kiro accounts as `platform=kiro`, `type=apikey`; they may be assigned either to Kiro groups for dedicated `/kiro/v1` canaries or to Anthropic/Claude groups when you want them to participate in the normal `/v1/messages` Claude pool.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/kiro/v1/models` | Kiro model list through the sidecar |
+| `/kiro/v1/messages` | Claude-style messages |
+| `/kiro/v1/chat/completions` | OpenAI chat completions |
+| `/kiro/v1/responses` | OpenAI responses |
+
+Kiro is disabled by default. Enable it with:
+
+```yaml
+kiro:
+  enabled: true
+  route_enabled: true
+  auto_route_on_v1: false
+  sidecar_url: "http://127.0.0.1:8787"
+```
+
+See [`docs/KIRO_CHANNEL.md`](docs/KIRO_CHANNEL.md) and [`tools/kiro-sidecar`](tools/kiro-sidecar) for the sidecar contract and local smoke test.
+
 **Workaround**: Press `Shift + Tab` to manually exit Plan Mode, then type your response to approve or reject the plan.
 
 ---

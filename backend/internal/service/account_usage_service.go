@@ -302,7 +302,7 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64) (*U
 	}
 
 	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
-		usage, err := s.getOpenAIUsage(ctx, account)
+		usage, err := s.getOpenAIUsage(ctx, account, true)
 		if err == nil {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
@@ -417,16 +417,38 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64) (*U
 	return nil, fmt.Errorf("account type %s does not support usage query", account.Type)
 }
 
-// GetPassiveUsage 从 Account.Extra 中的被动采样数据构建 UsageInfo，不调用外部 API。
-// 仅适用于 Anthropic OAuth / SetupToken 账号。
+// GetPassiveUsage 使用本地快照、日志或短期缓存构建 UsageInfo，不调用外部 API。
+// 后台账号列表默认使用该路径，避免首屏渲染并发探测上游额度接口。
 func (s *AccountUsageService) GetPassiveUsage(ctx context.Context, accountID int64) (*UsageInfo, error) {
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("get account failed: %w", err)
 	}
 
+	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+		info, err := s.getOpenAIUsage(ctx, account, false)
+		if err != nil {
+			return nil, err
+		}
+		info.Source = "passive"
+		return info, nil
+	}
+
+	if account.Platform == PlatformGemini {
+		info, err := s.getGeminiUsage(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		info.Source = "passive"
+		return info, nil
+	}
+
+	if account.Platform == PlatformAntigravity {
+		return s.getAntigravityPassiveUsage(account), nil
+	}
+
 	if !account.IsAnthropicOAuthOrSetupToken() {
-		return nil, fmt.Errorf("passive usage only supported for Anthropic OAuth/SetupToken accounts")
+		return nil, fmt.Errorf("passive usage only supported for Anthropic OAuth/SetupToken, OpenAI OAuth, Gemini, and Antigravity accounts")
 	}
 
 	// 复用 estimateSetupTokenUsage 构建 5h 窗口（OAuth 和 SetupToken 逻辑一致）
@@ -492,7 +514,7 @@ func (s *AccountUsageService) syncActiveToPassive(ctx context.Context, accountID
 	}
 }
 
-func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
+func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Account, allowProbe bool) (*UsageInfo, error) {
 	now := time.Now()
 	usage := &UsageInfo{UpdatedAt: &now}
 
@@ -507,7 +529,7 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 		usage.SevenDay = progress
 	}
 
-	if shouldRefreshOpenAICodexSnapshot(account, usage, now) && s.shouldProbeOpenAICodexSnapshot(account.ID, now) {
+	if allowProbe && shouldRefreshOpenAICodexSnapshot(account, usage, now) && s.shouldProbeOpenAICodexSnapshot(account.ID, now) {
 		if updates, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil && len(updates) > 0 {
 			mergeAccountExtra(account, updates)
 			if usage.UpdatedAt == nil {
@@ -541,6 +563,67 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 
 	return usage, nil
+}
+
+func (s *AccountUsageService) getAntigravityPassiveUsage(account *Account) *UsageInfo {
+	if account == nil {
+		now := time.Now()
+		return &UsageInfo{Source: "passive", UpdatedAt: &now}
+	}
+
+	if s != nil && s.cache != nil {
+		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
+			if cache, ok := cached.(*antigravityUsageCache); ok {
+				ttl := antigravityCacheTTL(cache.usageInfo)
+				if time.Since(cache.timestamp) < ttl {
+					usage := cloneUsageInfo(cache.usageInfo)
+					if usage != nil {
+						recalcAntigravityRemainingSeconds(usage)
+						usage.Source = "passive"
+						enrichUsageWithAccountError(usage, account)
+						return usage
+					}
+				}
+			}
+		}
+	}
+
+	now := time.Now()
+	usage := &UsageInfo{Source: "passive", UpdatedAt: &now}
+	enrichUsageWithAccountError(usage, account)
+	return usage
+}
+
+func cloneUsageInfo(info *UsageInfo) *UsageInfo {
+	if info == nil {
+		return nil
+	}
+	cloned := *info
+	cloned.FiveHour = cloneUsageProgress(info.FiveHour)
+	cloned.SevenDay = cloneUsageProgress(info.SevenDay)
+	cloned.SevenDaySonnet = cloneUsageProgress(info.SevenDaySonnet)
+	cloned.GeminiSharedDaily = cloneUsageProgress(info.GeminiSharedDaily)
+	cloned.GeminiProDaily = cloneUsageProgress(info.GeminiProDaily)
+	cloned.GeminiFlashDaily = cloneUsageProgress(info.GeminiFlashDaily)
+	cloned.GeminiSharedMinute = cloneUsageProgress(info.GeminiSharedMinute)
+	cloned.GeminiProMinute = cloneUsageProgress(info.GeminiProMinute)
+	cloned.GeminiFlashMinute = cloneUsageProgress(info.GeminiFlashMinute)
+	if info.AICredits != nil {
+		cloned.AICredits = append([]AICredit(nil), info.AICredits...)
+	}
+	return &cloned
+}
+
+func cloneUsageProgress(progress *UsageProgress) *UsageProgress {
+	if progress == nil {
+		return nil
+	}
+	cloned := *progress
+	if progress.WindowStats != nil {
+		windowStats := *progress.WindowStats
+		cloned.WindowStats = &windowStats
+	}
+	return &cloned
 }
 
 func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now time.Time) bool {

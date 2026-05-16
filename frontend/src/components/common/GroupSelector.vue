@@ -96,6 +96,9 @@ const filteredGroups = computed(() => {
       result = result.filter(
         (g) => g.platform === 'antigravity' || g.platform === 'anthropic' || g.platform === 'gemini'
       )
+    } else if (props.platform === 'kiro') {
+      // Kiro outputs Claude-compatible models, so it can be grouped with Anthropic.
+      result = result.filter((g) => g.platform === 'kiro' || g.platform === 'anthropic')
     } else {
       // 默认：只能选择同 platform 的分组
       result = result.filter((g) => g.platform === props.platform)

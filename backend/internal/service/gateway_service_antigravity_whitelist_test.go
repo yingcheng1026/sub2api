@@ -68,6 +68,26 @@ func TestGatewayService_isModelSupportedByAccount_AntigravityNoMapping(t *testin
 	require.False(t, svc.isModelSupportedByAccount(account, "gpt-4"))
 }
 
+func TestGatewayService_isModelSupportedByAccount_KiroClaudeAliasNormalization(t *testing.T) {
+	svc := &GatewayService{}
+
+	account := &Account{
+		Platform: PlatformKiro,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"claude-opus-4-7":           "claude-opus-4-7",
+				"claude-sonnet-4-6":         "claude-sonnet-4-6",
+				"claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+			},
+		},
+	}
+
+	require.True(t, svc.isModelSupportedByAccount(account, "claude-opus-4-7"))
+	require.True(t, svc.isModelSupportedByAccount(account, "claude-sonnet-4-6"))
+	require.True(t, svc.isModelSupportedByAccount(account, "claude-haiku-4-5"))
+	require.False(t, svc.isModelSupportedByAccount(account, "claude-sonnet-4-5-20250929"))
+}
+
 // TestGatewayService_isModelSupportedByAccountWithContext_ThinkingMode 测试 thinking 模式下的模型支持检查
 // 验证调度时使用映射后的最终模型名（包括 thinking 后缀）来检查 model_mapping 支持
 func TestGatewayService_isModelSupportedByAccountWithContext_ThinkingMode(t *testing.T) {

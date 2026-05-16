@@ -612,6 +612,20 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
+	contextRisk := analyzeOpenAIMessagesContextRisk(body)
+	longContextGuardrailInjected := false
+	if service.NewClaudeCodeValidator().ValidateUserAgent(c.GetHeader("User-Agent")) {
+		guardedBody, injected, guardErr := applyOpenAIMessagesContextGuardrail(body, contextRisk)
+		if guardErr != nil {
+			reqLog.Warn("openai_messages.long_context_guardrail_skipped", zap.Error(guardErr))
+		} else if injected {
+			body = guardedBody
+			longContextGuardrailInjected = true
+			c.Header("X-HFC-Long-Context-Guardrail", "file-navigation")
+			reqLog.Info("openai_messages.long_context_guardrail_injected", contextRisk.zapFields(0, true)...)
+		}
+	}
+
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
@@ -691,6 +705,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			false,
 		)
 		if err != nil {
+			if isClientCanceledAccountSelectError(c, err) {
+				reqLog.Info("openai_messages.account_select_aborted_client_canceled", zap.Error(err))
+				return
+			}
 			reqLog.Warn("openai_messages.account_select_failed",
 				zap.Error(err),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
@@ -710,6 +728,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if isClientCanceledAccountSelectError(c, nil) {
+				reqLog.Info("openai_messages.account_select_empty_client_canceled")
+				return
+			}
 			h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 			return
 		}
@@ -810,6 +832,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, nil)
 		}
 
+		promptTotalTokens := result.Usage.InputTokens + result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
+		if contextRisk.shouldLog(promptTotalTokens, longContextGuardrailInjected) {
+			reqLog.Warn("openai_messages.long_context_file_navigation_risk", contextRisk.zapFields(promptTotalTokens, longContextGuardrailInjected)...)
+		}
+
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
 		requestPayloadHash := service.HashUsageRequestPayload(body)
@@ -896,6 +923,16 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 		return
 	}
 	h.anthropicErrorResponse(c, status, errType, message)
+}
+
+func isClientCanceledAccountSelectError(c *gin.Context, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if c == nil || c.Request == nil {
+		return false
+	}
+	return c.Request.Context().Err() != nil
 }
 
 // handleAnthropicFailoverExhausted maps upstream failover errors to Anthropic format.

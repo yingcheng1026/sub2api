@@ -57,10 +57,7 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
 
     loading.value = true
     try {
-      const [settings, paymentConfigResp] = await Promise.all([
-        adminAPI.settings.getSettings(),
-        adminAPI.payment.getConfig()
-      ])
+      const settings = await adminAPI.settings.getAdminUISettings()
       opsMonitoringEnabled.value = settings.ops_monitoring_enabled ?? true
       writeCachedBool('ops_monitoring_enabled_cached', opsMonitoringEnabled.value)
 
@@ -72,7 +69,7 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
 
       customMenuItems.value = Array.isArray(settings.custom_menu_items) ? settings.custom_menu_items : []
 
-      paymentEnabled.value = paymentConfigResp.data?.enabled ?? false
+      paymentEnabled.value = settings.payment_enabled ?? false
       writeCachedBool('payment_enabled_cached', paymentEnabled.value)
 
       loaded.value = true

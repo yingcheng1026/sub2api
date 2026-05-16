@@ -1651,7 +1651,7 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 		return
 	}
 
-	source := c.DefaultQuery("source", "active")
+	source := normalizeAccountUsageSource(c.Query("source"))
 
 	var usage *service.UsageInfo
 	if source == "passive" {
@@ -1665,6 +1665,13 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 	}
 
 	response.Success(c, usage)
+}
+
+func normalizeAccountUsageSource(source string) string {
+	if source == "active" {
+		return "active"
+	}
+	return "passive"
 }
 
 // ClearRateLimit handles clearing account rate limit status
@@ -1950,6 +1957,28 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	if account.Platform == service.PlatformAntigravity {
 		// 直接复用 antigravity.DefaultModels()，与 /v1/models 端点保持同步
 		response.Success(c, antigravity.DefaultModels())
+		return
+	}
+
+	// Handle Kiro accounts: expose Claude-compatible model IDs to downstream users.
+	if account.Platform == service.PlatformKiro {
+		response.Success(c, claude.LatestClaudeCodeModels)
+		return
+	}
+
+	// Handle Cursor accounts: expose Cursor sidecar model IDs, not Claude IDs.
+	if account.Platform == service.PlatformCursor {
+		if h.accountTestService != nil {
+			models, err := h.accountTestService.ListCursorSidecarModels(c.Request.Context())
+			if err == nil && len(models) > 0 {
+				response.Success(c, models)
+				return
+			}
+			if err != nil {
+				slog.Warn("admin.accounts.cursor_models_sidecar_failed", "account_id", account.ID, "error", err)
+			}
+		}
+		response.Success(c, service.DefaultCursorModels)
 		return
 	}
 

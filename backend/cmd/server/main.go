@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -38,6 +39,8 @@ var (
 	Date      = "unknown"
 	BuildType = "source" // "source" for manual builds, "release" for CI builds (set by ldflags)
 )
+
+const defaultServerShutdownTimeout = 30 * time.Minute
 
 func init() {
 	// 如果 Version 已通过 ldflags 注入（例如 -X main.Version=...），则不要覆盖。
@@ -167,7 +170,10 @@ func runMainServer() {
 
 	log.Println("Shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownTimeout := serverShutdownTimeout()
+	log.Printf("Waiting up to %s for in-flight requests to finish", shutdownTimeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	if err := app.Server.Shutdown(ctx); err != nil {
@@ -175,4 +181,19 @@ func runMainServer() {
 	}
 
 	log.Println("Server exited")
+}
+
+func serverShutdownTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("SERVER_SHUTDOWN_TIMEOUT_SECONDS"))
+	if raw == "" {
+		return defaultServerShutdownTimeout
+	}
+
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		log.Printf("Invalid SERVER_SHUTDOWN_TIMEOUT_SECONDS=%q; using default %s", raw, defaultServerShutdownTimeout)
+		return defaultServerShutdownTimeout
+	}
+
+	return time.Duration(seconds) * time.Second
 }

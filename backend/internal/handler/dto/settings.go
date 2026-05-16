@@ -23,6 +23,15 @@ type CustomEndpoint struct {
 	Description string `json:"description"`
 }
 
+// AdminUISettings is the lightweight payload needed by shared admin chrome.
+type AdminUISettings struct {
+	OpsMonitoringEnabled         bool             `json:"ops_monitoring_enabled"`
+	OpsRealtimeMonitoringEnabled bool             `json:"ops_realtime_monitoring_enabled"`
+	OpsQueryModeDefault          string           `json:"ops_query_mode_default"`
+	CustomMenuItems              []CustomMenuItem `json:"custom_menu_items"`
+	PaymentEnabled               bool             `json:"payment_enabled"`
+}
+
 // SystemSettings represents the admin settings API response payload.
 type SystemSettings struct {
 	RegistrationEnabled              bool                     `json:"registration_enabled"`

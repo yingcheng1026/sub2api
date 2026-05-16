@@ -83,6 +83,32 @@ func (g *Group) IsSubscriptionType() bool {
 	return g.SubscriptionType == SubscriptionTypeSubscription
 }
 
+// EffectiveBillingContext 决定计费 mode 和真正用来检查 limits / 记录 usage 的 group。
+//
+// 三种情况(2026-05-17 follow-up,见 docs/plans/2026-05-16-wallet-v4-group-switch-billing-fix.md):
+//   - subscription == nil:落到 balance 模式(老余额用户兼容)
+//   - subscription 是钱包(IsWalletMode):走钱包扣费,group 不参与 limits 检查
+//   - subscription 是月卡:用户在 admin 切了 key.group_id 到 plan_groups 链内任一 group →
+//     billing limits 用 sub 的主 group(sub.Group)而不是被调用的 group,这样 usage tracking
+//     不分散到多个 standard group 的 cache key,而是统一聚到 sub 主 group quota。
+//
+// 返回:
+//   - isSubscriptionBilling: 是否走订阅模式(true 跳过 user.Balance fallback)
+//   - effectiveGroup:        用来 checkSubscriptionEligibility / RecordUsage 的 group;
+//     钱包模式返回 calledGroup(钱包检查不依赖 group 限额);月卡模式返回 sub.Group(若存在)
+func EffectiveBillingContext(calledGroup *Group, subscription *UserSubscription) (isSubscriptionBilling bool, effectiveGroup *Group) {
+	if subscription == nil {
+		return false, calledGroup
+	}
+	if subscription.IsWalletMode() {
+		return true, calledGroup
+	}
+	if subscription.Group != nil {
+		return true, subscription.Group
+	}
+	return true, calledGroup
+}
+
 func (g *Group) HasDailyLimit() bool {
 	return g.DailyLimitUSD != nil && *g.DailyLimitUSD > 0
 }

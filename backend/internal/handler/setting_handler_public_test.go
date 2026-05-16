@@ -82,6 +82,59 @@ func TestSettingHandler_GetPublicSettings_ExposesForceEmailOnThirdPartySignup(t 
 	require.True(t, resp.Data.ForceEmailOnThirdPartySignup)
 }
 
+func TestSettingHandler_GetPublicSettings_RewritesDataLogoToAssetURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &settingHandlerPublicRepoStub{
+		values: map[string]string{
+			service.SettingKeySiteLogo: "data:image/png;base64,aGVsbG8=",
+		},
+	}
+	h := NewSettingHandler(service.NewSettingService(repo, &config.Config{}), "test-version")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+
+	h.GetPublicSettings(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			SiteLogo string `json:"site_logo"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.Code)
+	require.Equal(t, service.PublicSiteLogoAssetPath, resp.Data.SiteLogo)
+	require.NotContains(t, recorder.Body.String(), "aGVsbG8=")
+}
+
+func TestSettingHandler_GetPublicSiteLogo_ServesConfiguredDataImage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &settingHandlerPublicRepoStub{
+		values: map[string]string{
+			service.SettingKeySiteLogo: "data:image/png;base64,aGVsbG8=",
+		},
+	}
+	h := NewSettingHandler(service.NewSettingService(repo, &config.Config{}), "test-version")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, service.PublicSiteLogoAssetPath, nil)
+
+	h.GetPublicSiteLogo(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "image/png", recorder.Header().Get("Content-Type"))
+	require.Contains(t, recorder.Header().Get("Cache-Control"), "max-age=86400")
+	require.NotEmpty(t, recorder.Header().Get("ETag"))
+	require.Equal(t, []byte("hello"), recorder.Body.Bytes())
+}
+
 func TestSettingHandler_GetPublicSettings_ExposesWeChatOAuthModeCapabilities(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewSettingHandler(service.NewSettingService(&settingHandlerPublicRepoStub{

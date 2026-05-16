@@ -70,7 +70,7 @@
       <!-- Platform Selection - Segmented Control Style -->
       <div>
         <label class="input-label">{{ t('admin.accounts.platform') }}</label>
-        <div class="mt-2 flex rounded-lg bg-gray-100 p-1 dark:bg-dark-700" data-tour="account-form-platform">
+        <div class="mt-2 grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-dark-700 sm:grid-cols-3 lg:grid-cols-6" data-tour="account-form-platform">
           <button
             type="button"
             @click="form.platform = 'anthropic'"
@@ -146,6 +146,32 @@
           >
             <Icon name="cloud" size="sm" />
             Antigravity
+          </button>
+          <button
+            type="button"
+            @click="form.platform = 'kiro'"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'kiro'
+                ? 'bg-white text-cyan-600 shadow-sm dark:bg-dark-600 dark:text-cyan-300'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <Icon name="terminal" size="sm" />
+            Kiro
+          </button>
+          <button
+            type="button"
+            @click="form.platform = 'cursor'"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'cursor'
+                ? 'bg-white text-zinc-700 shadow-sm dark:bg-dark-600 dark:text-zinc-200'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <Icon name="terminal" size="sm" />
+            Cursor
           </button>
         </div>
       </div>
@@ -716,6 +742,70 @@
         </div>
       </div>
 
+      <!-- Account Type Selection (Kiro) -->
+      <div v-if="form.platform === 'kiro'">
+        <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
+        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" data-tour="account-form-type">
+          <button
+            type="button"
+            @click="accountCategory = 'apikey'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              accountCategory === 'apikey'
+                ? 'border-cyan-500 bg-cyan-50 dark:bg-cyan-900/20'
+                : 'border-gray-200 hover:border-cyan-300 dark:border-dark-600 dark:hover:border-cyan-700'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                accountCategory === 'apikey'
+                  ? 'bg-cyan-600 text-white'
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon name="terminal" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Kiro API Key</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">Sidecar / API Key</span>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <!-- Account Type Selection (Cursor) -->
+      <div v-if="form.platform === 'cursor'">
+        <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
+        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" data-tour="account-form-type">
+          <button
+            type="button"
+            @click="accountCategory = 'apikey'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              accountCategory === 'apikey'
+                ? 'border-zinc-500 bg-zinc-50 dark:bg-zinc-900/30'
+                : 'border-gray-200 hover:border-zinc-300 dark:border-dark-600 dark:hover:border-zinc-700'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                accountCategory === 'apikey'
+                  ? 'bg-zinc-800 text-white dark:bg-zinc-700'
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon name="terminal" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Cursor Upstream</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">Dedicated sidecar</span>
+            </div>
+          </button>
+        </div>
+      </div>
+
       <!-- Account Type Selection (Antigravity - OAuth or Upstream) -->
       <div v-if="form.platform === 'antigravity'">
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
@@ -1008,6 +1098,120 @@
         </div>
       </div>
 
+      <!-- Cursor sidecar account provisioning -->
+      <div v-if="form.platform === 'cursor'" class="space-y-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label class="input-label">Cursor Email</label>
+            <input
+              v-model="cursorEmail"
+              type="email"
+              required
+              class="input"
+              placeholder="name@example.com"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Token Expires At</label>
+            <input
+              v-model="cursorTokenExpiresAt"
+              type="text"
+              class="input font-mono"
+              placeholder="2026-05-15T12:00:00Z"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+        <div>
+          <label class="input-label">Cursor Access Token</label>
+          <textarea
+            v-model="cursorAccessToken"
+            required
+            rows="3"
+            class="input font-mono"
+            placeholder="access token"
+            autocomplete="off"
+          />
+        </div>
+        <div>
+          <label class="input-label">Cursor Refresh Token</label>
+          <textarea
+            v-model="cursorRefreshToken"
+            required
+            rows="3"
+            class="input font-mono"
+            placeholder="refresh token"
+            autocomplete="off"
+          />
+        </div>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label class="input-label">Service Machine ID</label>
+            <input
+              v-model="cursorServiceMachineId"
+              type="text"
+              class="input font-mono"
+              placeholder="machine id"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Account UUID</label>
+            <input
+              v-model="cursorAccountUuid"
+              type="text"
+              class="input font-mono"
+              placeholder="optional"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Client Version</label>
+            <input
+              v-model="cursorClientVersion"
+              type="text"
+              class="input font-mono"
+              placeholder="3.3.30"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Config Version</label>
+            <input
+              v-model="cursorConfigVersion"
+              type="text"
+              class="input font-mono"
+              placeholder="optional"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Client ID</label>
+            <input
+              v-model="cursorClientId"
+              type="text"
+              class="input font-mono"
+              placeholder="optional"
+              autocomplete="off"
+            />
+          </div>
+          <div>
+            <label class="input-label">Membership</label>
+            <input
+              v-model="cursorMembershipType"
+              type="text"
+              class="input"
+              placeholder="pro"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+        <p class="input-hint">
+          凭据只写入 Cursor sidecar；主服务只保存返回的 sidecar account ref。
+        </p>
+      </div>
+
       <!-- API Key input (only for apikey type, excluding Antigravity which has its own fields) -->
       <div v-if="form.type === 'apikey' && form.platform !== 'antigravity'" class="space-y-4">
         <div>
@@ -1021,7 +1225,9 @@
                 ? 'https://api.openai.com'
                 : form.platform === 'gemini'
                   ? 'https://generativelanguage.googleapis.com'
-                  : 'https://api.anthropic.com'
+                  : form.platform === 'kiro'
+                    ? 'http://127.0.0.1:8787'
+                    : 'https://api.anthropic.com'
             "
           />
           <p class="input-hint">{{ baseUrlHint }}</p>
@@ -1038,10 +1244,44 @@
                 ? 'sk-proj-...'
                 : form.platform === 'gemini'
                   ? 'AIza...'
-                  : 'sk-ant-...'
+                  : form.platform === 'kiro'
+                    ? 'json:{...}'
+                    : 'sk-ant-...'
             "
           />
           <p class="input-hint">{{ apiKeyHint }}</p>
+          <div
+            v-if="form.platform === 'kiro'"
+            class="mt-3 rounded-lg border border-cyan-200 bg-cyan-50/80 p-3 text-xs text-cyan-950 dark:border-cyan-800/60 dark:bg-cyan-950/30 dark:text-cyan-100"
+          >
+            <div class="flex items-start gap-2">
+              <Icon name="terminal" size="sm" class="mt-0.5 shrink-0 text-cyan-600 dark:text-cyan-300" />
+              <div class="min-w-0 flex-1 space-y-3">
+                <div>
+                  <p class="font-medium">Kiro 凭据获取方式</p>
+                  <p class="mt-1 text-cyan-800 dark:text-cyan-200/80">
+                    先在 Kiro 客户端登录账号，然后在终端运行对应命令；命令执行后会自动把
+                    <span class="font-mono">json:{...}</span>
+                    写入粘贴板，再直接粘贴到上面的 API Key 输入框。Base URL 保持默认即可。
+                  </p>
+                </div>
+
+                <div>
+                  <p class="mb-1 font-medium">macOS Terminal</p>
+                  <pre class="overflow-x-auto rounded-md bg-white p-2 font-mono text-[11px] leading-relaxed text-gray-800 ring-1 ring-cyan-100 dark:bg-dark-800 dark:text-gray-100 dark:ring-cyan-900/60"><code>{{ kiroMacCredentialCommand }}</code></pre>
+                </div>
+
+                <div>
+                  <p class="mb-1 font-medium">Windows PowerShell</p>
+                  <pre class="overflow-x-auto rounded-md bg-white p-2 font-mono text-[11px] leading-relaxed text-gray-800 ring-1 ring-cyan-100 dark:bg-dark-800 dark:text-gray-100 dark:ring-cyan-900/60"><code>{{ kiroWindowsCredentialCommand }}</code></pre>
+                </div>
+
+                <p class="text-cyan-800 dark:text-cyan-200/80">
+                  粘贴板里的内容就是上游 Kiro 账号凭据，请只粘贴到这里，不要发到聊天或工单里。
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Gemini API Key tier selection -->
@@ -3119,6 +3359,7 @@ import type {
   AccountType,
   CheckMixedChannelResponse,
   CreateAccountRequest,
+  ProvisionCursorAccountRequest,
   OpenAICompactMode
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -3170,14 +3411,22 @@ const oauthStepTitle = computed(() => {
 const baseUrlHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
+  if (form.platform === 'kiro') return '生产转发使用后端 kiro.sidecar_url；这里保持默认本地 sidecar 地址即可。'
+  if (form.platform === 'cursor') return '生产转发使用后端 cursor.sidecar_url；账号里只保存 sidecar account ref。'
   return t('admin.accounts.baseUrlHint')
 })
 
 const apiKeyHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.apiKeyHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.apiKeyHint')
+  if (form.platform === 'kiro') return '粘贴通过下方终端命令复制到剪贴板的 json:{...} Kiro 上游凭据。'
+  if (form.platform === 'cursor') return '填写 Cursor sidecar 中配置好的账号引用，不填写真实 Cursor token。'
   return t('admin.accounts.apiKeyHint')
 })
+
+const kiroMacCredentialCommand = `python3 -c 'import json,os; d=json.load(open(os.path.expanduser("~/.aws/sso/cache/kiro-auth-token.json"))); print("json:"+json.dumps({"authType":"desktop","refreshToken":d["refreshToken"],"region":"us-east-1","profileArn":d.get("profileArn","")},separators=(",",":")))' | pbcopy`
+
+const kiroWindowsCredentialCommand = `$p="$env:USERPROFILE\\.aws\\sso\\cache\\kiro-auth-token.json"; $t=Get-Content $p -Raw | ConvertFrom-Json; $profileArn=if ($t.profileArn) { $t.profileArn } else { "" }; ("json:" + (@{authType="desktop"; refreshToken=$t.refreshToken; region="us-east-1"; profileArn=$profileArn} | ConvertTo-Json -Compress)) | Set-Clipboard`
 
 interface Props {
   show: boolean
@@ -3288,17 +3537,21 @@ const {
   writeToExtra: writeQuotaNotifyToExtra,
 } = useQuotaNotifyState()
 
-// Load global feature states once
-adminAPI.settings.getWebSearchEmulationConfig().then(cfg => {
-  webSearchGlobalEnabled.value = cfg?.enabled === true && (cfg?.providers?.length ?? 0) > 0
-}).catch(() => { webSearchGlobalEnabled.value = false })
-
-loadQuotaNotifyGlobal()
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
 const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigravity: oauth or upstream
 const upstreamBaseUrl = ref('') // For upstream type: base URL
 const upstreamApiKey = ref('') // For upstream type: API key
+const cursorEmail = ref('')
+const cursorAccessToken = ref('')
+const cursorRefreshToken = ref('')
+const cursorTokenExpiresAt = ref('')
+const cursorServiceMachineId = ref('')
+const cursorAccountUuid = ref('')
+const cursorClientVersion = ref('3.3.30')
+const cursorConfigVersion = ref('')
+const cursorClientId = ref('')
+const cursorMembershipType = ref('')
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
@@ -3498,6 +3751,9 @@ const form = reactive({
 
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {
+  if (form.platform === 'kiro' || form.platform === 'cursor') {
+    return false
+  }
   // Antigravity upstream 类型不需要 OAuth 流程
   if (form.platform === 'antigravity' && antigravityAccountType.value === 'upstream') {
     return false
@@ -3543,6 +3799,12 @@ watch(
       adminAPI.tlsFingerprintProfiles.list()
         .then(profiles => { tlsFingerprintProfiles.value = profiles.map(p => ({ id: p.id, name: p.name })) })
         .catch(() => { tlsFingerprintProfiles.value = [] })
+      adminAPI.settings.getWebSearchEmulationConfig()
+        .then(cfg => {
+          webSearchGlobalEnabled.value = cfg?.enabled === true && (cfg?.providers?.length ?? 0) > 0
+        })
+        .catch(() => { webSearchGlobalEnabled.value = false })
+      loadQuotaNotifyGlobal()
       // Modal opened - fill related models
       allowedModels.value = [...getModelsByPlatform(form.platform)]
       // Antigravity: 默认使用映射模式并填充默认映射
@@ -3567,6 +3829,14 @@ watch(
 watch(
   [accountCategory, addMethod, antigravityAccountType, () => form.platform],
   ([category, method, agType]) => {
+    if (form.platform === 'kiro') {
+      form.type = 'apikey'
+      return
+    }
+    if (form.platform === 'cursor') {
+      form.type = 'upstream'
+      return
+    }
     // Antigravity upstream 类型（实际创建为 apikey）
     if (form.platform === 'antigravity' && agType === 'upstream') {
       form.type = 'apikey'
@@ -3594,11 +3864,15 @@ watch(
   (newPlatform) => {
     // Reset base URL based on platform
     apiKeyBaseUrl.value =
-      (newPlatform === 'openai')
+      newPlatform === 'openai'
         ? 'https://api.openai.com'
         : newPlatform === 'gemini'
           ? 'https://generativelanguage.googleapis.com'
-          : 'https://api.anthropic.com'
+          : newPlatform === 'kiro'
+            ? 'http://127.0.0.1:8787'
+            : newPlatform === 'cursor'
+              ? 'http://127.0.0.1:8788'
+              : 'https://api.anthropic.com'
     // Clear model-related settings
     allowedModels.value = []
     modelMappings.value = []
@@ -3622,6 +3896,14 @@ watch(
     }
     if (newPlatform !== 'anthropic' && accountCategory.value === 'bedrock') {
       accountCategory.value = 'oauth-based'
+    }
+    if (newPlatform === 'kiro') {
+      accountCategory.value = 'apikey'
+      addMethod.value = 'oauth'
+    }
+    if (newPlatform === 'cursor') {
+      accountCategory.value = 'apikey'
+      addMethod.value = 'oauth'
     }
     // Reset Bedrock fields when switching platforms
     bedrockAccessKeyId.value = ''
@@ -3991,6 +4273,20 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
   }
 }
 
+const submitProvisionCursorAccount = async (payload: ProvisionCursorAccountRequest) => {
+  submitting.value = true
+  try {
+    await adminAPI.accounts.provisionCursorSidecar(payload)
+    appStore.showSuccess(t('admin.accounts.accountCreated'))
+    emit('created')
+    handleClose()
+  } catch (error: any) {
+    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.accounts.failedToCreate'))
+  } finally {
+    submitting.value = false
+  }
+}
+
 // Methods
 const resetForm = () => {
   step.value = 1
@@ -4066,6 +4362,16 @@ const resetForm = () => {
   antigravityAccountType.value = 'oauth'
   upstreamBaseUrl.value = ''
   upstreamApiKey.value = ''
+  cursorEmail.value = ''
+  cursorAccessToken.value = ''
+  cursorRefreshToken.value = ''
+  cursorTokenExpiresAt.value = ''
+  cursorServiceMachineId.value = ''
+  cursorAccountUuid.value = ''
+  cursorClientVersion.value = '3.3.30'
+  cursorConfigVersion.value = ''
+  cursorClientId.value = ''
+  cursorMembershipType.value = ''
   vertexServiceAccountJson.value = ''
   vertexProjectId.value = ''
   vertexClientEmail.value = ''
@@ -4375,6 +4681,49 @@ const handleSubmit = async () => {
     return
   }
 
+  // Cursor accounts are provisioned into the sidecar; Sub2API only stores the returned account ref.
+  if (form.platform === 'cursor') {
+    if (!form.name.trim()) {
+      appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
+      return
+    }
+    if (!cursorEmail.value.trim()) {
+      appStore.showError('请输入 Cursor 邮箱')
+      return
+    }
+    if (!cursorAccessToken.value.trim()) {
+      appStore.showError('请输入 Cursor access token')
+      return
+    }
+    if (!cursorRefreshToken.value.trim()) {
+      appStore.showError('请输入 Cursor refresh token')
+      return
+    }
+    await submitProvisionCursorAccount({
+      name: form.name.trim(),
+      notes: form.notes?.trim() || null,
+      email: cursorEmail.value.trim(),
+      access_token: cursorAccessToken.value.trim(),
+      refresh_token: cursorRefreshToken.value.trim(),
+      cursor_token_expires_at: cursorTokenExpiresAt.value.trim() || undefined,
+      account_uuid: cursorAccountUuid.value.trim() || undefined,
+      cursor_service_machine_id: cursorServiceMachineId.value.trim() || undefined,
+      cursor_client_version: cursorClientVersion.value.trim() || undefined,
+      cursor_config_version: cursorConfigVersion.value.trim() || undefined,
+      cursor_client_id: cursorClientId.value.trim() || undefined,
+      cursor_membership_type: cursorMembershipType.value.trim() || undefined,
+      proxy_id: form.proxy_id,
+      concurrency: form.concurrency,
+      load_factor: form.load_factor,
+      priority: form.priority,
+      rate_multiplier: form.rate_multiplier,
+      group_ids: form.group_ids,
+      expires_at: form.expires_at,
+      auto_pause_on_expired: autoPauseOnExpired.value
+    })
+    return
+  }
+
   // For apikey type, create directly
   if (!apiKeyValue.value.trim()) {
     appStore.showError(t('admin.accounts.pleaseEnterApiKey'))
@@ -4387,7 +4736,9 @@ const handleSubmit = async () => {
       ? 'https://api.openai.com'
       : form.platform === 'gemini'
         ? 'https://generativelanguage.googleapis.com'
-        : 'https://api.anthropic.com'
+        : form.platform === 'kiro'
+          ? 'http://127.0.0.1:8787'
+          : 'https://api.anthropic.com'
 
   // Build credentials with optional model mapping
   const credentials: Record<string, unknown> = {

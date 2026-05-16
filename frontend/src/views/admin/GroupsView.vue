@@ -1187,10 +1187,10 @@
           </div>
         </div>
 
-        <!-- 账号过滤控制 (OpenAI/Antigravity/Anthropic/Gemini) -->
+        <!-- 账号过滤控制 (OpenAI/Antigravity/Anthropic/Gemini/Kiro) -->
         <div
           v-if="
-            ['openai', 'antigravity', 'anthropic', 'gemini'].includes(
+            ['openai', 'antigravity', 'anthropic', 'gemini', 'kiro'].includes(
               createForm.platform,
             )
           "
@@ -2368,10 +2368,10 @@
           </div>
         </div>
 
-        <!-- 账号过滤控制 (OpenAI/Antigravity/Anthropic/Gemini) -->
+        <!-- 账号过滤控制 (OpenAI/Antigravity/Anthropic/Gemini/Kiro) -->
         <div
           v-if="
-            ['openai', 'antigravity', 'anthropic', 'gemini'].includes(
+            ['openai', 'antigravity', 'anthropic', 'gemini', 'kiro'].includes(
               editForm.platform,
             )
           "
@@ -2763,7 +2763,11 @@
                         ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
                         : group.platform === 'antigravity'
                           ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
-                          : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+                          : group.platform === 'kiro'
+                            ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300'
+                            : group.platform === 'cursor'
+                              ? 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-200'
+                              : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
                   ]"
                 >
                   {{ t("admin.groups.platforms." + group.platform) }}
@@ -2925,6 +2929,8 @@ const platformOptions = computed(() => [
   { value: "openai", label: "OpenAI" },
   { value: "gemini", label: "Gemini" },
   { value: "antigravity", label: "Antigravity" },
+  { value: "kiro", label: "Kiro" },
+  { value: "cursor", label: "Cursor" },
 ]);
 
 const platformFilterOptions = computed(() => [
@@ -2933,6 +2939,8 @@ const platformFilterOptions = computed(() => [
   { value: "openai", label: "OpenAI" },
   { value: "gemini", label: "Gemini" },
   { value: "antigravity", label: "Antigravity" },
+  { value: "kiro", label: "Kiro" },
+  { value: "cursor", label: "Cursor" },
 ]);
 
 const editStatusOptions = computed(() => [

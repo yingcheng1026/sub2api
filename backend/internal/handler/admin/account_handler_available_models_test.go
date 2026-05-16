@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -26,9 +27,13 @@ func (s *availableModelsAdminService) GetAccount(_ context.Context, id int64) (*
 }
 
 func setupAvailableModelsRouter(adminSvc service.AdminService) *gin.Engine {
+	return setupAvailableModelsRouterWithAccountTestService(adminSvc, nil)
+}
+
+func setupAvailableModelsRouterWithAccountTestService(adminSvc service.AdminService, accountTestSvc *service.AccountTestService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler := NewAccountHandler(adminSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	handler := NewAccountHandler(adminSvc, nil, nil, nil, nil, nil, nil, accountTestSvc, nil, nil, nil, nil, nil)
 	router.GET("/api/v1/admin/accounts/:id/models", handler.GetAvailableModels)
 	return router
 }
@@ -102,4 +107,89 @@ func TestAccountHandlerGetAvailableModels_OpenAIOAuthPassthroughFallsBackToDefau
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotEmpty(t, resp.Data)
 	require.NotEqual(t, "gpt-5", resp.Data[0].ID)
+}
+
+func TestAccountHandlerGetAvailableModels_CursorUsesCursorModels(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:          44,
+			Name:        "cursor-sidecar-default",
+			Platform:    service.PlatformCursor,
+			Type:        service.AccountTypeUpstream,
+			Status:      service.StatusActive,
+			Credentials: map[string]any{"sidecar_account_ref": "cursor-prod@example.com"},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/44/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Data)
+	require.Equal(t, service.DefaultCursorTestModel, resp.Data[0].ID)
+	for _, model := range resp.Data {
+		require.NotContains(t, model.ID, "claude-")
+	}
+}
+
+func TestAccountHandlerGetAvailableModels_CursorPrefersSidecarModels(t *testing.T) {
+	t.Setenv("CURSOR_SIDECAR_URL", "")
+	t.Setenv("CURSOR_SIDECAR_API_KEY", "")
+	t.Setenv("CURSOR_REQUEST_TIMEOUT_SECONDS", "")
+
+	var seenSidecarKey string
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenSidecarKey = r.Header.Get("X-Cursor-Sidecar-Key")
+		require.Equal(t, "/v1/models", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cursor-Models-Cache", "hit")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"cursor-live-model","object":"model","created":123,"owned_by":"cursor"}]}`))
+	}))
+	defer sidecar.Close()
+
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:          45,
+			Name:        "cursor-sidecar-live",
+			Platform:    service.PlatformCursor,
+			Type:        service.AccountTypeUpstream,
+			Status:      service.StatusActive,
+			Credentials: map[string]any{"sidecar_account_ref": "cursor-prod@example.com"},
+		},
+	}
+	accountTestSvc := service.NewAccountTestService(nil, nil, nil, nil, nil, &config.Config{
+		Cursor: config.CursorConfig{
+			SidecarURL:            sidecar.URL,
+			SidecarAPIKey:         "sidecar-key",
+			RequestTimeoutSeconds: 3,
+		},
+	}, nil)
+	router := setupAvailableModelsRouterWithAccountTestService(svc, accountTestSvc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/45/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "sidecar-key", seenSidecarKey)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	require.Equal(t, "cursor-live-model", resp.Data[0].ID)
 }

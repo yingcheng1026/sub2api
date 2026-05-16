@@ -980,8 +980,8 @@ const copyValidationURL = async () => {
   }
 }
 
-const isAnthropicOAuthOrSetupToken = computed(() => {
-  return props.account.platform === 'anthropic' && (props.account.type === 'oauth' || props.account.type === 'setup-token')
+const autoUsageSource = computed<'passive' | undefined>(() => {
+  return shouldFetchUsage.value ? 'passive' : undefined
 })
 
 const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?: boolean }) => {
@@ -1180,15 +1180,15 @@ onMounted(() => {
   }
 
   if (!shouldAutoLoadUsageOnMount.value) return
-  const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
-  requestAutoLoad(source)
+  requestAutoLoad(autoUsageSource.value)
 })
 
 watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   if (!prevKey || nextKey === prevKey) return
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return
 
-  requestAutoLoad()
+  _usageCache.delete(props.account.id)
+  requestAutoLoad(autoUsageSource.value)
 })
 
 watch(
@@ -1197,9 +1197,8 @@ watch(
     if (nextToken === prevToken) return
     if (!shouldFetchUsage.value) return
 
-    const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
     _usageCache.delete(props.account.id)
-    loadUsage({ source, bypassCache: true }).catch((e) => {
+    loadUsage({ source: autoUsageSource.value, bypassCache: true }).catch((e) => {
       console.error('Failed to refresh usage after manual refresh:', e)
     })
   }

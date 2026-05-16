@@ -36,6 +36,12 @@ type ClaudeMetadata struct {
 	UserID string `json:"user_id,omitempty"`
 }
 
+// CacheControl Claude 内容块缓存控制。
+type CacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
+}
+
 // ClaudeTool Claude 工具定义
 // 支持两种格式：
 // 1. 标准格式: { "name": "...", "description": "...", "input_schema": {...} }
@@ -59,15 +65,17 @@ type ClaudeCustomToolSpec = CustomToolSpec
 
 // SystemBlock system prompt 数组形式的元素
 type SystemBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // ContentBlock Claude 消息内容块（解析后）
 type ContentBlock struct {
 	Type string `json:"type"`
 	// text
-	Text string `json:"text,omitempty"`
+	Text         string        `json:"text,omitempty"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 	// thinking
 	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"`

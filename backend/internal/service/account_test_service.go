@@ -13,7 +13,10 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 )
 
 // sseDataPrefix matches SSE data lines with optional whitespace after colon.
@@ -190,6 +194,13 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 
 	if account.Platform == PlatformAntigravity {
 		return s.routeAntigravityTest(c, account, modelID, prompt)
+	}
+
+	if account.Platform == PlatformKiro {
+		return s.testKiroAccountConnection(c, account, modelID, prompt)
+	}
+	if account.Platform == PlatformCursor {
+		return s.testCursorAccountConnection(c, account, modelID, prompt)
 	}
 
 	return s.testClaudeAccountConnection(c, account, modelID)
@@ -908,6 +919,362 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
+}
+
+func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
+	ctx := c.Request.Context()
+	testModelID := strings.TrimSpace(modelID)
+	if testModelID == "" {
+		testModelID = "claude-sonnet-4-6"
+	}
+	testPrompt := strings.TrimSpace(prompt)
+	if testPrompt == "" {
+		testPrompt = "hi"
+	}
+
+	sidecarURL, err := s.buildKiroSidecarEndpoint("/v1/messages")
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	apiKey := strings.TrimSpace(account.GetCredential("api_key"))
+	if apiKey == "" {
+		return s.sendErrorAndEnd(c, "No Kiro API key available")
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	payload := map[string]any{
+		"model": testModelID,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": testPrompt},
+				},
+			},
+		},
+		"max_tokens": 256,
+		"stream":     false,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecarURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Kiro sidecar request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Kiro-API-Key", apiKey)
+	req.Header.Set("X-Kiro-Account-ID", strconv.FormatInt(account.ID, 10))
+
+	timeout := 90 * time.Second
+	if s.cfg != nil && s.cfg.Kiro.RequestTimeoutSeconds > 0 {
+		timeout = time.Duration(s.cfg.Kiro.RequestTimeoutSeconds) * time.Second
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Kiro sidecar request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Kiro sidecar returned %d: %s", resp.StatusCode, string(body)))
+	}
+
+	text := extractKiroTestText(body)
+	if text == "" {
+		text = string(body)
+	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: text})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
+func (s *AccountTestService) buildKiroSidecarEndpoint(path string) (string, error) {
+	if s.cfg == nil || strings.TrimSpace(s.cfg.Kiro.SidecarURL) == "" {
+		return "", fmt.Errorf("Kiro sidecar is not configured")
+	}
+	raw := strings.TrimSpace(s.cfg.Kiro.SidecarURL)
+	if err := config.ValidateAbsoluteHTTPURL(raw); err != nil {
+		return "", fmt.Errorf("Invalid Kiro sidecar URL: %s", err.Error())
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("Invalid Kiro sidecar URL: %s", err.Error())
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("Invalid Kiro sidecar URL: must not include userinfo or query")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
+	ctx := c.Request.Context()
+	testModelID := normalizeCursorTestModel(account, modelID)
+
+	testPrompt := strings.TrimSpace(prompt)
+	if testPrompt == "" {
+		testPrompt = "hi"
+	}
+
+	accountRef := CursorSidecarAccountRef(account)
+	if accountRef == "" {
+		return s.sendErrorAndEnd(c, "Cursor account is missing sidecar_account_ref")
+	}
+
+	sidecarURL, err := s.buildCursorSidecarEndpoint("/v1/chat/completions")
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	payload := map[string]any{
+		"model": testModelID,
+		"messages": []map[string]any{
+			{"role": "user", "content": testPrompt},
+		},
+		"max_tokens": 64,
+		"stream":     false,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+
+	timeout := s.cursorSidecarTimeout()
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, sidecarURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Cursor sidecar request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Cursor-Account-ID", strconv.FormatInt(account.ID, 10))
+	req.Header.Set("X-Cursor-Account-Ref", accountRef)
+	req.Header.Set("X-Cursor-Original-Path", c.Request.URL.Path)
+	if apiKey := s.cursorSidecarAPIKey(); apiKey != "" {
+		req.Header.Set("X-Cursor-Sidecar-Key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("x-api-key", apiKey)
+	}
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Cursor sidecar request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Cursor sidecar returned %d: %s", resp.StatusCode, string(body)))
+	}
+
+	text := extractCursorTestText(body)
+	if text == "" {
+		text = string(body)
+	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: text})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
+func (s *AccountTestService) ListCursorSidecarModels(ctx context.Context) ([]CursorModel, error) {
+	sidecarURL, err := s.buildCursorSidecarEndpoint("/v1/models")
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := s.cursorSidecarTimeout()
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, sidecarURL, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("create Cursor sidecar models request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Cursor-Original-Path", "/api/v1/admin/accounts/:id/models")
+	if apiKey := s.cursorSidecarAPIKey(); apiKey != "" {
+		req.Header.Set("X-Cursor-Sidecar-Key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("x-api-key", apiKey)
+	}
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Cursor sidecar models request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read Cursor sidecar models response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("Cursor sidecar models returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	models := parseCursorSidecarModels(body)
+	if len(models) == 0 {
+		return nil, fmt.Errorf("Cursor sidecar models response did not include data")
+	}
+	return models, nil
+}
+
+func parseCursorSidecarModels(body []byte) []CursorModel {
+	data := gjson.GetBytes(body, "data")
+	if !data.IsArray() {
+		return nil
+	}
+	models := make([]CursorModel, 0)
+	seen := make(map[string]struct{})
+	data.ForEach(func(_, item gjson.Result) bool {
+		id := strings.TrimSpace(item.Get("id").String())
+		if id == "" {
+			return true
+		}
+		if _, ok := seen[id]; ok {
+			return true
+		}
+		seen[id] = struct{}{}
+		modelType := strings.TrimSpace(item.Get("type").String())
+		if modelType == "" {
+			modelType = strings.TrimSpace(item.Get("object").String())
+		}
+		if modelType == "" {
+			modelType = "model"
+		}
+		displayName := strings.TrimSpace(item.Get("display_name").String())
+		if displayName == "" {
+			displayName = id
+		}
+		createdAt := strings.TrimSpace(item.Get("created_at").String())
+		if createdAt == "" {
+			createdAt = strings.TrimSpace(item.Get("created").String())
+		}
+		models = append(models, CursorModel{
+			ID:          id,
+			Type:        modelType,
+			DisplayName: displayName,
+			CreatedAt:   createdAt,
+		})
+		return true
+	})
+	return models
+}
+
+func normalizeCursorTestModel(account *Account, modelID string) string {
+	testModelID := strings.TrimSpace(modelID)
+	if testModelID == "" {
+		return DefaultCursorTestModel
+	}
+	mapped := strings.TrimSpace(account.GetMappedModel(testModelID))
+	if strings.HasPrefix(strings.ToLower(mapped), "cursor-") {
+		return mapped
+	}
+	return DefaultCursorTestModel
+}
+
+func (s *AccountTestService) buildCursorSidecarEndpoint(path string) (string, error) {
+	raw := s.cursorSidecarURL()
+	if raw == "" {
+		return "", fmt.Errorf("Cursor sidecar is not configured")
+	}
+	if err := config.ValidateAbsoluteHTTPURL(raw); err != nil {
+		return "", fmt.Errorf("Invalid Cursor sidecar URL: %s", err.Error())
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("Invalid Cursor sidecar URL: %s", err.Error())
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("Invalid Cursor sidecar URL: must not include userinfo or query")
+	}
+	if strings.TrimSpace(path) == "" || !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("Invalid Cursor sidecar path: must be absolute")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func (s *AccountTestService) cursorSidecarURL() string {
+	if raw := strings.TrimSpace(os.Getenv("CURSOR_SIDECAR_URL")); raw != "" {
+		return raw
+	}
+	if s != nil && s.cfg != nil {
+		return strings.TrimSpace(s.cfg.Cursor.SidecarURL)
+	}
+	return ""
+}
+
+func (s *AccountTestService) cursorSidecarAPIKey() string {
+	if raw := strings.TrimSpace(os.Getenv("CURSOR_SIDECAR_API_KEY")); raw != "" {
+		return raw
+	}
+	if s != nil && s.cfg != nil {
+		return strings.TrimSpace(s.cfg.Cursor.SidecarAPIKey)
+	}
+	return ""
+}
+
+func (s *AccountTestService) cursorSidecarTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("CURSOR_REQUEST_TIMEOUT_SECONDS")); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	if s != nil && s.cfg != nil && s.cfg.Cursor.RequestTimeoutSeconds > 0 {
+		return time.Duration(s.cfg.Cursor.RequestTimeoutSeconds) * time.Second
+	}
+	return 90 * time.Second
+}
+
+func extractKiroTestText(body []byte) string {
+	for _, path := range []string{
+		"content.0.text",
+		"choices.0.message.content",
+		"output.0.content.0.text",
+		"output_text",
+		"text",
+	} {
+		if text := strings.TrimSpace(gjson.GetBytes(body, path).String()); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func extractCursorTestText(body []byte) string {
+	for _, path := range []string{
+		"choices.0.message.content",
+		"content.0.text",
+		"output.0.content.0.text",
+		"output_text",
+		"text",
+	} {
+		if text := strings.TrimSpace(gjson.GetBytes(body, path).String()); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // buildGeminiAPIKeyRequest builds request for Gemini API Key accounts

@@ -1,6 +1,13 @@
 package handler
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"net/http"
+	"net/url"
+	"strings"
+
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -48,7 +55,7 @@ func (h *SettingHandler) GetPublicSettings(c *gin.Context) {
 		TurnstileEnabled:                 settings.TurnstileEnabled,
 		TurnstileSiteKey:                 settings.TurnstileSiteKey,
 		SiteName:                         settings.SiteName,
-		SiteLogo:                         settings.SiteLogo,
+		SiteLogo:                         service.PublicSiteLogoReference(settings.SiteLogo),
 		SiteSubtitle:                     settings.SiteSubtitle,
 		APIBaseURL:                       settings.APIBaseURL,
 		ContactInfo:                      settings.ContactInfo,
@@ -87,6 +94,79 @@ func (h *SettingHandler) GetPublicSettings(c *gin.Context) {
 
 		RiskControlEnabled: settings.RiskControlEnabled,
 	})
+}
+
+// GetPublicSiteLogo returns the configured data-image logo as a cacheable asset.
+// GET /api/v1/settings/site-logo
+func (h *SettingHandler) GetPublicSiteLogo(c *gin.Context) {
+	settings, err := h.settingService.GetPublicSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	contentType, body, ok := decodeDataImageURI(settings.SiteLogo)
+	if !ok {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	sum := sha256.Sum256([]byte(settings.SiteLogo))
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	c.Header("Cache-Control", "public, max-age=86400")
+	c.Header("ETag", etag)
+	if c.GetHeader("If-None-Match") == etag {
+		c.Status(http.StatusNotModified)
+		return
+	}
+
+	c.Data(http.StatusOK, contentType, body)
+}
+
+func decodeDataImageURI(raw string) (string, []byte, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(trimmed), "data:image/") {
+		return "", nil, false
+	}
+
+	metadata, encoded, ok := strings.Cut(strings.TrimPrefix(trimmed, "data:"), ",")
+	if !ok {
+		return "", nil, false
+	}
+
+	parts := strings.Split(metadata, ";")
+	if len(parts) == 0 {
+		return "", nil, false
+	}
+
+	contentType := strings.ToLower(strings.TrimSpace(parts[0]))
+	switch contentType {
+	case "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/svg+xml":
+	default:
+		return "", nil, false
+	}
+
+	base64Encoded := false
+	for _, part := range parts[1:] {
+		if strings.EqualFold(strings.TrimSpace(part), "base64") {
+			base64Encoded = true
+			break
+		}
+	}
+
+	if base64Encoded {
+		body, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", nil, false
+		}
+		return contentType, body, true
+	}
+
+	decoded, err := url.PathUnescape(encoded)
+	if err != nil {
+		return "", nil, false
+	}
+	return contentType, []byte(decoded), true
 }
 
 func publicLoginAgreementDocumentsToDTO(items []service.LoginAgreementDocument) []dto.LoginAgreementDocument {

@@ -1804,6 +1804,10 @@ const executeCcsImport = (row: ApiKey, clientType: 'claude' | 'gemini') => {
         app = 'gemini'
         endpoint = baseUrl
         break
+      case 'kiro':
+        app = 'claude'
+        endpoint = `${baseUrl}/kiro`
+        break
       default: // anthropic
         app = 'claude'
         endpoint = baseUrl

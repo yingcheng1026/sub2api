@@ -721,12 +721,29 @@ export interface UpdateSettingsRequest {
   openai_fast_policy_settings?: OpenAIFastPolicySettings;
 }
 
+export interface AdminUISettings {
+  ops_monitoring_enabled?: boolean;
+  ops_realtime_monitoring_enabled?: boolean;
+  ops_query_mode_default?: string;
+  custom_menu_items?: CustomMenuItem[];
+  payment_enabled?: boolean;
+}
+
 /**
  * Get all system settings
  * @returns System settings
  */
 export async function getSettings(): Promise<SystemSettings> {
   const { data } = await apiClient.get<SystemSettings>("/admin/settings");
+  return data;
+}
+
+/**
+ * Get the lightweight settings subset needed by shared admin layout.
+ * @returns Admin UI settings
+ */
+export async function getAdminUISettings(): Promise<AdminUISettings> {
+  const { data } = await apiClient.get<AdminUISettings>("/admin/settings/admin-ui");
   return data;
 }
 
@@ -1103,6 +1120,7 @@ export async function resetWebSearchUsage(payload: {
 
 export const settingsAPI = {
   getSettings,
+  getAdminUISettings,
   updateSettings,
   testSmtpConnection,
   sendTestEmail,

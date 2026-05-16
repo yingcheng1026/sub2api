@@ -46,6 +46,8 @@ ARG COMMIT=docker
 ARG DATE
 ARG GOPROXY
 ARG GOSUMDB
+ARG GO_BUILD_GOMAXPROCS=
+ARG GO_BUILD_FLAGS=
 
 ENV GOPROXY=${GOPROXY}
 ENV GOSUMDB=${GOSUMDB}
@@ -70,7 +72,9 @@ COPY --from=frontend-builder /app/backend/internal/web/dist ./internal/web/dist
 RUN VERSION_VALUE="${VERSION}" && \
     if [ -z "${VERSION_VALUE}" ]; then VERSION_VALUE="$(tr -d '\r\n' < ./cmd/server/VERSION)"; fi && \
     DATE_VALUE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+    if [ -n "${GO_BUILD_GOMAXPROCS}" ]; then export GOMAXPROCS="${GO_BUILD_GOMAXPROCS}"; fi && \
     CGO_ENABLED=0 GOOS=linux go build \
+    ${GO_BUILD_FLAGS} \
     -tags embed \
     -ldflags="-s -w -X main.Version=${VERSION_VALUE} -X main.Commit=${COMMIT} -X main.Date=${DATE_VALUE} -X main.BuildType=release" \
     -trimpath \

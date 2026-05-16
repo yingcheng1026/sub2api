@@ -438,6 +438,30 @@ gateway:
     #     name: "Custom Profile 2"
 
 # =============================================================================
+# Kiro Channel Configuration
+# Kiro 渠道配置
+# =============================================================================
+kiro:
+  # Global kill switch. Keep false until the sidecar has passed local/staging smoke tests.
+  # 全局开关。sidecar 通过本地/预发布冒烟前保持 false。
+  enabled: false
+  # Dedicated /kiro/v1 routes. Requires enabled=true as well.
+  # 专用 /kiro/v1 路由；同时需要 enabled=true。
+  route_enabled: false
+  # Reserved for later /v1 auto dispatch. Keep false for isolation.
+  # 预留给后续 /v1 自动分发；隔离上线阶段保持 false。
+  auto_route_on_v1: false
+  # Internal sidecar base URL, for example http://127.0.0.1:8787 or http://kiro-sidecar:8787.
+  # 内网 sidecar 基础地址，例如 http://127.0.0.1:8787 或 http://kiro-sidecar:8787。
+  sidecar_url: ""
+  # Process-wide cap for concurrent Kiro sidecar forwards.
+  # Kiro sidecar 转发的进程级并发上限。
+  max_concurrency: 1
+  # Request timeout for each sidecar call.
+  # 单次 sidecar 调用超时。
+  request_timeout_seconds: 90
+
+# =============================================================================
 # Logging Configuration
 # 日志配置
 # =============================================================================
