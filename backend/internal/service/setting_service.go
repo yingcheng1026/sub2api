@@ -735,6 +735,19 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 	}, nil
 }
 
+const PublicSiteLogoAssetPath = "/api/v1/settings/site-logo"
+
+// PublicSiteLogoReference returns a lightweight public logo reference. Stored
+// data-image logos can be hundreds of KB and must not be inlined into every
+// HTML response or public settings JSON.
+func PublicSiteLogoReference(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(trimmed), "data:image/") {
+		return PublicSiteLogoAssetPath
+	}
+	return trimmed
+}
+
 // channelMonitorIntervalMin / channelMonitorIntervalMax bound the default interval
 // (mirrors the monitor-level constraint but lives here so setting_service stays decoupled).
 const (
@@ -913,7 +926,7 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 		TurnstileEnabled:                 settings.TurnstileEnabled,
 		TurnstileSiteKey:                 settings.TurnstileSiteKey,
 		SiteName:                         settings.SiteName,
-		SiteLogo:                         settings.SiteLogo,
+		SiteLogo:                         PublicSiteLogoReference(settings.SiteLogo),
 		SiteSubtitle:                     settings.SiteSubtitle,
 		APIBaseURL:                       settings.APIBaseURL,
 		ContactInfo:                      settings.ContactInfo,

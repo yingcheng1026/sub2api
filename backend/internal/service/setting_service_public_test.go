@@ -78,6 +78,12 @@ func TestSettingService_GetPublicSettings_ExposesTablePreferences(t *testing.T) 
 	require.Equal(t, []int{20, 50, 100}, settings.TablePageSizeOptions)
 }
 
+func TestPublicSiteLogoReference_RewritesDataImageToAssetURL(t *testing.T) {
+	require.Equal(t, PublicSiteLogoAssetPath, PublicSiteLogoReference(" data:image/png;base64,aGVsbG8= "))
+	require.Equal(t, "/logo.png", PublicSiteLogoReference(" /logo.png "))
+	require.Equal(t, "https://example.com/logo.png", PublicSiteLogoReference("https://example.com/logo.png"))
+}
+
 func TestSettingService_GetPublicSettings_ExposesForceEmailOnThirdPartySignup(t *testing.T) {
 	repo := &settingPublicRepoStub{
 		values: map[string]string{
