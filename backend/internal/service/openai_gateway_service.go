@@ -5369,8 +5369,10 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		return err
 	}
 
-	// Determine billing type
-	isSubscriptionBilling := subscription != nil && apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
+	// Determine billing type。2026-05-17 follow-up:用户在 admin 切 key 到 plan_groups
+	// 链内 standard group 时,subscription 仍然由 middleware GetActiveSubscriptionCoveringGroup
+	// 找到,billing 应该按订阅扣 sub quota 而不是 fallback 主余额。EffectiveBillingContext 统一判断。
+	isSubscriptionBilling, _ := EffectiveBillingContext(apiKey.Group, subscription)
 	billingType := BillingTypeBalance
 	if isSubscriptionBilling {
 		billingType = BillingTypeSubscription

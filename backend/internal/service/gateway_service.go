@@ -8426,8 +8426,10 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	// 计算费用
 	cost := s.calculateRecordUsageCost(ctx, result, apiKey, billingModel, multiplier, imageMultiplier, opts)
 
-	// 判断计费方式：订阅模式 vs 余额模式
-	isSubscriptionBilling := subscription != nil && apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
+	// 判断计费方式：订阅模式 vs 余额模式。2026-05-17 follow-up:用户切 key 到
+	// plan_groups 链内 standard group 时,subscription 由 middleware GetActiveSubscriptionCoveringGroup
+	// 找到,billing 应该按订阅扣 sub quota。EffectiveBillingContext 统一判断。
+	isSubscriptionBilling, _ := EffectiveBillingContext(apiKey.Group, subscription)
 	billingType := BillingTypeBalance
 	if isSubscriptionBilling {
 		billingType = BillingTypeSubscription
