@@ -35,18 +35,21 @@ export function useTableLoader<T, P extends Record<string, any>>(options: TableL
   })
 
   let abortController: AbortController | null = null
+  let requestSeq = 0
 
   const isAbortError = (error: any) => {
     return error?.name === 'AbortError' || error?.code === 'ERR_CANCELED' || error?.name === 'CanceledError'
   }
 
   const load = async () => {
-    if (abortController) {
-      abortController.abort()
-    }
+    const previousController = abortController
     const currentController = new AbortController()
+    const requestId = ++requestSeq
     abortController = currentController
+    previousController?.abort()
     loading.value = true
+
+    const isCurrentRequest = () => requestId === requestSeq && abortController === currentController
 
     try {
       const response = await fetchFn(
@@ -56,16 +59,21 @@ export function useTableLoader<T, P extends Record<string, any>>(options: TableL
         { signal: currentController.signal }
       )
 
+      if (!isCurrentRequest()) return
+
       items.value = response.items || []
       pagination.total = response.total || 0
       pagination.pages = response.pages || 0
     } catch (error) {
       if (!isAbortError(error)) {
-        console.error('Table load error:', error)
-        throw error
+        if (isCurrentRequest()) {
+          console.error('Table load error:', error)
+          throw error
+        }
       }
     } finally {
-      if (abortController === currentController) {
+      if (isCurrentRequest()) {
+        abortController = null
         loading.value = false
       }
     }

@@ -1,6 +1,6 @@
 <template>
   <div v-if="!isDesktopViewport" class="space-y-3">
-    <template v-if="loading">
+    <template v-if="showInitialLoadingSkeleton">
       <div v-for="i in 5" :key="i" class="rounded-lg border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900">
         <div class="space-y-3">
           <div v-for="column in dataColumns" :key="column.key" class="flex justify-between">
@@ -122,13 +122,15 @@
       </thead>
       <tbody class="table-body divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-900">
         <!-- Loading skeleton -->
-        <tr v-if="loading" v-for="i in 5" :key="i">
-          <td v-for="column in columns" :key="column.key" :class="['whitespace-nowrap py-4', getAdaptivePaddingClass()]">
-            <div class="animate-pulse">
-              <div class="h-4 w-3/4 rounded bg-gray-200 dark:bg-dark-700"></div>
-            </div>
-          </td>
-        </tr>
+        <template v-if="showInitialLoadingSkeleton">
+          <tr v-for="i in 5" :key="`loading-${i}`">
+            <td v-for="column in columns" :key="column.key" :class="['whitespace-nowrap py-4', getAdaptivePaddingClass()]">
+              <div class="animate-pulse">
+                <div class="h-4 w-3/4 rounded bg-gray-200 dark:bg-dark-700"></div>
+              </div>
+            </td>
+          </tr>
+        </template>
 
         <!-- Empty state -->
         <tr v-else-if="!data || data.length === 0">
@@ -568,6 +570,7 @@ const dataColumns = computed(() => props.columns.filter((column) => column.key !
 const columnsSignature = computed(() =>
   props.columns.map((column) => `${column.key}:${column.sortable ? '1' : '0'}`).join('|')
 )
+const showInitialLoadingSkeleton = computed(() => props.loading && (!props.data || props.data.length === 0))
 
 watch(
   isDesktopViewport,
