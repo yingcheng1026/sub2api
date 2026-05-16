@@ -298,6 +298,52 @@ function flattenContent(content) {
   return parsed.text;
 }
 
+function flattenContentForKiroPrompt(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) {
+    if (content && typeof content.text === "string") return content.text;
+    if (content && typeof content.content === "string") return content.content;
+    return "";
+  }
+
+  const text = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      text.push(part);
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+
+    if (part.type === "tool_use") {
+      text.push(formatToolUseForKiroPrompt(part));
+      continue;
+    }
+    if (part.type === "tool_result") {
+      text.push(formatToolResultForKiroPrompt(part));
+      continue;
+    }
+
+    if (typeof part.text === "string") text.push(part.text);
+    else if (typeof part.content === "string") text.push(part.content);
+    else if (part.type === "input_text" || part.type === "output_text") text.push(String(part.text || ""));
+  }
+  return text.filter(Boolean).join("\n");
+}
+
+function formatToolUseForKiroPrompt(part) {
+  const id = String(part.id || part.tool_use_id || "");
+  const name = safeKiroToolName(String(part.name || "tool"));
+  const input = part.input && typeof part.input === "object" ? truncate(JSON.stringify(part.input), 8_000) : "{}";
+  return [`[tool_use${id ? ` id=${id}` : ""} name=${name}]`, input].filter(Boolean).join("\n");
+}
+
+function formatToolResultForKiroPrompt(part) {
+  const id = String(part.tool_use_id || part.id || "");
+  const status = part.is_error ? "ERROR" : "SUCCESS";
+  const resultText = flattenContentForKiroPrompt(part.content || part.text || "");
+  return [`[tool_result${id ? ` id=${id}` : ""} status=${status}]`, resultText].filter(Boolean).join("\n");
+}
+
 function contentParts(content) {
   if (typeof content === "string") return { text: content, images: [], toolResults: [], toolUses: [] };
   if (!Array.isArray(content)) {
@@ -458,23 +504,20 @@ function buildKiroPayload(path, payload, req) {
       const parts = contentParts(message.content);
       history.push({
         assistantResponseMessage: {
-          content: parts.text,
-          ...(parts.toolUses.length ? { toolUses: parts.toolUses.map((tool) => mapToolUseForKiro(tool)) } : {}),
+          content: flattenContentForKiroPrompt(message.content) || parts.text || ".",
         },
       });
       continue;
     }
     const parts = contentParts(message.content);
-    if (parts.text) promptAnchor.push(parts.text);
+    const historyText = flattenContentForKiroPrompt(message.content) || parts.text;
+    if (historyText) promptAnchor.push(historyText);
     const userMessage = {
-      content: parts.text || ".",
+      content: historyText || ".",
       modelId: kiroModel,
       origin: "AI_EDITOR",
       ...(parts.images.length ? { images: parts.images } : {}),
     };
-    if (parts.toolResults.length) {
-      userMessage.userInputMessageContext = { toolResults: parts.toolResults };
-    }
     history.push({ userInputMessage: userMessage });
   }
 
@@ -482,9 +525,8 @@ function buildKiroPayload(path, payload, req) {
   const currentParts = contentParts(current.content);
   const currentContext = {};
   if (tools.length) currentContext.tools = tools.map(({ toolSpecification }) => ({ toolSpecification }));
-  if (currentParts.toolResults.length) currentContext.toolResults = currentParts.toolResults;
   const systemPrefix = system ? `--- SYSTEM PROMPT ---\n${system}\n--- END SYSTEM PROMPT ---\n\n` : "";
-  const currentText = currentParts.text || (currentParts.toolResults.length ? "Tool results:" : ".");
+  const currentText = flattenContentForKiroPrompt(current.content) || currentParts.text || ".";
   const body = {
     conversationState: {
       chatTriggerType: "MANUAL",
@@ -518,14 +560,6 @@ function buildKiroPayload(path, payload, req) {
     inputTokens: estimateTokens(JSON.stringify(body)),
     promptText: `${system}\n${flattenMessages(messages)}`,
     toolNameMap,
-  };
-}
-
-function mapToolUseForKiro(tool) {
-  return {
-    toolUseId: tool.toolUseId || tool.id || `toolu_${hashText(tool.name, 12)}`,
-    name: safeKiroToolName(tool.name),
-    input: tool.input || {},
   };
 }
 
