@@ -861,6 +861,23 @@ func (s *SubscriptionService) GetActiveWalletSubscription(ctx context.Context, u
 	return s.userSubRepo.GetActiveWalletByUserID(ctx, userID)
 }
 
+// GetActiveSubscriptionCoveringGroup 查用户 active 月卡订阅，其 plan 通过
+// subscription_plan_groups 间接覆盖了 groupID。返回 ErrSubscriptionNotFound
+// 表示不覆盖，middleware 应继续 fallback。
+//
+// 用例：用户在 admin 把 api_key.group_id 切到非订阅主 group 后，middleware
+// 不能再静默扣 user.balance，得先看 plan_groups 是否覆盖（2026-05-16 方案 C）。
+func (s *SubscriptionService) GetActiveSubscriptionCoveringGroup(ctx context.Context, userID, groupID int64) (*UserSubscription, error) {
+	return s.userSubRepo.GetActiveByPlanCoveringGroup(ctx, userID, groupID)
+}
+
+// UserHasAnyActiveSubscription 用户是否有任何 active 订阅（含钱包 / 月卡）。
+// middleware fallback 决策用：有订阅但当前 group 不覆盖 → 403；无订阅 → 允许
+// 走老 user.balance 兼容路径（纯余额用户）。
+func (s *SubscriptionService) UserHasAnyActiveSubscription(ctx context.Context, userID int64) (bool, error) {
+	return s.userSubRepo.HasAnyActiveSubscription(ctx, userID)
+}
+
 // ListUserSubscriptions 获取用户的所有订阅
 func (s *SubscriptionService) ListUserSubscriptions(ctx context.Context, userID int64) ([]UserSubscription, error) {
 	subs, err := s.userSubRepo.ListByUserID(ctx, userID)

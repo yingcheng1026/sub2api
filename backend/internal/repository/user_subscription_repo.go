@@ -6,6 +6,8 @@ import (
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/group"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -118,6 +120,67 @@ func (r *userSubscriptionRepository) GetActiveWalletByUserID(ctx context.Context
 		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
 	}
 	return userSubscriptionEntityToService(m), nil
+}
+
+// GetActiveByPlanCoveringGroup 查询用户 active 月卡订阅，其 plan 通过
+// subscription_plan_groups 覆盖目标 group。两步查询：
+//  1. 查 plan_groups 反向定位所有覆盖 targetGroupID 的 plan，取出它们的 plan.group_id（主 group）
+//  2. 查用户 active 非钱包订阅，其 group_id 在上一步集合中
+//
+// 见 docs/plans/2026-05-16-wallet-v4-group-switch-billing-fix.md §4.1。
+func (r *userSubscriptionRepository) GetActiveByPlanCoveringGroup(ctx context.Context, userID, targetGroupID int64) (*service.UserSubscription, error) {
+	client := clientFromContext(ctx, r.client)
+
+	coveringPrimaryGroupIDs, err := client.SubscriptionPlan.Query().
+		Where(
+			subscriptionplan.GroupIDNotNil(),
+			subscriptionplan.HasPlanGroupsWith(
+				subscriptionplangroup.GroupIDEQ(targetGroupID),
+			),
+		).
+		Select(subscriptionplan.FieldGroupID).
+		Ints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(coveringPrimaryGroupIDs) == 0 {
+		return nil, service.ErrSubscriptionNotFound
+	}
+
+	primaryGroupIDs := make([]int64, len(coveringPrimaryGroupIDs))
+	for i, v := range coveringPrimaryGroupIDs {
+		primaryGroupIDs[i] = int64(v)
+	}
+
+	m, err := client.UserSubscription.Query().
+		Where(
+			usersubscription.UserIDEQ(userID),
+			usersubscription.StatusEQ(service.SubscriptionStatusActive),
+			usersubscription.ExpiresAtGT(time.Now()),
+			usersubscription.WalletBalanceUsdIsNil(),
+			usersubscription.GroupIDIn(primaryGroupIDs...),
+		).
+		WithGroup().
+		Order(dbent.Desc(usersubscription.FieldExpiresAt)).
+		First(ctx)
+	if err != nil {
+		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
+	}
+	return userSubscriptionEntityToService(m), nil
+}
+
+// HasAnyActiveSubscription 用户是否有任何 active 订阅（含钱包 / 月卡）。
+// middleware fallback 决策用：有订阅但当前 group 不覆盖 → 403；无订阅 → 允许
+// 走老 user.balance 兼容路径。
+func (r *userSubscriptionRepository) HasAnyActiveSubscription(ctx context.Context, userID int64) (bool, error) {
+	client := clientFromContext(ctx, r.client)
+	return client.UserSubscription.Query().
+		Where(
+			usersubscription.UserIDEQ(userID),
+			usersubscription.StatusEQ(service.SubscriptionStatusActive),
+			usersubscription.ExpiresAtGT(time.Now()),
+		).
+		Exist(ctx)
 }
 
 func (r *userSubscriptionRepository) Update(ctx context.Context, sub *service.UserSubscription) error {

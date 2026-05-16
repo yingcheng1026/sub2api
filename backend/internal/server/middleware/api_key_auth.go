@@ -204,22 +204,46 @@ func apiKeyAuthWithSubscription(
 			apiKey = &apiKeyCopy
 		}
 
-		// 钱包未命中且 group 是 subscription 类型 → 走 v3 老订阅 lookup。
-		// 钱包命中时跳过此分支：钱包订阅是用户级，不需要再按 group 找一遍。
-		if subscription == nil && isSubscriptionType && subscriptionService != nil {
+		// 钱包未命中 → 月卡查找：exact match + plan_groups 间接覆盖。
+		// 钱包命中时跳过：钱包订阅是用户级，覆盖一切 group。
+		//
+		// 月卡查找两步走（2026-05-16 方案 C，见 docs/plans/2026-05-16-wallet-v4-group-switch-billing-fix.md）：
+		//   1. exact match by (user_id, key.group_id)：用户没切 group / 切到订阅主 group
+		//   2. plan_groups 间接覆盖：用户在 admin 把 key 切到 plan 关联的 standard group
+		//      （如月卡 paid-trial-v3-30d 关联 claude-Max pool / openai-default 等）
+		if subscription == nil && apiKey.Group != nil && subscriptionService != nil {
 			sub, subErr := subscriptionService.GetActiveSubscription(
 				c.Request.Context(),
 				apiKey.User.ID,
 				apiKey.Group.ID,
 			)
-			if subErr != nil {
-				if !skipBilling {
-					AbortWithError(c, 403, "SUBSCRIPTION_NOT_FOUND", "No active subscription found for this group")
-					return
-				}
-				// skipBilling: 订阅不存在也放行，handler 会返回可用的数据
-			} else {
+			if subErr == nil && sub != nil {
 				subscription = sub
+			} else if covering, coverErr := subscriptionService.GetActiveSubscriptionCoveringGroup(
+				c.Request.Context(),
+				apiKey.User.ID,
+				apiKey.Group.ID,
+			); coverErr == nil && covering != nil {
+				subscription = covering
+			}
+		}
+
+		// 都没匹配 → 决定 403 还是走老 balance 兼容路径。
+		//   - 订阅类型 group：必须有 exact / 覆盖订阅，否则 SUBSCRIPTION_NOT_FOUND（保留原行为）
+		//   - standard 类型 group：
+		//     - 用户有任何 active 订阅但当前 group 不覆盖 → GROUP_NOT_IN_SUBSCRIPTION
+		//       （2026-05-16 修复：原静默扣 user.balance 是 bug，月卡用户应被保护）
+		//     - 用户没任何订阅 → 落到 §6 余额检查（保留纯余额用户兼容路径）
+		if subscription == nil && !skipBilling && subscriptionService != nil {
+			if isSubscriptionType {
+				AbortWithError(c, 403, "SUBSCRIPTION_NOT_FOUND", "No active subscription found for this group")
+				return
+			}
+			hasAny, _ := subscriptionService.UserHasAnyActiveSubscription(c.Request.Context(), apiKey.User.ID)
+			if hasAny {
+				AbortWithError(c, 403, "GROUP_NOT_IN_SUBSCRIPTION",
+					"该分组不在你的套餐内，请到后台切回订阅分组，或联系客服（微信 aa402837 Donish）")
+				return
 			}
 		}
 
