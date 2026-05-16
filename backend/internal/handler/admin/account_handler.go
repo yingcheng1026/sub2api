@@ -1651,7 +1651,7 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 		return
 	}
 
-	source := c.DefaultQuery("source", "active")
+	source := normalizeAccountUsageSource(c.Query("source"))
 
 	var usage *service.UsageInfo
 	if source == "passive" {
@@ -1665,6 +1665,13 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 	}
 
 	response.Success(c, usage)
+}
+
+func normalizeAccountUsageSource(source string) string {
+	if source == "active" {
+		return "active"
+	}
+	return "passive"
 }
 
 // ClearRateLimit handles clearing account rate limit status
