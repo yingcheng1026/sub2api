@@ -20,7 +20,7 @@ git -C "${WORKDIR}" apply "${PATCH_FILE}"
 
 npm --prefix "${WORKDIR}" ci
 npm --prefix "${WORKDIR}" run build
-npm --prefix "${WORKDIR}" test -- --test-name-pattern "(admin/accounts/cursor|X-Cursor-Account-Ref)"
+npm --prefix "${WORKDIR}" test -- --test-name-pattern "(admin/accounts/cursor|X-Cursor-Account-Ref|cursor text tool-call parser|cursor anthropic messages)"
 
 DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}" \
   docker build -t "${IMAGE_TAG}" "${WORKDIR}"
