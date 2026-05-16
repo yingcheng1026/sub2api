@@ -1853,6 +1853,12 @@ func (stubUserSubscriptionRepo) GetActiveByUserIDAndGroupID(ctx context.Context,
 func (stubUserSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
 	return nil, service.ErrSubscriptionNotFound
 }
+func (stubUserSubscriptionRepo) GetActiveByPlanCoveringGroup(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+	return nil, service.ErrSubscriptionNotFound
+}
+func (stubUserSubscriptionRepo) HasAnyActiveSubscription(ctx context.Context, userID int64) (bool, error) {
+	return false, nil
+}
 func (stubUserSubscriptionRepo) Update(ctx context.Context, sub *service.UserSubscription) error {
 	return errors.New("not implemented")
 }

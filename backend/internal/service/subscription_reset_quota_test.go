@@ -53,6 +53,14 @@ func (r *resetQuotaUserSubRepoStub) ResetMonthlyUsage(_ context.Context, _ int64
 	return r.resetMonthlyErr
 }
 
+func (r *resetQuotaUserSubRepoStub) GetActiveByPlanCoveringGroup(_ context.Context, _, _ int64) (*UserSubscription, error) {
+	return nil, ErrSubscriptionNotFound
+}
+
+func (r *resetQuotaUserSubRepoStub) HasAnyActiveSubscription(_ context.Context, _ int64) (bool, error) {
+	return false, nil
+}
+
 func newResetQuotaSvc(stub *resetQuotaUserSubRepoStub) *SubscriptionService {
 	return NewSubscriptionService(groupRepoNoop{}, stub, nil, nil, nil)
 }

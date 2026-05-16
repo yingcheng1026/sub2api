@@ -130,6 +130,12 @@ func (f fakeGoogleSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context,
 	}
 	return nil, service.ErrSubscriptionNotFound
 }
+func (f fakeGoogleSubscriptionRepo) GetActiveByPlanCoveringGroup(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+	return nil, service.ErrSubscriptionNotFound
+}
+func (f fakeGoogleSubscriptionRepo) HasAnyActiveSubscription(ctx context.Context, userID int64) (bool, error) {
+	return false, nil
+}
 func (f fakeGoogleSubscriptionRepo) Update(ctx context.Context, sub *service.UserSubscription) error {
 	return errors.New("not implemented")
 }

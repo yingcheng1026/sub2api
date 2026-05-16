@@ -84,6 +84,12 @@ func (userSubRepoNoop) GetActiveByUserIDAndGroupID(context.Context, int64, int64
 func (userSubRepoNoop) GetActiveWalletByUserID(context.Context, int64) (*UserSubscription, error) {
 	panic("unexpected GetActiveWalletByUserID call")
 }
+func (userSubRepoNoop) GetActiveByPlanCoveringGroup(context.Context, int64, int64) (*UserSubscription, error) {
+	return nil, ErrSubscriptionNotFound
+}
+func (userSubRepoNoop) HasAnyActiveSubscription(context.Context, int64) (bool, error) {
+	return false, nil
+}
 func (userSubRepoNoop) Update(context.Context, *UserSubscription) error {
 	panic("unexpected Update call")
 }
@@ -214,6 +220,14 @@ func (s *subscriptionUserSubRepoStub) GetActiveWalletByUserID(_ context.Context,
 	}
 	cp := *sub
 	return &cp, nil
+}
+
+func (s *subscriptionUserSubRepoStub) GetActiveByPlanCoveringGroup(_ context.Context, _, _ int64) (*UserSubscription, error) {
+	return nil, ErrSubscriptionNotFound
+}
+
+func (s *subscriptionUserSubRepoStub) HasAnyActiveSubscription(_ context.Context, _ int64) (bool, error) {
+	return false, nil
 }
 
 func (s *subscriptionUserSubRepoStub) GetByID(_ context.Context, id int64) (*UserSubscription, error) {

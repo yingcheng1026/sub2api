@@ -745,8 +745,10 @@ func (r *stubApiKeyRepo) GetRateLimitData(ctx context.Context, id int64) (*servi
 }
 
 type stubUserSubscriptionRepo struct {
-	getActive       func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
-	getActiveWallet func(ctx context.Context, userID int64) (*service.UserSubscription, error)
+	getActive            func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
+	getActiveWallet      func(ctx context.Context, userID int64) (*service.UserSubscription, error)
+	getActiveByPlanCover func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
+	hasAnyActive         func(ctx context.Context, userID int64) (bool, error)
 	updateStatus    func(ctx context.Context, subscriptionID int64, status string) error
 	activateWindow  func(ctx context.Context, id int64, start time.Time) error
 	resetDaily      func(ctx context.Context, id int64, start time.Time) error
@@ -779,6 +781,20 @@ func (r *stubUserSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context, 
 	}
 	// 默认返回 NotFound：老测试默认不走钱包路径，行为与现有 (user, group) lookup 一致。
 	return nil, service.ErrSubscriptionNotFound
+}
+
+func (r *stubUserSubscriptionRepo) GetActiveByPlanCoveringGroup(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+	if r.getActiveByPlanCover != nil {
+		return r.getActiveByPlanCover(ctx, userID, groupID)
+	}
+	return nil, service.ErrSubscriptionNotFound
+}
+
+func (r *stubUserSubscriptionRepo) HasAnyActiveSubscription(ctx context.Context, userID int64) (bool, error) {
+	if r.hasAnyActive != nil {
+		return r.hasAnyActive(ctx, userID)
+	}
+	return false, nil
 }
 
 func (r *stubUserSubscriptionRepo) Update(ctx context.Context, sub *service.UserSubscription) error {
