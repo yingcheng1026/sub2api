@@ -1961,6 +1961,16 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 
 	// Handle Cursor accounts: expose Cursor sidecar model IDs, not Claude IDs.
 	if account.Platform == service.PlatformCursor {
+		if h.accountTestService != nil {
+			models, err := h.accountTestService.ListCursorSidecarModels(c.Request.Context())
+			if err == nil && len(models) > 0 {
+				response.Success(c, models)
+				return
+			}
+			if err != nil {
+				slog.Warn("admin.accounts.cursor_models_sidecar_failed", "account_id", account.ID, "error", err)
+			}
+		}
 		response.Success(c, service.DefaultCursorModels)
 		return
 	}

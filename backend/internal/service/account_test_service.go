@@ -1093,6 +1093,92 @@ func (s *AccountTestService) testCursorAccountConnection(c *gin.Context, account
 	return nil
 }
 
+func (s *AccountTestService) ListCursorSidecarModels(ctx context.Context) ([]CursorModel, error) {
+	sidecarURL, err := s.buildCursorSidecarEndpoint("/v1/models")
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := s.cursorSidecarTimeout()
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, sidecarURL, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("create Cursor sidecar models request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Cursor-Original-Path", "/api/v1/admin/accounts/:id/models")
+	if apiKey := s.cursorSidecarAPIKey(); apiKey != "" {
+		req.Header.Set("X-Cursor-Sidecar-Key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("x-api-key", apiKey)
+	}
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Cursor sidecar models request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read Cursor sidecar models response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("Cursor sidecar models returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	models := parseCursorSidecarModels(body)
+	if len(models) == 0 {
+		return nil, fmt.Errorf("Cursor sidecar models response did not include data")
+	}
+	return models, nil
+}
+
+func parseCursorSidecarModels(body []byte) []CursorModel {
+	data := gjson.GetBytes(body, "data")
+	if !data.IsArray() {
+		return nil
+	}
+	models := make([]CursorModel, 0)
+	seen := make(map[string]struct{})
+	data.ForEach(func(_, item gjson.Result) bool {
+		id := strings.TrimSpace(item.Get("id").String())
+		if id == "" {
+			return true
+		}
+		if _, ok := seen[id]; ok {
+			return true
+		}
+		seen[id] = struct{}{}
+		modelType := strings.TrimSpace(item.Get("type").String())
+		if modelType == "" {
+			modelType = strings.TrimSpace(item.Get("object").String())
+		}
+		if modelType == "" {
+			modelType = "model"
+		}
+		displayName := strings.TrimSpace(item.Get("display_name").String())
+		if displayName == "" {
+			displayName = id
+		}
+		createdAt := strings.TrimSpace(item.Get("created_at").String())
+		if createdAt == "" {
+			createdAt = strings.TrimSpace(item.Get("created").String())
+		}
+		models = append(models, CursorModel{
+			ID:          id,
+			Type:        modelType,
+			DisplayName: displayName,
+			CreatedAt:   createdAt,
+		})
+		return true
+	})
+	return models
+}
+
 func normalizeCursorTestModel(account *Account, modelID string) string {
 	testModelID := strings.TrimSpace(modelID)
 	if testModelID == "" {

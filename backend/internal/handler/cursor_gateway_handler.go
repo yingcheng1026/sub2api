@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -36,9 +38,97 @@ const (
 	cursorMaxSidecarResponseBytes     = int64(16 * 1024 * 1024)
 	cursorDefaultRequestTimeout       = 90 * time.Second
 	cursorSidecarLimiterAcquireWeight = int64(1)
+	cursorModelsCacheStatusHeader     = "X-Cursor-Models-Cache"
+	cursorModelsCacheAgeHeader        = "X-Cursor-Models-Cache-Age"
+	cursorDefaultModelsCacheTTL       = 5 * time.Minute
+	cursorDefaultModelsStaleTTL       = 24 * time.Hour
 )
 
 var cursorSidecarLimiters sync.Map // map[int]*semaphore.Weighted
+var cursorModelsListCache = newCursorModelsListCache()
+
+type cursorSidecarListResponse struct {
+	StatusCode  int
+	ContentType string
+	Header      http.Header
+	Body        []byte
+}
+
+type cursorModelsListCacheEntry struct {
+	cursorSidecarListResponse
+	StoredAt   time.Time
+	FreshUntil time.Time
+	StaleUntil time.Time
+}
+
+type cursorModelsCache struct {
+	mu      sync.Mutex
+	entries map[string]cursorModelsListCacheEntry
+	sf      singleflight.Group
+}
+
+func newCursorModelsListCache() *cursorModelsCache {
+	return &cursorModelsCache{entries: make(map[string]cursorModelsListCacheEntry)}
+}
+
+func (c *cursorModelsCache) getFresh(key string, now time.Time) (cursorModelsListCacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || !entry.FreshUntil.After(now) {
+		return cursorModelsListCacheEntry{}, false
+	}
+	return cloneCursorModelsCacheEntry(entry), true
+}
+
+func (c *cursorModelsCache) getStale(key string, now time.Time) (cursorModelsListCacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || !entry.StaleUntil.After(now) {
+		return cursorModelsListCacheEntry{}, false
+	}
+	return cloneCursorModelsCacheEntry(entry), true
+}
+
+func (c *cursorModelsCache) set(key string, result cursorSidecarListResponse, freshTTL, staleTTL time.Duration) {
+	if freshTTL <= 0 {
+		freshTTL = cursorDefaultModelsCacheTTL
+	}
+	if staleTTL <= 0 {
+		staleTTL = cursorDefaultModelsStaleTTL
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = cursorModelsListCacheEntry{
+		cursorSidecarListResponse: cloneCursorSidecarListResponse(result),
+		StoredAt:                  now,
+		FreshUntil:                now.Add(freshTTL),
+		StaleUntil:                now.Add(staleTTL),
+	}
+}
+
+func (c *cursorModelsCache) resetForTest() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]cursorModelsListCacheEntry)
+	c.sf = singleflight.Group{}
+}
+
+func cloneCursorModelsCacheEntry(entry cursorModelsListCacheEntry) cursorModelsListCacheEntry {
+	entry.cursorSidecarListResponse = cloneCursorSidecarListResponse(entry.cursorSidecarListResponse)
+	return entry
+}
+
+func cloneCursorSidecarListResponse(result cursorSidecarListResponse) cursorSidecarListResponse {
+	return cursorSidecarListResponse{
+		StatusCode:  result.StatusCode,
+		ContentType: result.ContentType,
+		Header:      result.Header.Clone(),
+		Body:        append([]byte(nil), result.Body...),
+	}
+}
 
 func (h *GatewayHandler) CursorModels(c *gin.Context) {
 	h.forwardCursorSidecarList(c, "/v1/models")
@@ -508,36 +598,109 @@ func (h *GatewayHandler) forwardCursorSidecarList(c *gin.Context, sidecarPath st
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Cursor sidecar is not configured")
 		return
 	}
-	sidecarURL, err := joinCursorSidecarURL(baseURL, sidecarPath)
-	if err != nil {
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Cursor sidecar URL is invalid")
+
+	if sidecarPath == "/v1/models" {
+		h.forwardCursorSidecarModelsList(c, cfg, baseURL, sidecarPath)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), cfg.requestTimeout())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sidecarURL, http.NoBody)
+	result, err := h.fetchCursorSidecarList(c, cfg, baseURL, sidecarPath)
 	if err != nil {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to create Cursor sidecar request")
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Cursor sidecar request failed")
 		return
+	}
+	h.writeCursorSidecarListResponse(c, result, "")
+}
+
+func (h *GatewayHandler) forwardCursorSidecarModelsList(c *gin.Context, cfg cursorRuntimeConfig, baseURL, sidecarPath string) {
+	cacheKey := cursorModelsListCacheKey(baseURL, sidecarPath, cfg.SidecarAPIKey)
+	now := time.Now()
+	if entry, ok := cursorModelsListCache.getFresh(cacheKey, now); ok {
+		c.Header(cursorModelsCacheAgeHeader, strconv.Itoa(int(now.Sub(entry.StoredAt).Seconds())))
+		h.writeCursorSidecarListResponse(c, entry.cursorSidecarListResponse, "hit")
+		return
+	}
+
+	value, err, _ := cursorModelsListCache.sf.Do(cacheKey, func() (any, error) {
+		result, fetchErr := h.fetchCursorSidecarList(c, cfg, baseURL, sidecarPath)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		return result, nil
+	})
+	if err != nil {
+		if entry, ok := cursorModelsListCache.getStale(cacheKey, time.Now()); ok {
+			c.Header(cursorModelsCacheAgeHeader, strconv.Itoa(int(time.Since(entry.StoredAt).Seconds())))
+			h.writeCursorSidecarListResponse(c, entry.cursorSidecarListResponse, "stale")
+			return
+		}
+		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, err.Error(), "")
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Cursor sidecar request failed")
+		return
+	}
+
+	result, ok := value.(cursorSidecarListResponse)
+	if !ok {
+		h.errorResponse(c, http.StatusBadGateway, "api_error", "Cursor sidecar response is invalid")
+		return
+	}
+	if result.StatusCode >= http.StatusInternalServerError {
+		if entry, ok := cursorModelsListCache.getStale(cacheKey, time.Now()); ok {
+			c.Header(cursorModelsCacheAgeHeader, strconv.Itoa(int(time.Since(entry.StoredAt).Seconds())))
+			h.writeCursorSidecarListResponse(c, entry.cursorSidecarListResponse, "stale")
+			return
+		}
+	}
+	if result.StatusCode >= http.StatusOK && result.StatusCode < http.StatusMultipleChoices && gjson.ValidBytes(result.Body) {
+		cursorModelsListCache.set(cacheKey, result, cursorModelsFreshTTL(), cursorModelsStaleTTL())
+		c.Header(cursorModelsCacheAgeHeader, "0")
+		h.writeCursorSidecarListResponse(c, result, "miss")
+		return
+	}
+	h.writeCursorSidecarListResponse(c, result, "miss")
+}
+
+func (h *GatewayHandler) fetchCursorSidecarList(c *gin.Context, cfg cursorRuntimeConfig, baseURL, sidecarPath string) (cursorSidecarListResponse, error) {
+	sidecarURL, err := joinCursorSidecarURL(baseURL, sidecarPath)
+	if err != nil {
+		return cursorSidecarListResponse{}, err
+	}
+	reqCtx, cancel := context.WithTimeout(c.Request.Context(), cfg.requestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, sidecarURL, http.NoBody)
+	if err != nil {
+		return cursorSidecarListResponse{}, err
 	}
 	h.applyCursorSidecarHeaders(c, req, nil)
 
 	resp, err := (&http.Client{Timeout: cfg.requestTimeout()}).Do(req)
 	if err != nil {
-		service.SetOpsUpstreamError(c, http.StatusServiceUnavailable, err.Error(), "")
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Cursor sidecar request failed")
-		return
+		return cursorSidecarListResponse{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := readCursorSidecarBody(resp.Body)
 	if err != nil {
-		h.errorResponse(c, http.StatusBadGateway, "api_error", "Cursor sidecar response is too large or invalid")
-		return
+		return cursorSidecarListResponse{}, err
 	}
-	copyCursorSidecarHeaders(c.Writer.Header(), resp.Header)
-	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
+	return cursorSidecarListResponse{
+		StatusCode:  resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		Header:      resp.Header.Clone(),
+		Body:        append([]byte(nil), body...),
+	}, nil
+}
+
+func (h *GatewayHandler) writeCursorSidecarListResponse(c *gin.Context, result cursorSidecarListResponse, cacheStatus string) {
+	copyCursorSidecarHeaders(c.Writer.Header(), result.Header)
+	if cacheStatus != "" {
+		c.Header(cursorModelsCacheStatusHeader, cacheStatus)
+	}
+	contentType := result.ContentType
+	if strings.TrimSpace(contentType) == "" {
+		contentType = "application/json"
+	}
+	c.Data(result.StatusCode, contentType, result.Body)
 }
 
 func (h *GatewayHandler) applyCursorSidecarHeaders(c *gin.Context, req *http.Request, account *service.Account) {
@@ -611,6 +774,25 @@ func cursorEnvPositiveInt(key string) int {
 		return 0
 	}
 	return value
+}
+
+func cursorModelsFreshTTL() time.Duration {
+	if seconds := cursorEnvPositiveInt("CURSOR_MODELS_CACHE_TTL_SECONDS"); seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return cursorDefaultModelsCacheTTL
+}
+
+func cursorModelsStaleTTL() time.Duration {
+	if seconds := cursorEnvPositiveInt("CURSOR_MODELS_STALE_TTL_SECONDS"); seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return cursorDefaultModelsStaleTTL
+}
+
+func cursorModelsListCacheKey(baseURL, sidecarPath, sidecarAPIKey string) string {
+	sum := sha256.Sum256([]byte(sidecarAPIKey))
+	return fmt.Sprintf("%s|%s|%x", baseURL, sidecarPath, sum[:8])
 }
 
 func (c cursorRuntimeConfig) requestTimeout() time.Duration {
