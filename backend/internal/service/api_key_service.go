@@ -435,6 +435,8 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 	apiKey := &APIKey{
 		UserID:      userID,
 		Key:         key,
+		KeyHash:     HashAPIKey(key),
+		KeyPrefix:   APIKeyPrefixForStorage(key),
 		Name:        req.Name,
 		GroupID:     req.GroupID,
 		Status:      StatusActive,

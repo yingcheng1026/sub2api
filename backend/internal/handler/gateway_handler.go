@@ -770,7 +770,19 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
-			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+			if account.Platform == service.PlatformKiro {
+				result, err = h.forwardKiroSidecar(c, account, kiroSidecarRequest{
+					Method:       http.MethodPost,
+					Path:         "/v1/messages",
+					Model:        reqModel,
+					UpstreamBody: body,
+					RequestBody:  body,
+					Stream:       reqStream,
+					RecordUsage:  true,
+					Parsed:       parsedReq,
+					Mapping:      channelMapping,
+				})
+			} else if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, body, hasBoundSession)
 			} else {
 				result, err = h.gatewayService.Forward(requestCtx, c, account, parsedReq)
@@ -1607,6 +1619,23 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 
 	// 转发请求（不记录使用量）
+	if account.Platform == service.PlatformKiro {
+		_, err := h.forwardKiroSidecar(c, account, kiroSidecarRequest{
+			Method:       http.MethodPost,
+			Path:         "/v1/messages/count_tokens",
+			Model:        parsedReq.Model,
+			UpstreamBody: body,
+			RequestBody:  body,
+			Stream:       false,
+			RecordUsage:  false,
+			Parsed:       parsedReq,
+			Mapping:      service.ChannelMappingResult{MappedModel: parsedReq.Model},
+		})
+		if err != nil {
+			reqLog.Error("gateway.count_tokens_kiro_forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		}
+		return
+	}
 	if err := h.gatewayService.ForwardCountTokens(c.Request.Context(), c, account, parsedReq); err != nil {
 		reqLog.Error("gateway.count_tokens_forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		// 错误响应已在 ForwardCountTokens 中处理

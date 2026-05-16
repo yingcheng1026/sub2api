@@ -76,6 +76,8 @@ const platformLabel = computed(() => {
   if (props.platform === 'anthropic') return 'Anthropic'
   if (props.platform === 'openai') return 'OpenAI'
   if (props.platform === 'antigravity') return 'Antigravity'
+  if (props.platform === 'kiro') return 'Kiro'
+  if (props.platform === 'cursor') return 'Cursor'
   return 'Gemini'
 })
 
@@ -91,6 +93,8 @@ const typeLabel = computed(() => {
       return 'AWS'
     case 'service_account':
       return 'Vertex'
+    case 'upstream':
+      return 'Upstream'
     default:
       return props.type
   }
@@ -126,6 +130,12 @@ const platformClass = computed(() => {
   if (props.platform === 'antigravity') {
     return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
   }
+  if (props.platform === 'kiro') {
+    return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300'
+  }
+  if (props.platform === 'cursor') {
+    return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-200'
+  }
   return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
 })
 
@@ -138,6 +148,12 @@ const typeClass = computed(() => {
   }
   if (props.platform === 'antigravity') {
     return 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400'
+  }
+  if (props.platform === 'kiro') {
+    return 'bg-cyan-100 text-cyan-600 dark:bg-cyan-900/30 dark:text-cyan-300'
+  }
+  if (props.platform === 'cursor') {
+    return 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-200'
   }
   return 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
 })

@@ -17,7 +17,9 @@ import type {
   AdminDataPayload,
   AdminDataImportResult,
   CheckMixedChannelRequest,
-  CheckMixedChannelResponse
+  CheckMixedChannelResponse,
+  ProvisionCursorAccountRequest,
+  ProvisionCursorAccountResponse
 } from '@/types'
 
 /**
@@ -130,6 +132,13 @@ export async function getById(id: number): Promise<Account> {
  */
 export async function create(accountData: CreateAccountRequest): Promise<Account> {
   const { data } = await apiClient.post<Account>('/admin/accounts', accountData)
+  return data
+}
+
+export async function provisionCursorSidecar(
+  accountData: ProvisionCursorAccountRequest
+): Promise<ProvisionCursorAccountResponse> {
+  const { data } = await apiClient.post<ProvisionCursorAccountResponse>('/admin/accounts/cursor-sidecar', accountData)
   return data
 }
 
@@ -635,6 +644,7 @@ export const accountsAPI = {
   listWithEtag,
   getById,
   create,
+  provisionCursorSidecar,
   update,
   checkMixedChannelRisk,
   delete: deleteAccount,

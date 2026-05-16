@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -422,6 +423,86 @@ func TestTransformClaudeToGeminiWithOptions_PreservesBillingHeaderSystemBlock(t 
 			require.True(t, found, "转换后的 systemInstruction 应保留 x-anthropic-billing-header 内容")
 		})
 	}
+}
+
+func TestTransformClaudeToGeminiWithOptions_SessionIDUsesCacheControlSystemBlocks(t *testing.T) {
+	buildRequest := func(userText string) *ClaudeRequest {
+		return &ClaudeRequest{
+			Model: "claude-sonnet-4-6",
+			System: json.RawMessage(`[
+				{"type":"text","text":"stable Claude Code system prompt","cache_control":{"type":"ephemeral","ttl":"1h"}}
+			]`),
+			Messages: []ClaudeMessage{
+				{
+					Role:    "user",
+					Content: json.RawMessage(`[{"type":"text","text":` + strconv.Quote(userText) + `}]`),
+				},
+			},
+		}
+	}
+
+	body1, err := TransformClaudeToGeminiWithOptions(buildRequest("dynamic user turn one"), "project-1", "gemini-2.5-flash", DefaultTransformOptions())
+	require.NoError(t, err)
+	body2, err := TransformClaudeToGeminiWithOptions(buildRequest("dynamic user turn two"), "project-1", "gemini-2.5-flash", DefaultTransformOptions())
+	require.NoError(t, err)
+
+	var req1, req2 V1InternalRequest
+	require.NoError(t, json.Unmarshal(body1, &req1))
+	require.NoError(t, json.Unmarshal(body2, &req2))
+	require.NotEmpty(t, req1.Request.SessionID)
+	require.Equal(t, req1.Request.SessionID, req2.Request.SessionID)
+	require.NotEmpty(t, req1.Request.Contents)
+	require.NotEmpty(t, req1.Request.Contents[0].Parts)
+	require.Contains(t, req1.Request.Contents[0].Parts[0].Text, "stable Claude Code system prompt")
+	require.Contains(t, req1.Request.Contents[0].Parts[1].Text, "dynamic user turn one")
+}
+
+func TestTransformClaudeToGeminiWithOptions_MetadataUserIDOverridesCacheSessionSeed(t *testing.T) {
+	claudeReq := &ClaudeRequest{
+		Model:    "claude-sonnet-4-6",
+		Metadata: &ClaudeMetadata{UserID: "session-from-client"},
+		System: json.RawMessage(`[
+			{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}
+		]`),
+		Messages: []ClaudeMessage{
+			{
+				Role:    "user",
+				Content: json.RawMessage(`[{"type":"text","text":"hello"}]`),
+			},
+		},
+	}
+
+	body, err := TransformClaudeToGeminiWithOptions(claudeReq, "project-1", "gemini-2.5-flash", DefaultTransformOptions())
+	require.NoError(t, err)
+
+	var req V1InternalRequest
+	require.NoError(t, json.Unmarshal(body, &req))
+	require.Equal(t, "session-from-client", req.Request.SessionID)
+}
+
+func TestTransformClaudeToGeminiWithOptions_SessionIDFallsBackToFirstUserText(t *testing.T) {
+	buildRequest := func(userText string) *ClaudeRequest {
+		return &ClaudeRequest{
+			Model: "claude-sonnet-4-6",
+			Messages: []ClaudeMessage{
+				{
+					Role:    "user",
+					Content: json.RawMessage(`[{"type":"text","text":` + strconv.Quote(userText) + `}]`),
+				},
+			},
+		}
+	}
+
+	body1, err := TransformClaudeToGeminiWithOptions(buildRequest("first user text"), "project-1", "gemini-2.5-flash", DefaultTransformOptions())
+	require.NoError(t, err)
+	body2, err := TransformClaudeToGeminiWithOptions(buildRequest("second user text"), "project-1", "gemini-2.5-flash", DefaultTransformOptions())
+	require.NoError(t, err)
+
+	var req1, req2 V1InternalRequest
+	require.NoError(t, json.Unmarshal(body1, &req1))
+	require.NoError(t, json.Unmarshal(body2, &req2))
+	require.NotEmpty(t, req1.Request.SessionID)
+	require.NotEqual(t, req1.Request.SessionID, req2.Request.SessionID)
 }
 
 func TestTransformClaudeToGeminiWithOptions_PreservesWebSearchAlongsideFunctions(t *testing.T) {

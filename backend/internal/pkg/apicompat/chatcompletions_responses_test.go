@@ -977,6 +977,7 @@ func TestBufferedResponseAccumulator_TextOnly(t *testing.T) {
 	acc.ProcessEvent(&ResponsesStreamEvent{Type: "response.output_text.delta", Delta: ", world!"})
 
 	assert.True(t, acc.HasContent())
+	assert.False(t, acc.HasFunctionCalls())
 
 	output := acc.BuildOutput()
 	require.Len(t, output, 1)
@@ -1012,6 +1013,7 @@ func TestBufferedResponseAccumulator_ToolCalls(t *testing.T) {
 	})
 
 	assert.True(t, acc.HasContent())
+	assert.True(t, acc.HasFunctionCalls())
 
 	output := acc.BuildOutput()
 	require.Len(t, output, 1)

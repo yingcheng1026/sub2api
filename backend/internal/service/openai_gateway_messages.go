@@ -440,8 +440,20 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	}
 
 	if finalResponse == nil {
-		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream stream ended without a terminal response event")
-		return nil, fmt.Errorf("upstream stream ended without terminal event")
+		if synthetic := synthesizeBufferedResponsesResponse(acc, requestID, upstreamModel); synthetic != nil {
+			logger.L().Warn("openai messages buffered: synthesized response after missing terminal event",
+				zap.String("request_id", requestID),
+				zap.String("response_id", synthetic.ID),
+			)
+			finalResponse = synthetic
+		} else {
+			detail := bufferedMissingTerminalDetail("openai messages buffered", 0, "", false, false, acc, nil)
+			logger.L().Warn("openai messages buffered: missing terminal response event",
+				zap.String("request_id", requestID),
+				zap.String("detail", detail),
+			)
+			return nil, newBufferedMissingTerminalFailover(resp, detail)
+		}
 	}
 
 	// When the terminal event has an empty output array, reconstruct from

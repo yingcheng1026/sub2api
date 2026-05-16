@@ -1,0 +1,440 @@
+diff --git a/Dockerfile b/Dockerfile
+index 2ce1988..15dc451 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,7 +1,7 @@
+ FROM node:20-alpine AS builder
+ WORKDIR /app
+-COPY package.json ./
+-RUN npm install
++COPY package.json package-lock.json ./
++RUN npm ci
+ COPY tsconfig.json ./
+ COPY src/ src/
+ RUN npx tsc
+@@ -10,7 +10,7 @@ FROM node:20-alpine
+ WORKDIR /app
+ COPY --from=builder /app/dist dist/
+ COPY --from=builder /app/node_modules node_modules/
+-COPY package.json ./
++COPY package.json package-lock.json ./
+ EXPOSE 8317
+ VOLUME ["/data", "/config"]
+ ENV NODE_ENV=production
+diff --git a/package-lock.json b/package-lock.json
+index 9fb5709..3d9bb08 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1232,9 +1232,9 @@
+       }
+     },
+     "node_modules/path-to-regexp": {
+-      "version": "0.1.12",
+-      "resolved": "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-0.1.12.tgz",
+-      "integrity": "sha512-RA1GjUVMnvYFxuqovrEqZoxxW5NUZqbwKtYz/Tt7nXerk0LbLblQmrsgdeOxV5SFHf0UDggjS/bSeOZwt1pmEQ==",
++      "version": "0.1.13",
++      "resolved": "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-0.1.13.tgz",
++      "integrity": "sha512-A/AGNMFN3c8bOlvV9RreMdrv7jsmF9XIfDeCd87+I8RNg6s78BhJxMu69NEMHBSJFxKidViTEdruRwEk/WIKqA==",
+       "license": "MIT"
+     },
+     "node_modules/prettier": {
+diff --git a/src/accounts/manager.ts b/src/accounts/manager.ts
+index 95da10c..6d6056b 100644
+--- a/src/accounts/manager.ts
++++ b/src/accounts/manager.ts
+@@ -406,6 +406,37 @@ export class AccountManager {
+     };
+   }
+ 
++  getAccountByRef(ref: string): AccountResult {
++    const accountRef = ref.trim();
++    if (!accountRef) {
++      return { account: null, failureKind: null, retryAfterMs: null };
++    }
++
++    const email = this.accounts.has(accountRef)
++      ? accountRef
++      : this.accountOrder.find(
++          (candidate) => candidate.toLowerCase() === accountRef.toLowerCase(),
++        );
++    if (!email) {
++      return { account: null, failureKind: null, retryAfterMs: null };
++    }
++
++    const acct = this.accounts.get(email)!;
++    const now = Date.now();
++    if (acct.cooldownUntil > now) {
++      const kind = acct.lastFailureKind ?? "network";
++      const retryAfterMs =
++        kind === "auth" || kind === "forbidden"
++          ? null
++          : Math.max(0, acct.cooldownUntil - now);
++      return { account: null, failureKind: kind, retryAfterMs };
++    }
++
++    return {
++      account: buildAvailableAccount(this.authDir, email, acct.token, this.provider),
++    };
++  }
++
+   recordAttempt(email: string): void {
+     const acct = this.accounts.get(email);
+     if (acct) {
+@@ -507,6 +538,7 @@ export class AccountManager {
+   }
+ 
+   startAutoRefresh(): void {
++    if (this.refreshTimer) return;
+     const timer = setInterval(
+       () =>
+         this.refreshAll().catch((err) =>
+@@ -532,6 +564,7 @@ export class AccountManager {
+   }
+ 
+   startStatsLogger(): void {
++    if (this.statsTimer) return;
+     const timer = setInterval(() => this.logStats(), 5 * 60 * 1000);
+     timer.unref();
+     this.statsTimer = timer;
+diff --git a/src/handlers/anthropic.ts b/src/handlers/anthropic.ts
+index ce8cd01..b54951e 100644
+--- a/src/handlers/anthropic.ts
++++ b/src/handlers/anthropic.ts
+@@ -23,6 +23,12 @@ function internalError(resp: ExpressResponse): void {
+   }
+ }
+ 
++function cursorAccountRef(req: Request, providerId: string): string | undefined {
++  if (providerId !== "cursor") return undefined;
++  const ref = req.get("x-cursor-account-ref")?.trim();
++  return ref || undefined;
++}
++
+ /**
+  * Codex-specific path for /v1/messages. Translates the Anthropic Messages
+  * request into a Responses request, applies codex's required defaults
+@@ -220,6 +226,7 @@ export function createMessagesHandler(
+ 
+       await proxyWithRetry("Messages", resp, config, {
+         manager: provider.manager,
++        accountRef: cursorAccountRef(req, provider.id),
+         upstream: (account, signal) => {
+           const cloaked =
+             provider.applyCloaking?.({
+@@ -289,6 +296,7 @@ export function createCountTokensHandler(
+       const callCountTokens = provider.callCountTokens.bind(provider);
+       await proxyWithRetry("CountTokens", resp, config, {
+         manager: provider.manager,
++        accountRef: cursorAccountRef(req, provider.id),
+         upstream: (account, signal) =>
+           callCountTokens({ request: req, account, config, signal }),
+         success: async (upstream, account) => {
+diff --git a/src/handlers/openai.ts b/src/handlers/openai.ts
+index c356894..8b3a60a 100644
+--- a/src/handlers/openai.ts
++++ b/src/handlers/openai.ts
+@@ -53,6 +53,11 @@ function internalError(resp: ExpressResponse): void {
+   }
+ }
+ 
++function cursorAccountRef(req: Request): string | undefined {
++  const ref = req.get("x-cursor-account-ref")?.trim();
++  return ref || undefined;
++}
++
+ /**
+  * Codex-specific path for /v1/chat/completions. Translates the incoming
+  * Chat Completions body into a Responses body, applies codex's required
+@@ -370,6 +375,7 @@ async function proxyCursorChatCompletions(args: {
+ 
+   await proxyWithRetry("ChatCompletions(cursor)", resp, config, {
+     manager: provider.manager,
++    accountRef: cursorAccountRef(req),
+     upstream: (account, signal) => {
+       const cloaked =
+         provider.applyCloaking?.({
+@@ -650,6 +656,7 @@ export function createResponsesHandler(
+         const normalizedBody = normalizeCursorResponsesBody(body);
+         await proxyWithRetry("Responses", resp, config, {
+           manager: provider.manager,
++          accountRef: cursorAccountRef(req),
+           upstream: (account, signal) =>
+             provider.callMessages({
+               body: normalizedBody,
+diff --git a/src/server.ts b/src/server.ts
+index a48328f..6dbf550 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -1,7 +1,9 @@
+ import express from "express";
+ import { Config, isDebugLevel } from "./config";
++import { TokenData } from "./auth/types";
+ import { ProviderRegistry } from "./providers/registry";
+ import { extractApiKey, hashApiKey } from "./utils/common";
++import { decodeJwtPayload } from "./utils/jwt";
+ import {
+   createChatCompletionsHandler,
+   createResponsesHandler,
+@@ -17,6 +19,33 @@ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+ const RATE_LIMIT_MAX = 60;
+ 
++function requiredString(body: any, key: string): string {
++  const value = body?.[key];
++  return typeof value === "string" ? value.trim() : "";
++}
++
++function optionalString(body: any, key: string): string | undefined {
++  const value = requiredString(body, key);
++  return value || undefined;
++}
++
++function inferExpiryISO(accessToken: string): string | null {
++  try {
++    const claims = decodeJwtPayload(accessToken) as { exp?: number };
++    if (!claims.exp || !Number.isFinite(claims.exp)) return null;
++    return new Date(claims.exp * 1000).toISOString();
++  } catch {
++    return null;
++  }
++}
++
++function normalizeExpiryISO(value: string): string | null {
++  if (!value) return null;
++  const ms = Date.parse(value);
++  if (!Number.isFinite(ms)) return null;
++  return new Date(ms).toISOString();
++}
++
+ function rateLimit(ip: string): boolean {
+   const now = Date.now();
+   const entry = rateLimitMap.get(ip);
+@@ -226,6 +255,81 @@ export function createServer(
+     });
+   });
+ 
++  // POST /admin/accounts/cursor — provision one Cursor token into the sidecar.
++  //
++  // The response intentionally never echoes access_token or refresh_token.
++  // Operators should use the returned account_ref as Sub2API's
++  // credentials.sidecar_account_ref value.
++  app.post("/admin/accounts/cursor", (req, res) => {
++    const email = requiredString(req.body, "email");
++    const accessToken = requiredString(req.body, "access_token");
++    const refreshToken = requiredString(req.body, "refresh_token");
++    const explicitExpiry =
++      normalizeExpiryISO(requiredString(req.body, "expired")) ||
++      normalizeExpiryISO(requiredString(req.body, "expires_at"));
++    const expiresAt = explicitExpiry || inferExpiryISO(accessToken);
++
++    if (!email || !email.includes("@")) {
++      res.status(400).json({ error: { message: "email is required" } });
++      return;
++    }
++    if (!accessToken) {
++      res.status(400).json({ error: { message: "access_token is required" } });
++      return;
++    }
++    if (!refreshToken) {
++      res.status(400).json({ error: { message: "refresh_token is required" } });
++      return;
++    }
++    if (!expiresAt) {
++      res.status(400).json({
++        error: {
++          message:
++            "expired/expires_at is required when access_token has no readable exp claim",
++        },
++      });
++      return;
++    }
++
++    const provider = registry.get("cursor");
++    const token: TokenData = {
++      accessToken,
++      refreshToken,
++      email,
++      expiresAt,
++      accountUuid:
++        optionalString(req.body, "account_uuid") ||
++        optionalString(req.body, "cursor_service_machine_id") ||
++        "",
++      provider: "cursor",
++      lastRefreshAt: new Date().toISOString(),
++      cursorServiceMachineId: optionalString(
++        req.body,
++        "cursor_service_machine_id",
++      ),
++      cursorClientVersion: optionalString(req.body, "cursor_client_version"),
++      cursorConfigVersion: optionalString(req.body, "cursor_config_version"),
++      cursorClientId: optionalString(req.body, "cursor_client_id"),
++      cursorMembershipType: optionalString(req.body, "cursor_membership_type"),
++    };
++
++    provider.manager.addAccount(token);
++    provider.manager.startAutoRefresh();
++    provider.manager.startStatsLogger();
++
++    res.status(201).json({
++      provider: "cursor",
++      account_ref: email,
++      email,
++      expires_at: expiresAt,
++      account_uuid: token.accountUuid || undefined,
++      cursor_service_machine_id: token.cursorServiceMachineId,
++      cursor_client_version: token.cursorClientVersion,
++      cursor_membership_type: token.cursorMembershipType,
++      generated_at: new Date().toISOString(),
++    });
++  });
++
+   // POST /admin/reload — re-reads token files from auth-dir and reconciles
+   // each provider's in-memory state. Called automatically by `--login` after
+   // a successful re-auth (see notifyServerReload in src/index.ts), and
+diff --git a/src/utils/http.ts b/src/utils/http.ts
+index 660555a..7944e3a 100644
+--- a/src/utils/http.ts
++++ b/src/utils/http.ts
+@@ -82,6 +82,7 @@ export function accountUnavailable(
+ 
+ export interface ProxyOptions {
+   manager: AccountManager;
++  accountRef?: string;
+   upstream: (
+     account: AvailableAccount,
+     signal: AbortSignal,
+@@ -140,7 +141,9 @@ export async function proxyWithRetry(
+ 
+   try {
+     for (let attempt = 0; attempt < maxRetries; attempt++) {
+-      const result = manager.getNextAccount();
++      const result = options.accountRef
++        ? manager.getAccountByRef(options.accountRef)
++        : manager.getNextAccount();
+       if (!result.account) {
+         return accountUnavailable(resp, result, manager.provider);
+       }
+diff --git a/tests/smoke.test.ts b/tests/smoke.test.ts
+index ab14e8e..08040e7 100644
+--- a/tests/smoke.test.ts
++++ b/tests/smoke.test.ts
+@@ -1063,6 +1063,119 @@ test("POST /admin/reload requires the API key", async (t) => {
+   assert.equal(wrongAuth.status, 403);
+ });
+ 
++test("POST /admin/accounts/cursor provisions token without echoing secrets", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
++  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const response = await requestJson({
++    server,
++    method: "POST",
++    path: "/admin/accounts/cursor",
++    headers: { Authorization: "Bearer test-key" },
++    body: {
++      email: "cursor-new@example.com",
++      access_token: "cursor-access-secret",
++      refresh_token: "cursor-refresh-secret",
++      expires_at: "2026-05-15T12:00:00Z",
++      account_uuid: "cursor-account-uuid",
++      cursor_service_machine_id: "cursor-machine",
++      cursor_client_version: "3.3.30",
++      cursor_membership_type: "pro",
++    },
++  });
++
++  assert.equal(response.status, 201);
++  assert.equal(response.body.provider, "cursor");
++  assert.equal(response.body.account_ref, "cursor-new@example.com");
++  assert.equal(response.body.email, "cursor-new@example.com");
++  assert.equal(response.body.cursor_client_version, "3.3.30");
++  assert.equal(JSON.stringify(response.body).includes("cursor-access-secret"), false);
++  assert.equal(JSON.stringify(response.body).includes("cursor-refresh-secret"), false);
++
++  const accounts = await requestJson({
++    server,
++    method: "GET",
++    path: "/admin/accounts",
++    headers: { Authorization: "Bearer test-key" },
++  });
++  assert.equal(accounts.status, 200);
++  assert.equal(accounts.body.providers.cursor.account_count, 1);
++  assert.equal(
++    accounts.body.providers.cursor.accounts[0].email,
++    "cursor-new@example.com",
++  );
++});
++
++test("cursor requests honor X-Cursor-Account-Ref", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
++  saveToken(
++    authDir,
++    makeToken({
++      accessToken: "cursor-one-access",
++      refreshToken: "cursor-one-refresh",
++      email: "cursor-one@example.com",
++      accountUuid: "cursor-one-machine",
++      provider: "cursor",
++      cursorServiceMachineId: "cursor-one-machine",
++      cursorClientVersion: "cli-test",
++      cursorConfigVersion: "config-test",
++    }),
++  );
++  saveToken(
++    authDir,
++    makeToken({
++      accessToken: "cursor-two-access",
++      refreshToken: "cursor-two-refresh",
++      email: "cursor-two@example.com",
++      accountUuid: "cursor-two-machine",
++      provider: "cursor",
++      cursorServiceMachineId: "cursor-two-machine",
++      cursorClientVersion: "cli-test",
++      cursorConfigVersion: "config-test",
++    }),
++  );
++
++  let seenAuth = "";
++  const { __setCursorTransport } = await import("../src/upstream/cursor-api");
++  __setCursorTransport(async (_url, headers) => {
++    seenAuth = headers.Authorization || "";
++    return {
++      status: 200,
++      headers: { "content-type": "application/connect+proto" },
++      body: Buffer.from(connectProtoTextFrame("selected cursor account")),
++    };
++  });
++  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
++  t.after(async () => {
++    __setCursorTransport(null);
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const response = await requestJson({
++    server,
++    method: "POST",
++    path: "/v1/chat/completions",
++    headers: {
++      Authorization: "Bearer test-key",
++      "x-cursor-account-ref": "cursor-two@example.com",
++    },
++    body: {
++      model: "gpt-4o",
++      messages: [{ role: "user", content: "say hi" }],
++      stream: false,
++    },
++  });
++
++  assert.equal(response.status, 200);
++  assert.equal(seenAuth, "Bearer cursor-two-access");
++  assert.equal(response.body.choices[0].message.content, "selected cursor account");
++});
++
+ test("count_tokens with empty body returns upstream client error, not network error", async (t) => {
+   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+   const manager = makeManager(authDir, [makeToken()]);

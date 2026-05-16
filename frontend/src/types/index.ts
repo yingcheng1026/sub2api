@@ -493,7 +493,7 @@ export interface PaginationConfig {
 
 // ==================== API Key & Group Types ====================
 
-export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity'
+export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'kiro' | 'cursor'
 
 export type SubscriptionType = 'standard' | 'subscription'
 
@@ -676,7 +676,7 @@ export interface UpdateGroupRequest {
 
 // ==================== Account & Proxy Types ====================
 
-export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity'
+export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'kiro' | 'cursor'
 export type AccountType = 'oauth' | 'setup-token' | 'apikey' | 'upstream' | 'bedrock' | 'service_account'
 export type OAuthAddMethod = 'oauth' | 'setup-token'
 export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'socks5h'
@@ -1005,6 +1005,46 @@ export interface CreateAccountRequest {
   expires_at?: number | null
   auto_pause_on_expired?: boolean
   confirm_mixed_channel_risk?: boolean
+}
+
+export interface ProvisionCursorAccountRequest {
+  name: string
+  notes?: string | null
+  email: string
+  access_token: string
+  refresh_token: string
+  cursor_token_expires_at?: string
+  account_uuid?: string
+  cursor_service_machine_id?: string
+  cursor_client_version?: string
+  cursor_config_version?: string
+  cursor_client_id?: string
+  cursor_membership_type?: string
+  extra?: Record<string, unknown>
+  proxy_id?: number | null
+  concurrency?: number
+  load_factor?: number | null
+  priority?: number
+  rate_multiplier?: number
+  group_ids?: number[]
+  expires_at?: number | null
+  auto_pause_on_expired?: boolean
+  confirm_mixed_channel_risk?: boolean
+}
+
+export interface ProvisionCursorAccountResponse {
+  account: Account
+  cursor_sidecar: {
+    provider: 'cursor'
+    account_ref: string
+    email: string
+    expires_at?: string
+    account_uuid?: string
+    cursor_service_machine_id?: string
+    cursor_client_version?: string
+    cursor_membership_type?: string
+    generated_at?: string
+  }
 }
 
 export interface UpdateAccountRequest {

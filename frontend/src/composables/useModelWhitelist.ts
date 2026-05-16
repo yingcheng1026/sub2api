@@ -32,6 +32,19 @@ export const claudeModels = [
   'claude-sonnet-4-6'
 ]
 
+const kiroModels = [
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001'
+]
+
+const cursorModels = [
+  'cursor-auto',
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'gpt-5.5'
+]
+
 // Google Gemini
 const geminiModels = [
   // Keep in sync with backend curated Gemini lists.
@@ -354,6 +367,8 @@ export function getModelsByPlatform(platform: string): string[] {
     case 'claude': return claudeModels
     case 'gemini': return geminiModels
     case 'antigravity': return antigravityModels
+    case 'kiro': return kiroModels
+    case 'cursor': return cursorModels
     case 'zhipu': return zhipuModels
     case 'qwen': return qwenModels
     case 'deepseek': return deepseekModels

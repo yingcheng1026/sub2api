@@ -38,9 +38,18 @@ func (r *apiKeyRepository) activeQuery() *dbent.APIKeyQuery {
 }
 
 func (r *apiKeyRepository) Create(ctx context.Context, key *service.APIKey) error {
+	if key.KeyHash == "" {
+		key.KeyHash = service.HashAPIKey(key.Key)
+	}
+	if key.KeyPrefix == "" {
+		key.KeyPrefix = service.APIKeyPrefixForStorage(key.Key)
+	}
+
 	builder := r.client.APIKey.Create().
 		SetUserID(key.UserID).
 		SetKey(key.Key).
+		SetKeyHash(key.KeyHash).
+		SetKeyPrefix(key.KeyPrefix).
 		SetName(key.Name).
 		SetStatus(key.Status).
 		SetNillableGroupID(key.GroupID).
@@ -105,7 +114,10 @@ func (r *apiKeyRepository) GetKeyAndOwnerID(ctx context.Context, id int64) (stri
 
 func (r *apiKeyRepository) GetByKey(ctx context.Context, key string) (*service.APIKey, error) {
 	m, err := r.activeQuery().
-		Where(apikey.KeyEQ(key)).
+		Where(apikey.Or(
+			apikey.KeyHashEQ(service.HashAPIKey(key)),
+			apikey.KeyEQ(key),
+		)).
 		WithUser().
 		WithGroup().
 		Only(ctx)
@@ -120,10 +132,15 @@ func (r *apiKeyRepository) GetByKey(ctx context.Context, key string) (*service.A
 
 func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*service.APIKey, error) {
 	m, err := r.activeQuery().
-		Where(apikey.KeyEQ(key)).
+		Where(apikey.Or(
+			apikey.KeyHashEQ(service.HashAPIKey(key)),
+			apikey.KeyEQ(key),
+		)).
 		Select(
 			apikey.FieldID,
 			apikey.FieldUserID,
+			apikey.FieldKeyHash,
+			apikey.FieldKeyPrefix,
 			apikey.FieldGroupID,
 			apikey.FieldName,
 			apikey.FieldStatus,
@@ -276,10 +293,14 @@ func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey) erro
 func (r *apiKeyRepository) Delete(ctx context.Context, id int64) error {
 	// 存在唯一键约束 生成tombstone key 用来释放原key，长度远小于 128，满足 schema 限制
 	tombstoneKey := fmt.Sprintf("__deleted__%d__%d", id, time.Now().UnixNano())
+	tombstoneHash := service.HashAPIKey(tombstoneKey)
+	tombstonePrefix := service.APIKeyPrefixForStorage(tombstoneKey)
 	// 显式软删除：避免依赖 Hook 行为，确保 deleted_at 一定被设置。
 	affected, err := r.client.APIKey.Update().
 		Where(apikey.IDEQ(id), apikey.DeletedAtIsNil()).
 		SetKey(tombstoneKey).
+		SetKeyHash(tombstoneHash).
+		SetKeyPrefix(tombstonePrefix).
 		SetDeletedAt(time.Now()).
 		Save(ctx)
 	if err != nil {
@@ -310,6 +331,7 @@ func (r *apiKeyRepository) ListByUserID(ctx context.Context, userID int64, param
 	if filters.Search != "" {
 		q = q.Where(apikey.Or(
 			apikey.NameContainsFold(filters.Search),
+			apikey.KeyPrefixContainsFold(filters.Search),
 			apikey.KeyContainsFold(filters.Search),
 		))
 	}
@@ -370,7 +392,10 @@ func (r *apiKeyRepository) CountByUserID(ctx context.Context, userID int64) (int
 }
 
 func (r *apiKeyRepository) ExistsByKey(ctx context.Context, key string) (bool, error) {
-	count, err := r.activeQuery().Where(apikey.KeyEQ(key)).Count(ctx)
+	count, err := r.activeQuery().Where(apikey.Or(
+		apikey.KeyHashEQ(service.HashAPIKey(key)),
+		apikey.KeyEQ(key),
+	)).Count(ctx)
 	return count > 0, err
 }
 
@@ -621,6 +646,8 @@ func apiKeyEntityToService(m *dbent.APIKey) *service.APIKey {
 		ID:            m.ID,
 		UserID:        m.UserID,
 		Key:           m.Key,
+		KeyHash:       derefString(m.KeyHash),
+		KeyPrefix:     m.KeyPrefix,
 		Name:          m.Name,
 		Status:        m.Status,
 		IPWhitelist:   m.IPWhitelist,

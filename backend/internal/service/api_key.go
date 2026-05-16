@@ -31,6 +31,8 @@ type APIKey struct {
 	ID          int64
 	UserID      int64
 	Key         string
+	KeyHash     string
+	KeyPrefix   string
 	Name        string
 	GroupID     *int64
 	Status      string

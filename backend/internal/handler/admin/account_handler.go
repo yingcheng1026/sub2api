@@ -1953,6 +1953,18 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
+	// Handle Kiro accounts: expose Claude-compatible model IDs to downstream users.
+	if account.Platform == service.PlatformKiro {
+		response.Success(c, claude.LatestClaudeCodeModels)
+		return
+	}
+
+	// Handle Cursor accounts: expose Cursor sidecar model IDs, not Claude IDs.
+	if account.Platform == service.PlatformCursor {
+		response.Success(c, service.DefaultCursorModels)
+		return
+	}
+
 	// Handle Claude/Anthropic accounts
 	// For OAuth and Setup-Token accounts: return default models
 	if account.IsOAuth() {
