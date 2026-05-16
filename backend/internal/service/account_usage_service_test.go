@@ -140,7 +140,7 @@ func TestAccountUsageService_GetOpenAIUsage_DoesNotPromoteCodexExtraToRateLimit(
 		},
 	}
 
-	usage, err := svc.getOpenAIUsage(context.Background(), account)
+	usage, err := svc.getOpenAIUsage(context.Background(), account, true)
 	if err != nil {
 		t.Fatalf("getOpenAIUsage() error = %v", err)
 	}
@@ -154,6 +154,43 @@ func TestAccountUsageService_GetOpenAIUsage_DoesNotPromoteCodexExtraToRateLimit(
 	case got := <-repo.rateLimitCh:
 		t.Fatalf("不应将已耗尽的 codex extra 持久化为运行时限流状态: %v", got)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestAccountUsageService_GetPassiveUsage_OpenAISkipsCodexProbe(t *testing.T) {
+	t.Parallel()
+
+	repo := &accountUsageCodexProbeRepo{
+		stubOpenAIAccountRepo: stubOpenAIAccountRepo{
+			accounts: []Account{{
+				ID:       42,
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeOAuth,
+				Extra: map[string]any{
+					"openai_oauth_responses_websockets_v2_enabled": true,
+					"codex_usage_updated_at":                       time.Now().Add(-(openAIProbeCacheTTL + time.Minute)).UTC().Format(time.RFC3339),
+					"codex_5h_used_percent":                        12.0,
+					"codex_5h_reset_at":                            time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339),
+					"codex_7d_used_percent":                        34.0,
+					"codex_7d_reset_at":                            time.Now().Add(5 * 24 * time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339),
+				},
+			}},
+		},
+	}
+	svc := &AccountUsageService{accountRepo: repo}
+
+	usage, err := svc.GetPassiveUsage(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetPassiveUsage() error = %v", err)
+	}
+	if usage.Source != "passive" {
+		t.Fatalf("Source = %q, want passive", usage.Source)
+	}
+	if usage.FiveHour == nil || usage.FiveHour.Utilization != 12.0 {
+		t.Fatalf("expected 5h usage from local codex extra, got %#v", usage.FiveHour)
+	}
+	if usage.SevenDay == nil || usage.SevenDay.Utilization != 34.0 {
+		t.Fatalf("expected 7d usage from local codex extra, got %#v", usage.SevenDay)
 	}
 }
 
