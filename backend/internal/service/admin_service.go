@@ -2093,6 +2093,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := validateKiroAccountType(input.Platform, input.Type); err != nil {
 		return nil, err
 	}
+	if err := validateCursorAccountType(input.Platform, input.Type); err != nil {
+		return nil, err
+	}
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -2111,6 +2114,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	}
 
 	if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, input.Platform, groupIDs); err != nil {
+		return nil, err
+	}
+	if err := validateCursorAccountGroupIsolation(ctx, s.groupRepo, input.Platform, groupIDs); err != nil {
 		return nil, err
 	}
 
@@ -2215,6 +2221,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := validateKiroAccountType(account.Platform, input.Type); err != nil {
 			return nil, err
 		}
+		if err := validateCursorAccountType(account.Platform, input.Type); err != nil {
+			return nil, err
+		}
 		account.Type = input.Type
 	}
 	if input.Notes != nil {
@@ -2305,6 +2314,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, account.Platform, *input.GroupIDs); err != nil {
 			return nil, err
 		}
+		if err := validateCursorAccountGroupIsolation(ctx, s.groupRepo, account.Platform, *input.GroupIDs); err != nil {
+			return nil, err
+		}
 
 		// 检查混合渠道风险（除非用户已确认）
 		if !input.SkipMixedChannelCheck {
@@ -2383,6 +2395,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 				continue
 			}
 			if err := validateKiroAccountGroupIsolation(ctx, s.groupRepo, platform, *input.GroupIDs); err != nil {
+				return nil, err
+			}
+			if err := validateCursorAccountGroupIsolation(ctx, s.groupRepo, platform, *input.GroupIDs); err != nil {
 				return nil, err
 			}
 		}

@@ -353,3 +353,71 @@ func TestAdminService_BulkUpdateAccounts_KiroIsolationPrecheckBlocksBeforeWrite(
 	require.Empty(t, repo.bulkUpdateIDs)
 	require.Empty(t, repo.bindGroupsCalls)
 }
+
+func TestAdminService_CreateAccount_CursorAllowsCursorGroup(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "cursor-group", Platform: PlatformCursor}},
+	}
+
+	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                  "cursor-upstream",
+		Platform:              PlatformCursor,
+		Type:                  AccountTypeUpstream,
+		Credentials:           map[string]any{"sidecar_account_ref": "cursor-prod-001"},
+		GroupIDs:              []int64{10},
+		SkipMixedChannelCheck: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, PlatformCursor, repo.createdAccount.Platform)
+	require.Equal(t, AccountTypeUpstream, repo.createdAccount.Type)
+	require.Equal(t, []int64{account.ID}, repo.bindGroupsCalls)
+}
+
+func TestAdminService_CreateAccount_CursorRejectsOAuthType(t *testing.T) {
+	repo := &accountRepoStubForBulkUpdate{}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "cursor-group", Platform: PlatformCursor}},
+	}
+
+	account, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                  "cursor-upstream",
+		Platform:              PlatformCursor,
+		Type:                  AccountTypeOAuth,
+		Credentials:           map[string]any{"access_token": "placeholder"},
+		GroupIDs:              []int64{10},
+		SkipMixedChannelCheck: true,
+	})
+
+	require.Nil(t, account)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cursor accounts must use upstream type")
+	require.Nil(t, repo.createdAccount)
+}
+
+func TestAdminService_UpdateAccount_NonCursorRejectsCursorGroup(t *testing.T) {
+	groupIDs := []int64{10}
+	repo := &accountRepoStubForBulkUpdate{
+		getByIDAccounts: map[int64]*Account{
+			1: {ID: 1, Name: "openai-upstream", Platform: PlatformOpenAI, Type: AccountTypeOAuth},
+		},
+	}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "cursor-group", Platform: PlatformCursor}},
+	}
+
+	account, err := svc.UpdateAccount(context.Background(), 1, &UpdateAccountInput{
+		GroupIDs:              &groupIDs,
+		SkipMixedChannelCheck: true,
+	})
+
+	require.Nil(t, account)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cursor groups only accept cursor accounts")
+	require.Nil(t, repo.updatedAccount)
+}

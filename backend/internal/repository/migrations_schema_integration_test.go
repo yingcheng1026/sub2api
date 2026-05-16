@@ -35,6 +35,10 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 
 	// api_keys: key length should be 128
 	requireColumn(t, tx, "api_keys", "key", "character varying", 128, false)
+	requireColumn(t, tx, "api_keys", "key_hash", "character varying", 64, true)
+	requireColumn(t, tx, "api_keys", "key_prefix", "character varying", 16, false)
+	requireIndex(t, tx, "api_keys", "apikey_key_hash")
+	requirePartialUniqueIndexDefinition(t, tx, "api_keys", "apikey_key_hash", "key_hash", "deleted_at IS NULL", "key_hash IS NOT NULL")
 
 	// redeem_codes: subscription fields
 	requireColumn(t, tx, "redeem_codes", "group_id", "bigint", 0, true)

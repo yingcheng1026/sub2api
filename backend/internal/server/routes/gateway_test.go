@@ -108,6 +108,7 @@ func TestGatewayRoutesKiroDedicatedRoutesAreDisabledByDefault(t *testing.T) {
 
 	requireRouteNotRegistered(t, router, http.MethodGet, "/kiro/v1/models")
 	requireRouteNotRegistered(t, router, http.MethodPost, "/kiro/v1/messages")
+	requireRouteNotRegistered(t, router, http.MethodPost, "/kiro/v1/messages/count_tokens")
 }
 
 func TestGatewayRoutesKiroDedicatedRoutesRequireKiroGroup(t *testing.T) {
@@ -123,6 +124,7 @@ func TestGatewayRoutesKiroDedicatedRoutesRequireKiroGroup(t *testing.T) {
 	router := newGatewayRoutesTestRouterWith(cfg, service.PlatformOpenAI)
 
 	requireRouteRegistered(t, router, http.MethodGet, "/kiro/v1/models")
+	requireRouteRegistered(t, router, http.MethodPost, "/kiro/v1/messages/count_tokens")
 
 	req := httptest.NewRequest(http.MethodGet, "/kiro/v1/models", nil)
 	w := httptest.NewRecorder()
@@ -183,4 +185,107 @@ func TestGatewayRoutesKiroGroupDoesNotFallThroughSharedResponsesWebSocket(t *tes
 
 	require.Equal(t, http.StatusNotFound, w.Code)
 	require.Contains(t, w.Body.String(), "shared /v1")
+}
+
+func TestGatewayRoutesCursorDedicatedRoutesRequireCursorGroupByDefault(t *testing.T) {
+	clearCursorRouteEnv(t)
+	router := newGatewayRoutesTestRouter()
+
+	requireRouteRegistered(t, router, http.MethodGet, "/cursor/v1/models")
+	requireRouteRegistered(t, router, http.MethodPost, "/cursor/v1/messages")
+	requireRouteRegistered(t, router, http.MethodPost, "/cursor/v1/messages/count_tokens")
+	requireRouteRegistered(t, router, http.MethodPost, "/cursor/v1/responses")
+	requireRouteRegistered(t, router, http.MethodPost, "/cursor/v1/chat/completions")
+
+	req := httptest.NewRequest(http.MethodGet, "/cursor/v1/models", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "cursor group")
+}
+
+func TestGatewayRoutesCursorDedicatedRoutesReportMissingSidecar(t *testing.T) {
+	clearCursorRouteEnv(t)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{MaxBodySize: 1 << 20},
+		Cursor: config.CursorConfig{
+			Enabled:               true,
+			RouteEnabled:          true,
+			MaxConcurrency:        1,
+			RequestTimeoutSeconds: 90,
+		},
+	}
+	router := newGatewayRoutesTestRouterWith(cfg, service.PlatformCursor)
+
+	req := httptest.NewRequest(http.MethodGet, "/cursor/v1/models", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Contains(t, w.Body.String(), "Cursor sidecar is not configured")
+}
+
+func TestGatewayRoutesCursorDedicatedRoutesStayDisabledWithoutRouteFlag(t *testing.T) {
+	clearCursorRouteEnv(t)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{MaxBodySize: 1 << 20},
+		Cursor: config.CursorConfig{
+			SidecarURL:            "http://127.0.0.1:8788",
+			MaxConcurrency:        1,
+			RequestTimeoutSeconds: 90,
+		},
+	}
+	router := newGatewayRoutesTestRouterWith(cfg, service.PlatformCursor)
+
+	req := httptest.NewRequest(http.MethodGet, "/cursor/v1/models", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "Cursor route is disabled")
+}
+
+func TestGatewayRoutesCursorGroupDoesNotFallThroughSharedV1(t *testing.T) {
+	clearCursorRouteEnv(t)
+	router := newGatewayRoutesTestRouterWith(
+		&config.Config{Gateway: config.GatewayConfig{MaxBodySize: 1 << 20}},
+		service.PlatformCursor,
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"cursor-auto"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "shared /v1")
+}
+
+func TestGatewayRoutesCursorGroupDoesNotFallThroughSharedResponsesWebSocket(t *testing.T) {
+	clearCursorRouteEnv(t)
+	router := newGatewayRoutesTestRouterWith(
+		&config.Config{Gateway: config.GatewayConfig{MaxBodySize: 1 << 20}},
+		service.PlatformCursor,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/responses", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "shared /v1")
+}
+
+func clearCursorRouteEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("CURSOR_ENABLED", "")
+	t.Setenv("CURSOR_ROUTE_ENABLED", "")
+	t.Setenv("CURSOR_AUTO_ROUTE_ON_V1", "")
+	t.Setenv("CURSOR_SIDECAR_URL", "")
 }

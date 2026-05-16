@@ -49,6 +49,8 @@ type accountRepository struct {
 	// Used to proactively sync account snapshot to cache when status changes,
 	// ensuring sticky sessions can promptly detect unavailable accounts.
 	schedulerCache service.SchedulerCache
+
+	credentialEncryptor service.SecretEncryptor
 }
 
 var schedulerNeutralExtraKeyPrefixes = []string{
@@ -66,14 +68,18 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 
 // NewAccountRepository 创建账户仓储实例。
 // 这是对外暴露的构造函数，返回接口类型以便于依赖注入。
-func NewAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCache service.SchedulerCache) service.AccountRepository {
-	return newAccountRepositoryWithSQL(client, sqlDB, schedulerCache)
+func NewAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCache service.SchedulerCache, credentialEncryptor service.SecretEncryptor) service.AccountRepository {
+	return newAccountRepositoryWithSQL(client, sqlDB, schedulerCache, credentialEncryptor)
 }
 
 // newAccountRepositoryWithSQL 是内部构造函数，支持依赖注入 SQL 执行器。
 // 这种设计便于单元测试时注入 mock 对象。
-func newAccountRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor, schedulerCache service.SchedulerCache) *accountRepository {
-	return &accountRepository{client: client, sql: sqlq, schedulerCache: schedulerCache}
+func newAccountRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor, schedulerCache service.SchedulerCache, credentialEncryptors ...service.SecretEncryptor) *accountRepository {
+	var credentialEncryptor service.SecretEncryptor
+	if len(credentialEncryptors) > 0 {
+		credentialEncryptor = credentialEncryptors[0]
+	}
+	return &accountRepository{client: client, sql: sqlq, schedulerCache: schedulerCache, credentialEncryptor: credentialEncryptor}
 }
 
 func (r *accountRepository) Create(ctx context.Context, account *service.Account) error {
@@ -81,12 +87,17 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 		return service.ErrAccountNilInput
 	}
 
+	credentials, err := r.encryptCredentials(normalizeJSONMap(account.Credentials))
+	if err != nil {
+		return err
+	}
+
 	builder := r.client.Account.Create().
 		SetName(account.Name).
 		SetNillableNotes(account.Notes).
 		SetPlatform(account.Platform).
 		SetType(account.Type).
-		SetCredentials(normalizeJSONMap(account.Credentials)).
+		SetCredentials(credentials).
 		SetExtra(normalizeJSONMap(account.Extra)).
 		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
@@ -208,7 +219,10 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 
 	outByID := make(map[int64]*service.Account, len(entAccounts))
 	for _, entAcc := range entAccounts {
-		out := accountEntityToService(entAcc)
+		out, err := r.accountEntityToService(entAcc)
+		if err != nil {
+			return nil, err
+		}
 		if out == nil {
 			continue
 		}
@@ -318,12 +332,17 @@ func (r *accountRepository) Update(ctx context.Context, account *service.Account
 		return nil
 	}
 
+	credentials, err := r.encryptCredentials(normalizeJSONMap(account.Credentials))
+	if err != nil {
+		return err
+	}
+
 	builder := r.client.Account.UpdateOneID(account.ID).
 		SetName(account.Name).
 		SetNillableNotes(account.Notes).
 		SetPlatform(account.Platform).
 		SetType(account.Type).
-		SetCredentials(normalizeJSONMap(account.Credentials)).
+		SetCredentials(credentials).
 		SetExtra(normalizeJSONMap(account.Extra)).
 		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
@@ -405,8 +424,12 @@ func (r *accountRepository) Update(ctx context.Context, account *service.Account
 }
 
 func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, credentials map[string]any) error {
-	_, err := r.client.Account.UpdateOneID(id).
-		SetCredentials(normalizeJSONMap(credentials)).
+	encryptedCredentials, err := r.encryptCredentials(normalizeJSONMap(credentials))
+	if err != nil {
+		return err
+	}
+	_, err = r.client.Account.UpdateOneID(id).
+		SetCredentials(encryptedCredentials).
 		Save(ctx)
 	if err != nil {
 		return translatePersistenceError(err, service.ErrAccountNotFound, nil)
@@ -1423,7 +1446,11 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	}
 	// JSONB 需要合并而非覆盖，使用 raw SQL 保持旧行为。
 	if len(updates.Credentials) > 0 {
-		payload, err := json.Marshal(updates.Credentials)
+		encryptedCredentials, err := r.encryptCredentials(normalizeJSONMap(updates.Credentials))
+		if err != nil {
+			return 0, err
+		}
+		payload, err := json.Marshal(encryptedCredentials)
 		if err != nil {
 			return 0, err
 		}
@@ -1570,7 +1597,10 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 
 	outAccounts := make([]service.Account, 0, len(accounts))
 	for _, acc := range accounts {
-		out := accountEntityToService(acc)
+		out, err := r.accountEntityToService(acc)
+		if err != nil {
+			return nil, err
+		}
 		if out == nil {
 			continue
 		}
@@ -1714,7 +1744,33 @@ func buildSchedulerGroupPayload(groupIDs []int64) map[string]any {
 	return map[string]any{"group_ids": groupIDs}
 }
 
+func (r *accountRepository) encryptCredentials(credentials map[string]any) (map[string]any, error) {
+	return encryptAccountCredentials(credentials, r.credentialEncryptor)
+}
+
+func (r *accountRepository) decryptCredentials(credentials map[string]any) (map[string]any, error) {
+	return decryptAccountCredentials(credentials, r.credentialEncryptor)
+}
+
+func (r *accountRepository) accountEntityToService(m *dbent.Account) (*service.Account, error) {
+	if m == nil {
+		return nil, nil
+	}
+	credentials, err := r.decryptCredentials(copyJSONMap(m.Credentials))
+	if err != nil {
+		return nil, err
+	}
+	return accountEntityToServiceWithCredentials(m, credentials), nil
+}
+
 func accountEntityToService(m *dbent.Account) *service.Account {
+	if m == nil {
+		return nil
+	}
+	return accountEntityToServiceWithCredentials(m, copyJSONMap(m.Credentials))
+}
+
+func accountEntityToServiceWithCredentials(m *dbent.Account, credentials map[string]any) *service.Account {
 	if m == nil {
 		return nil
 	}
@@ -1727,7 +1783,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		Notes:                   m.Notes,
 		Platform:                m.Platform,
 		Type:                    m.Type,
-		Credentials:             copyJSONMap(m.Credentials),
+		Credentials:             credentials,
 		Extra:                   copyJSONMap(m.Extra),
 		ProxyID:                 m.ProxyID,
 		Concurrency:             m.Concurrency,
