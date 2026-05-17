@@ -6431,6 +6431,8 @@ export default {
       rateListEmpty: '暂无可用 group',
       userOverride: '专属',
       userOverrideHint: '管理员为您设置了专属倍率（基础倍率 ×{base}）',
+      lockedRate: '锁定',
+      lockedRateHint: '当前订阅已锁定倍率（基础倍率 ×{base}）',
       routeListTitle: '你的 key 自动路由',
       routeListDesc: '请求里的 model 会决定使用哪个 group 和倍率',
       routeListEmpty: '暂无可用路由',

@@ -509,8 +509,9 @@ type UserSubscription struct {
 	MonthlyUsageUSD float64 `json:"monthly_usage_usd"`
 
 	// WalletBalanceUSD / WalletInitialUSD 钱包模式 (v4) 字段；nil = 老 group 订阅。
-	WalletBalanceUSD *float64 `json:"wallet_balance_usd,omitempty"`
-	WalletInitialUSD *float64 `json:"wallet_initial_usd,omitempty"`
+	WalletBalanceUSD *float64           `json:"wallet_balance_usd,omitempty"`
+	WalletInitialUSD *float64           `json:"wallet_initial_usd,omitempty"`
+	LockedRates      map[string]float64 `json:"locked_rates,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

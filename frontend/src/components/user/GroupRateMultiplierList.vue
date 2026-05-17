@@ -47,10 +47,15 @@
           </span>
           <span
             v-if="row.overridden"
-            class="rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
-            :title="t('userSubscriptions.wallet.userOverrideHint', { base: row.baseMultiplier.toFixed(2) })"
+            :class="[
+              'rounded-md px-1.5 py-0.5 text-[10px] font-medium',
+              row.locked
+                ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+                : 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+            ]"
+            :title="t(row.locked ? 'userSubscriptions.wallet.lockedRateHint' : 'userSubscriptions.wallet.userOverrideHint', { base: row.baseMultiplier.toFixed(2) })"
           >
-            {{ t('userSubscriptions.wallet.userOverride') }}
+            {{ row.locked ? t('userSubscriptions.wallet.lockedRate') : t('userSubscriptions.wallet.userOverride') }}
           </span>
         </div>
       </li>
@@ -62,10 +67,15 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import userGroupsAPI from '@/api/groups'
-import type { Group } from '@/types'
+import type { Group, UserSubscription } from '@/types'
 import { platformBadgeClass, platformLabel } from '@/utils/platformColors'
+import { lockedRatesFromSubscriptions, lockedRateForGroup } from '@/utils/lockedRates'
 
 const { t } = useI18n()
+
+const props = defineProps<{
+  subscription?: UserSubscription | null
+}>()
 
 const groups = ref<Group[]>([])
 const userRates = ref<Record<number, number>>({})
@@ -79,22 +89,28 @@ interface Row {
   baseMultiplier: number
   effectiveMultiplier: number
   overridden: boolean
+  locked: boolean
 }
+
+const lockedRates = computed(() => lockedRatesFromSubscriptions(props.subscription ? [props.subscription] : []))
 
 const rows = computed<Row[]>(() =>
   groups.value
     .filter((g) => g.status === 'active')
     .map((g) => {
       const override = userRates.value[g.id]
-      const overridden = override != null && override !== g.rate_multiplier
+      const lockedRate = lockedRateForGroup(lockedRates.value, g.id)
+      const locked = lockedRate != null && lockedRate !== g.rate_multiplier
+      const overridden = locked || (override != null && override !== g.rate_multiplier)
       return {
         id: g.id,
         name: g.name,
         description: g.description,
         platform: g.platform,
         baseMultiplier: g.rate_multiplier,
-        effectiveMultiplier: overridden ? override : g.rate_multiplier,
-        overridden
+        effectiveMultiplier: locked ? (lockedRate ?? g.rate_multiplier) : (overridden ? (override ?? g.rate_multiplier) : g.rate_multiplier),
+        overridden,
+        locked
       }
     })
     .sort((a, b) => a.effectiveMultiplier - b.effectiveMultiplier)

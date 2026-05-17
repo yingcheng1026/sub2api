@@ -311,6 +311,18 @@ func (_u *UserSubscriptionUpdate) ClearWalletInitialUsd() *UserSubscriptionUpdat
 	return _u
 }
 
+// SetLockedRates sets the "locked_rates" field.
+func (_u *UserSubscriptionUpdate) SetLockedRates(v map[string]float64) *UserSubscriptionUpdate {
+	_u.mutation.SetLockedRates(v)
+	return _u
+}
+
+// ClearLockedRates clears the value of the "locked_rates" field.
+func (_u *UserSubscriptionUpdate) ClearLockedRates() *UserSubscriptionUpdate {
+	_u.mutation.ClearLockedRates()
+	return _u
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (_u *UserSubscriptionUpdate) SetAssignedBy(v int64) *UserSubscriptionUpdate {
 	_u.mutation.SetAssignedBy(v)
@@ -627,6 +639,12 @@ func (_u *UserSubscriptionUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if _u.mutation.WalletInitialUsdCleared() {
 		_spec.ClearField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64)
+	}
+	if value, ok := _u.mutation.LockedRates(); ok {
+		_spec.SetField(usersubscription.FieldLockedRates, field.TypeJSON, value)
+	}
+	if _u.mutation.LockedRatesCleared() {
+		_spec.ClearField(usersubscription.FieldLockedRates, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.AssignedAt(); ok {
 		_spec.SetField(usersubscription.FieldAssignedAt, field.TypeTime, value)
@@ -1113,6 +1131,18 @@ func (_u *UserSubscriptionUpdateOne) ClearWalletInitialUsd() *UserSubscriptionUp
 	return _u
 }
 
+// SetLockedRates sets the "locked_rates" field.
+func (_u *UserSubscriptionUpdateOne) SetLockedRates(v map[string]float64) *UserSubscriptionUpdateOne {
+	_u.mutation.SetLockedRates(v)
+	return _u
+}
+
+// ClearLockedRates clears the value of the "locked_rates" field.
+func (_u *UserSubscriptionUpdateOne) ClearLockedRates() *UserSubscriptionUpdateOne {
+	_u.mutation.ClearLockedRates()
+	return _u
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (_u *UserSubscriptionUpdateOne) SetAssignedBy(v int64) *UserSubscriptionUpdateOne {
 	_u.mutation.SetAssignedBy(v)
@@ -1459,6 +1489,12 @@ func (_u *UserSubscriptionUpdateOne) sqlSave(ctx context.Context) (_node *UserSu
 	}
 	if _u.mutation.WalletInitialUsdCleared() {
 		_spec.ClearField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64)
+	}
+	if value, ok := _u.mutation.LockedRates(); ok {
+		_spec.SetField(usersubscription.FieldLockedRates, field.TypeJSON, value)
+	}
+	if _u.mutation.LockedRatesCleared() {
+		_spec.ClearField(usersubscription.FieldLockedRates, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.AssignedAt(); ok {
 		_spec.SetField(usersubscription.FieldAssignedAt, field.TypeTime, value)

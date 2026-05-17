@@ -10,11 +10,15 @@
     <!-- Group name -->
     <span class="truncate">{{ name }}</span>
     <!-- Right side label -->
-    <span v-if="showLabel" :class="labelClass">
-      <template v-if="hasCustomRate">
+    <span v-if="showLabel" :class="labelClass" :title="labelTitle">
+      <template v-if="hasLockedRate">
+        <span class="line-through opacity-50 mr-0.5">{{ formatRate(rateMultiplier) }}x</span>
+        <span class="font-bold">{{ formatRate(lockedRateMultiplier) }}x</span>
+      </template>
+      <template v-else-if="hasCustomRate">
         <!-- 原倍率删除线 + 专属倍率高亮 -->
-        <span class="line-through opacity-50 mr-0.5">{{ rateMultiplier }}x</span>
-        <span class="font-bold">{{ userRateMultiplier }}x</span>
+        <span class="line-through opacity-50 mr-0.5">{{ formatRate(rateMultiplier) }}x</span>
+        <span class="font-bold">{{ formatRate(userRateMultiplier) }}x</span>
       </template>
       <template v-else>
         {{ labelText }}
@@ -35,6 +39,7 @@ interface Props {
   subscriptionType?: SubscriptionType
   rateMultiplier?: number
   userRateMultiplier?: number | null // 用户专属倍率
+  lockedRateMultiplier?: number | null // 订阅级锁定倍率
   showRate?: boolean
   daysRemaining?: number | null // 剩余天数（订阅类型时使用）
   /**
@@ -50,6 +55,7 @@ const props = withDefaults(defineProps<Props>(), {
   showRate: true,
   daysRemaining: null,
   userRateMultiplier: null,
+  lockedRateMultiplier: null,
   alwaysShowRate: false
 })
 
@@ -57,9 +63,19 @@ const { t } = useI18n()
 
 const isSubscription = computed(() => props.subscriptionType === 'subscription')
 
+const hasLockedRate = computed(() => {
+  return (
+    props.lockedRateMultiplier !== null &&
+    props.lockedRateMultiplier !== undefined &&
+    props.rateMultiplier !== undefined &&
+    props.lockedRateMultiplier !== props.rateMultiplier
+  )
+})
+
 // 是否有专属倍率（且与默认倍率不同）
 const hasCustomRate = computed(() => {
   return (
+    !hasLockedRate.value &&
     props.userRateMultiplier !== null &&
     props.userRateMultiplier !== undefined &&
     props.rateMultiplier !== undefined &&
@@ -73,12 +89,12 @@ const showLabel = computed(() => {
   // 订阅类型：显示天数或"订阅"
   if (isSubscription.value) return true
   // 标准类型：显示倍率（包括专属倍率）
-  return props.rateMultiplier !== undefined || hasCustomRate.value
+  return props.rateMultiplier !== undefined || hasCustomRate.value || hasLockedRate.value
 })
 
 // Label text
 const labelText = computed(() => {
-  const rateLabel = props.rateMultiplier !== undefined ? `${props.rateMultiplier}x` : ''
+  const rateLabel = props.rateMultiplier !== undefined ? `${formatRate(props.rateMultiplier)}x` : ''
   if (isSubscription.value && !props.alwaysShowRate) {
     // 如果有剩余天数，显示天数
     if (props.daysRemaining !== null && props.daysRemaining !== undefined) {
@@ -93,11 +109,24 @@ const labelText = computed(() => {
   return rateLabel
 })
 
+const labelTitle = computed(() => {
+  if (hasLockedRate.value && props.rateMultiplier !== undefined) {
+    return t('userSubscriptions.wallet.lockedRateHint', { base: formatRate(props.rateMultiplier) })
+  }
+  if (hasCustomRate.value && props.rateMultiplier !== undefined) {
+    return t('userSubscriptions.wallet.userOverrideHint', { base: formatRate(props.rateMultiplier) })
+  }
+  return undefined
+})
+
 // Label style based on type and days remaining
 const labelClass = computed(() => {
   const base = 'px-1.5 py-0.5 rounded text-[10px] font-semibold'
 
   if (!isSubscription.value) {
+    if (hasLockedRate.value) {
+      return `${base} bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300`
+    }
     // Standard: subtle background (不再为专属倍率使用不同的背景色)
     return `${base} bg-black/10 dark:bg-white/10`
   }
@@ -166,4 +195,9 @@ const badgeClass = computed(() => {
     ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400'
     : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
 })
+
+function formatRate(rate: number | null | undefined): string {
+  if (rate === null || rate === undefined) return ''
+  return Number.isInteger(rate) ? String(rate) : rate.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+}
 </script>

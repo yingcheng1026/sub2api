@@ -84,6 +84,10 @@ func (UserSubscription) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Comment("钱包模式激活时的总额度（用于 UI 进度条）"),
+		field.JSON("locked_rates", map[string]float64{}).
+			Optional().
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}).
+			Comment("订阅级锁定倍率：group_id 字符串 -> rate_multiplier；存在时优先于用户专属倍率和 group 默认倍率"),
 
 		field.Int64("assigned_by").
 			Optional().

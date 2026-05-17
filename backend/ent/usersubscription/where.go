@@ -845,6 +845,16 @@ func WalletInitialUsdNotNil() predicate.UserSubscription {
 	return predicate.UserSubscription(sql.FieldNotNull(FieldWalletInitialUsd))
 }
 
+// LockedRatesIsNil applies the IsNil predicate on the "locked_rates" field.
+func LockedRatesIsNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldIsNull(FieldLockedRates))
+}
+
+// LockedRatesNotNil applies the NotNil predicate on the "locked_rates" field.
+func LockedRatesNotNil() predicate.UserSubscription {
+	return predicate.UserSubscription(sql.FieldNotNull(FieldLockedRates))
+}
+
 // AssignedByEQ applies the EQ predicate on the "assigned_by" field.
 func AssignedByEQ(v int64) predicate.UserSubscription {
 	return predicate.UserSubscription(sql.FieldEQ(FieldAssignedBy, v))

@@ -38,6 +38,7 @@
           :rows="filteredChannels"
           :loading="loading"
           :user-group-rates="userGroupRates"
+          :locked-group-rates="lockedGroupRates"
           pricing-key-prefix="availableChannels.pricing"
           :no-pricing-label="t('availableChannels.noPricing')"
           :no-models-label="t('availableChannels.noModels')"
@@ -57,14 +58,17 @@ import Icon from '@/components/icons/Icon.vue'
 import AvailableChannelsTable from '@/components/channels/AvailableChannelsTable.vue'
 import userChannelsAPI, { type UserAvailableChannel } from '@/api/channels'
 import userGroupsAPI from '@/api/groups'
+import subscriptionsAPI from '@/api/subscriptions'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import { lockedRatesFromSubscriptions } from '@/utils/lockedRates'
 
 const { t } = useI18n()
 const appStore = useAppStore()
 
 const channels = ref<UserAvailableChannel[]>([])
 const userGroupRates = ref<Record<number, number>>({})
+const lockedGroupRates = ref<Record<number, number>>({})
 const loading = ref(false)
 const searchQuery = ref('')
 
@@ -107,15 +111,20 @@ async function loadChannels() {
   try {
     // 渠道列表和用户专属倍率并发拉取。专属倍率失败不阻塞渠道展示——
     // 失败时只是无法渲染专属倍率角标，降级为仅显示默认倍率。
-    const [list, rates] = await Promise.all([
+    const [list, rates, subscriptions] = await Promise.all([
       userChannelsAPI.getAvailable(),
       userGroupsAPI.getUserGroupRates().catch((err: unknown) => {
         console.error('Failed to load user group rates:', err)
         return {} as Record<number, number>
       }),
+      subscriptionsAPI.getActiveSubscriptions().catch((err: unknown) => {
+        console.error('Failed to load active subscriptions:', err)
+        return []
+      }),
     ])
     channels.value = list
     userGroupRates.value = rates
+    lockedGroupRates.value = lockedRatesFromSubscriptions(subscriptions)
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {

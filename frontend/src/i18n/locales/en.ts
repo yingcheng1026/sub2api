@@ -6273,6 +6273,8 @@ export default {
       rateListEmpty: 'No groups available',
       userOverride: 'Custom',
       userOverrideHint: 'Admin set a custom multiplier for you (base ×{base})',
+      lockedRate: 'Locked',
+      lockedRateHint: 'Current subscription locks this multiplier (base ×{base})',
       routeListTitle: 'Your key routes automatically',
       routeListDesc: 'The request model chooses the group and multiplier',
       routeListEmpty: 'No routes available',

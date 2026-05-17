@@ -172,7 +172,7 @@ func apiKeyAuthWithSubscription(
 			}
 		}
 
-		if walletSub != nil && apiKey.GroupID == nil {
+		if walletSub != nil && apiKey.GroupID == nil && !skipBilling {
 			modelName, extractErr := extractModelFromRequest(c)
 			if extractErr != nil {
 				AbortWithError(c, 400, "model_unsupported", "该模型未启用，请联系客服")
@@ -282,7 +282,8 @@ func apiKeyAuthWithSubscription(
 						return
 					}
 				} else {
-					needsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
+					_, effectiveGroup := service.EffectiveBillingContext(apiKey.Group, subscription)
+					needsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, effectiveGroup)
 					if validateErr != nil {
 						code := "SUBSCRIPTION_INVALID"
 						status := 403

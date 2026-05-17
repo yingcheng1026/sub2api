@@ -79,11 +79,13 @@ type openAIRecordUsageSubRepoStub struct {
 
 	incrementCalls int
 	incrementErr   error
+	lastAmount     float64
 	lastCtxErr     error
 }
 
 func (s *openAIRecordUsageSubRepoStub) IncrementUsage(ctx context.Context, id int64, costUSD float64) error {
 	s.incrementCalls++
+	s.lastAmount = costUSD
 	s.lastCtxErr = ctx.Err()
 	return s.incrementErr
 }
@@ -285,6 +287,58 @@ func TestOpenAIGatewayServiceRecordUsage_UsesUserSpecificGroupRate(t *testing.T)
 	require.InDelta(t, expected.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
 	require.InDelta(t, expected.ActualCost, userRepo.lastAmount, 1e-12)
 	require.Equal(t, 1, userRepo.deductCalls)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_LockedRatesOverrideUserSpecificGroupRate(t *testing.T) {
+	groupID := int64(11)
+	groupRate := 0.7
+	userRate := 0.3
+	lockedRate := 3.5
+	usage := OpenAIUsage{InputTokens: 20, OutputTokens: 5, CacheReadInputTokens: 4}
+
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	rateRepo := &openAIUserGroupRateRepoStub{rate: &userRate}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, rateRepo)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp_locked_rate",
+			Usage:     usage,
+			Model:     "gpt-5.1",
+			Duration:  time.Second,
+		},
+		APIKey: &APIKey{
+			ID:      10011,
+			GroupID: i64p(groupID),
+			Group: &Group{
+				ID:             groupID,
+				RateMultiplier: groupRate,
+			},
+		},
+		User: &User{ID: 20011},
+		Account: &Account{
+			ID: 30011,
+		},
+		Subscription: &UserSubscription{
+			ID:          9011,
+			UserID:      20011,
+			LockedRates: map[string]float64{"11": lockedRate},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 0, rateRepo.calls, "locked_rates should bypass user_group_rate lookup")
+	require.NotNil(t, usageRepo.lastLog)
+	require.Equal(t, lockedRate, usageRepo.lastLog.RateMultiplier)
+	require.Equal(t, int8(BillingTypeSubscription), usageRepo.lastLog.BillingType)
+
+	expected := expectedOpenAICost(t, svc, "gpt-5.1", usage, lockedRate)
+	require.InDelta(t, expected.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, expected.ActualCost, subRepo.lastAmount, 1e-12)
+	require.Equal(t, 1, subRepo.incrementCalls)
+	require.Equal(t, 0, userRepo.deductCalls)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_IncludesEndpointMetadata(t *testing.T) {
