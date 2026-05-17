@@ -44942,6 +44942,7 @@ type UserSubscriptionMutation struct {
 	addwallet_balance_usd        *float64
 	wallet_initial_usd           *float64
 	addwallet_initial_usd        *float64
+	locked_rates                 *map[string]float64
 	assigned_at                  *time.Time
 	notes                        *string
 	clearedFields                map[string]struct{}
@@ -45829,6 +45830,55 @@ func (m *UserSubscriptionMutation) ResetWalletInitialUsd() {
 	delete(m.clearedFields, usersubscription.FieldWalletInitialUsd)
 }
 
+// SetLockedRates sets the "locked_rates" field.
+func (m *UserSubscriptionMutation) SetLockedRates(value map[string]float64) {
+	m.locked_rates = &value
+}
+
+// LockedRates returns the value of the "locked_rates" field in the mutation.
+func (m *UserSubscriptionMutation) LockedRates() (r map[string]float64, exists bool) {
+	v := m.locked_rates
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLockedRates returns the old "locked_rates" field's value of the UserSubscription entity.
+// If the UserSubscription object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserSubscriptionMutation) OldLockedRates(ctx context.Context) (v map[string]float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLockedRates is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLockedRates requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLockedRates: %w", err)
+	}
+	return oldValue.LockedRates, nil
+}
+
+// ClearLockedRates clears the value of the "locked_rates" field.
+func (m *UserSubscriptionMutation) ClearLockedRates() {
+	m.locked_rates = nil
+	m.clearedFields[usersubscription.FieldLockedRates] = struct{}{}
+}
+
+// LockedRatesCleared returns if the "locked_rates" field was cleared in this mutation.
+func (m *UserSubscriptionMutation) LockedRatesCleared() bool {
+	_, ok := m.clearedFields[usersubscription.FieldLockedRates]
+	return ok
+}
+
+// ResetLockedRates resets all changes to the "locked_rates" field.
+func (m *UserSubscriptionMutation) ResetLockedRates() {
+	m.locked_rates = nil
+	delete(m.clearedFields, usersubscription.FieldLockedRates)
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (m *UserSubscriptionMutation) SetAssignedBy(i int64) {
 	m.assigned_by_user = &i
@@ -46199,7 +46249,7 @@ func (m *UserSubscriptionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserSubscriptionMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 20)
 	if m.created_at != nil {
 		fields = append(fields, usersubscription.FieldCreatedAt)
 	}
@@ -46247,6 +46297,9 @@ func (m *UserSubscriptionMutation) Fields() []string {
 	}
 	if m.wallet_initial_usd != nil {
 		fields = append(fields, usersubscription.FieldWalletInitialUsd)
+	}
+	if m.locked_rates != nil {
+		fields = append(fields, usersubscription.FieldLockedRates)
 	}
 	if m.assigned_by_user != nil {
 		fields = append(fields, usersubscription.FieldAssignedBy)
@@ -46297,6 +46350,8 @@ func (m *UserSubscriptionMutation) Field(name string) (ent.Value, bool) {
 		return m.WalletBalanceUsd()
 	case usersubscription.FieldWalletInitialUsd:
 		return m.WalletInitialUsd()
+	case usersubscription.FieldLockedRates:
+		return m.LockedRates()
 	case usersubscription.FieldAssignedBy:
 		return m.AssignedBy()
 	case usersubscription.FieldAssignedAt:
@@ -46344,6 +46399,8 @@ func (m *UserSubscriptionMutation) OldField(ctx context.Context, name string) (e
 		return m.OldWalletBalanceUsd(ctx)
 	case usersubscription.FieldWalletInitialUsd:
 		return m.OldWalletInitialUsd(ctx)
+	case usersubscription.FieldLockedRates:
+		return m.OldLockedRates(ctx)
 	case usersubscription.FieldAssignedBy:
 		return m.OldAssignedBy(ctx)
 	case usersubscription.FieldAssignedAt:
@@ -46470,6 +46527,13 @@ func (m *UserSubscriptionMutation) SetField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetWalletInitialUsd(v)
+		return nil
+	case usersubscription.FieldLockedRates:
+		v, ok := value.(map[string]float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLockedRates(v)
 		return nil
 	case usersubscription.FieldAssignedBy:
 		v, ok := value.(int64)
@@ -46606,6 +46670,9 @@ func (m *UserSubscriptionMutation) ClearedFields() []string {
 	if m.FieldCleared(usersubscription.FieldWalletInitialUsd) {
 		fields = append(fields, usersubscription.FieldWalletInitialUsd)
 	}
+	if m.FieldCleared(usersubscription.FieldLockedRates) {
+		fields = append(fields, usersubscription.FieldLockedRates)
+	}
 	if m.FieldCleared(usersubscription.FieldAssignedBy) {
 		fields = append(fields, usersubscription.FieldAssignedBy)
 	}
@@ -46646,6 +46713,9 @@ func (m *UserSubscriptionMutation) ClearField(name string) error {
 		return nil
 	case usersubscription.FieldWalletInitialUsd:
 		m.ClearWalletInitialUsd()
+		return nil
+	case usersubscription.FieldLockedRates:
+		m.ClearLockedRates()
 		return nil
 	case usersubscription.FieldAssignedBy:
 		m.ClearAssignedBy()
@@ -46708,6 +46778,9 @@ func (m *UserSubscriptionMutation) ResetField(name string) error {
 		return nil
 	case usersubscription.FieldWalletInitialUsd:
 		m.ResetWalletInitialUsd()
+		return nil
+	case usersubscription.FieldLockedRates:
+		m.ResetLockedRates()
 		return nil
 	case usersubscription.FieldAssignedBy:
 		m.ResetAssignedBy()

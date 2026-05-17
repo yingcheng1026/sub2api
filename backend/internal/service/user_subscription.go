@@ -1,6 +1,9 @@
 package service
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 type UserSubscription struct {
 	ID     int64
@@ -24,6 +27,10 @@ type UserSubscription struct {
 	// WalletBalanceUSD / WalletInitialUSD 钱包模式 (v4) 字段；nil = 老 group 订阅。
 	WalletBalanceUSD *float64
 	WalletInitialUSD *float64
+
+	// LockedRates 订阅级锁定倍率：group_id 字符串 -> rate_multiplier。
+	// 用于老用户永久旧价、月卡 F+ 不随 group/user rate 配置漂移。
+	LockedRates map[string]float64
 
 	AssignedBy *int64
 	AssignedAt time.Time
@@ -51,6 +58,17 @@ type UserSubscription struct {
 // IsWalletMode 钱包模式订阅判别。
 func (s *UserSubscription) IsWalletMode() bool {
 	return s.WalletBalanceUSD != nil
+}
+
+func (s *UserSubscription) LockedRateForGroup(groupID int64) (float64, bool) {
+	if s == nil || groupID <= 0 || len(s.LockedRates) == 0 {
+		return 0, false
+	}
+	rate, ok := s.LockedRates[strconv.FormatInt(groupID, 10)]
+	if !ok || rate < 0 {
+		return 0, false
+	}
+	return rate, true
 }
 
 func (s *UserSubscription) IsActive() bool {

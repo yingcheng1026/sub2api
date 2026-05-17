@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -51,6 +52,8 @@ type UserSubscription struct {
 	WalletBalanceUsd *float64 `json:"wallet_balance_usd,omitempty"`
 	// 钱包模式激活时的总额度（用于 UI 进度条）
 	WalletInitialUsd *float64 `json:"wallet_initial_usd,omitempty"`
+	// 订阅级锁定倍率：group_id 字符串 -> rate_multiplier；存在时优先于用户专属倍率和 group 默认倍率
+	LockedRates map[string]float64 `json:"locked_rates,omitempty"`
 	// AssignedBy holds the value of the "assigned_by" field.
 	AssignedBy *int64 `json:"assigned_by,omitempty"`
 	// AssignedAt holds the value of the "assigned_at" field.
@@ -136,6 +139,8 @@ func (*UserSubscription) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case usersubscription.FieldLockedRates:
+			values[i] = new([]byte)
 		case usersubscription.FieldDailyUsageUsd, usersubscription.FieldWeeklyUsageUsd, usersubscription.FieldMonthlyUsageUsd, usersubscription.FieldWalletBalanceUsd, usersubscription.FieldWalletInitialUsd:
 			values[i] = new(sql.NullFloat64)
 		case usersubscription.FieldID, usersubscription.FieldUserID, usersubscription.FieldGroupID, usersubscription.FieldAssignedBy:
@@ -267,6 +272,14 @@ func (_m *UserSubscription) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.WalletInitialUsd = new(float64)
 				*_m.WalletInitialUsd = value.Float64
+			}
+		case usersubscription.FieldLockedRates:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field locked_rates", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.LockedRates); err != nil {
+					return fmt.Errorf("unmarshal field locked_rates: %w", err)
+				}
 			}
 		case usersubscription.FieldAssignedBy:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -410,6 +423,9 @@ func (_m *UserSubscription) String() string {
 		builder.WriteString("wallet_initial_usd=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("locked_rates=")
+	builder.WriteString(fmt.Sprintf("%v", _m.LockedRates))
 	builder.WriteString(", ")
 	if v := _m.AssignedBy; v != nil {
 		builder.WriteString("assigned_by=")

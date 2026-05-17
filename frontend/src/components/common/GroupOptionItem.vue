@@ -26,12 +26,16 @@
     <div class="flex shrink-0 items-center gap-2 pt-0.5">
       <!-- Rate pill (platform color) -->
       <span v-if="rateMultiplier !== undefined" :class="['inline-flex items-center whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold', ratePillClass]">
-        <template v-if="hasCustomRate">
-          <span class="mr-1 line-through opacity-50">{{ rateMultiplier }}x</span>
-          <span class="font-bold">{{ userRateMultiplier }}x</span>
+        <template v-if="hasLockedRate">
+          <span class="mr-1 line-through opacity-50">{{ formatRate(rateMultiplier) }}x</span>
+          <span class="font-bold">{{ formatRate(lockedRateMultiplier) }}x</span>
+        </template>
+        <template v-else-if="hasCustomRate">
+          <span class="mr-1 line-through opacity-50">{{ formatRate(rateMultiplier) }}x</span>
+          <span class="font-bold">{{ formatRate(userRateMultiplier) }}x</span>
         </template>
         <template v-else>
-          {{ rateMultiplier }}x 倍率
+          {{ formatRate(rateMultiplier) }}x 倍率
         </template>
       </span>
       <!-- Checkmark -->
@@ -60,6 +64,7 @@ interface Props {
   subscriptionType?: SubscriptionType
   rateMultiplier?: number
   userRateMultiplier?: number | null
+  lockedRateMultiplier?: number | null
   description?: string | null
   selected?: boolean
   showCheckmark?: boolean
@@ -69,12 +74,23 @@ const props = withDefaults(defineProps<Props>(), {
   subscriptionType: 'standard',
   selected: false,
   showCheckmark: true,
-  userRateMultiplier: null
+  userRateMultiplier: null,
+  lockedRateMultiplier: null
+})
+
+const hasLockedRate = computed(() => {
+  return (
+    props.lockedRateMultiplier !== null &&
+    props.lockedRateMultiplier !== undefined &&
+    props.rateMultiplier !== undefined &&
+    props.lockedRateMultiplier !== props.rateMultiplier
+  )
 })
 
 // Whether user has a custom rate different from default
 const hasCustomRate = computed(() => {
   return (
+    !hasLockedRate.value &&
     props.userRateMultiplier !== null &&
     props.userRateMultiplier !== undefined &&
     props.rateMultiplier !== undefined &&
@@ -99,6 +115,11 @@ const ratePillClass = computed(() => {
       return 'bg-violet-50 text-violet-700 dark:bg-violet-900/20 dark:text-violet-400'
   }
 })
+
+function formatRate(rate: number | null | undefined): string {
+  if (rate === null || rate === undefined) return ''
+  return Number.isInteger(rate) ? String(rate) : rate.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+}
 </script>
 
 <style scoped>

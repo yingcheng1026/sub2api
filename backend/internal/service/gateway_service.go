@@ -7853,6 +7853,27 @@ func (s *GatewayService) getUserGroupRateMultiplier(ctx context.Context, userID,
 	return resolver.Resolve(ctx, userID, groupID, groupDefaultMultiplier)
 }
 
+func (s *GatewayService) resolveUsageRateMultiplier(ctx context.Context, userID int64, apiKey *APIKey, subscription *UserSubscription) RateMultiplierResolution {
+	systemDefault := 1.0
+	if s != nil && s.cfg != nil {
+		systemDefault = s.cfg.Default.RateMultiplier
+	}
+	if s == nil || apiKey == nil {
+		return RateMultiplierResolution{Multiplier: systemDefault, Source: RateMultiplierSourceSystemDefault}
+	}
+	resolver := s.userGroupRateResolver
+	if resolver == nil {
+		resolver = newUserGroupRateResolver(
+			s.userGroupRateRepo,
+			s.userGroupRateCache,
+			resolveUserGroupRateCacheTTL(s.cfg),
+			&s.userGroupRateSF,
+			"service.gateway",
+		)
+	}
+	return resolveEffectiveRateMultiplier(ctx, resolver, userID, apiKey.GroupID, apiKey.Group, subscription, systemDefault)
+}
+
 // RecordUsageInput 记录使用量的输入参数
 type RecordUsageInput struct {
 	Result             *ForwardResult
@@ -8393,15 +8414,9 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		cacheTTLOverridden = (result.Usage.CacheCreation5mTokens + result.Usage.CacheCreation1hTokens) > 0
 	}
 
-	// 获取费率倍数（优先级：用户专属 > 分组默认 > 系统默认）
-	multiplier := 1.0
-	if s.cfg != nil {
-		multiplier = s.cfg.Default.RateMultiplier
-	}
-	if apiKey.GroupID != nil && apiKey.Group != nil {
-		groupDefault := apiKey.Group.RateMultiplier
-		multiplier = s.getUserGroupRateMultiplier(ctx, user.ID, *apiKey.GroupID, groupDefault)
-	}
+	// 获取费率倍数（优先级：订阅锁定倍率 > 用户专属 > 分组默认 > 系统默认）
+	rateResolution := s.resolveUsageRateMultiplier(ctx, user.ID, apiKey, subscription)
+	multiplier := rateResolution.Multiplier
 	imageMultiplier := resolveImageRateMultiplier(apiKey, multiplier)
 
 	// 确定计费模型

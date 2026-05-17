@@ -40,6 +40,9 @@ func (r *userSubscriptionRepository) Create(ctx context.Context, sub *service.Us
 		SetNillableWalletBalanceUsd(sub.WalletBalanceUSD).
 		SetNillableWalletInitialUsd(sub.WalletInitialUSD).
 		SetNillableAssignedBy(sub.AssignedBy)
+	if len(sub.LockedRates) > 0 {
+		builder.SetLockedRates(cloneLockedRates(sub.LockedRates))
+	}
 
 	if sub.StartsAt.IsZero() {
 		builder.SetStartsAt(time.Now())
@@ -206,6 +209,9 @@ func (r *userSubscriptionRepository) Update(ctx context.Context, sub *service.Us
 		SetNillableAssignedBy(sub.AssignedBy).
 		SetAssignedAt(sub.AssignedAt).
 		SetNotes(sub.Notes)
+	if len(sub.LockedRates) > 0 {
+		builder.SetLockedRates(cloneLockedRates(sub.LockedRates))
+	}
 
 	updated, err := builder.Save(ctx)
 	if err == nil {
@@ -528,6 +534,7 @@ func userSubscriptionEntityToService(m *dbent.UserSubscription) *service.UserSub
 		MonthlyUsageUSD:    m.MonthlyUsageUsd,
 		WalletBalanceUSD:   m.WalletBalanceUsd,
 		WalletInitialUSD:   m.WalletInitialUsd,
+		LockedRates:        cloneLockedRates(m.LockedRates),
 		AssignedBy:         m.AssignedBy,
 		AssignedAt:         m.AssignedAt,
 		Notes:              derefString(m.Notes),
@@ -563,4 +570,15 @@ func applyUserSubscriptionEntityToService(dst *service.UserSubscription, src *db
 	dst.ID = src.ID
 	dst.CreatedAt = src.CreatedAt
 	dst.UpdatedAt = src.UpdatedAt
+}
+
+func cloneLockedRates(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

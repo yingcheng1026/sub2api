@@ -120,6 +120,7 @@
                   :subscription-type="row.group.subscription_type"
                   :rate-multiplier="row.group.rate_multiplier"
                   :user-rate-multiplier="userGroupRates[row.group.id]"
+                  :locked-rate-multiplier="lockedRateForGroup(lockedGroupRates, row.group.id)"
                 />
                 <span
                   v-else-if="isRowWalletUniversalKey(row)"
@@ -462,6 +463,7 @@
                 :subscription-type="(option as unknown as GroupOption).subscriptionType"
                 :rate-multiplier="(option as unknown as GroupOption).rate"
                 :user-rate-multiplier="(option as unknown as GroupOption).userRate"
+                :locked-rate-multiplier="(option as unknown as GroupOption).lockedRate"
               />
               <span v-else class="text-gray-400">{{ t('keys.selectGroup') }}</span>
             </template>
@@ -472,6 +474,7 @@
                 :subscription-type="(option as unknown as GroupOption).subscriptionType"
                 :rate-multiplier="(option as unknown as GroupOption).rate"
                 :user-rate-multiplier="(option as unknown as GroupOption).userRate"
+                :locked-rate-multiplier="(option as unknown as GroupOption).lockedRate"
                 :description="(option as unknown as GroupOption).description"
                 :selected="selected"
               />
@@ -1115,6 +1118,7 @@ import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
 import { getCreateKeyGroupId, isWalletKeyName, isWalletUniversalKey, shouldRequireGroupForKeySubmit } from '@/utils/walletKeys'
+import { lockedRatesFromSubscriptions, lockedRateForGroup } from '@/utils/lockedRates'
 
 // Helper to format date for datetime-local input
 const formatDateTimeLocal = (isoDate: string): string => {
@@ -1129,6 +1133,7 @@ interface GroupOption {
   description: string | null
   rate: number
   userRate: number | null
+  lockedRate: number | null
   subscriptionType: SubscriptionType
   platform: GroupPlatform
 }
@@ -1158,7 +1163,9 @@ const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
 const usageStats = ref<Record<string, BatchApiKeyUsageStats>>({})
 const userGroupRates = ref<Record<number, number>>({})
+const activeSubscriptions = ref<UserSubscription[]>([])
 const activeWalletSubscription = ref<UserSubscription | null>(null)
+const lockedGroupRates = computed(() => lockedRatesFromSubscriptions(activeSubscriptions.value))
 const hasActiveWalletSubscription = computed(() => activeWalletSubscription.value !== null)
 const isRowWalletUniversalKey = (key: ApiKey) => isWalletUniversalKey(key, hasActiveWalletSubscription.value)
 
@@ -1303,6 +1310,7 @@ const groupOptions = computed(() =>
     description: group.description,
     rate: group.rate_multiplier,
     userRate: userGroupRates.value[group.id] ?? null,
+    lockedRate: lockedRateForGroup(lockedGroupRates.value, group.id),
     subscriptionType: group.subscription_type,
     platform: group.platform
   }))
@@ -1408,11 +1416,13 @@ const loadUserGroupRates = async () => {
 const loadWalletSubscription = async () => {
   try {
     const subscriptions = await subscriptionsAPI.getActiveSubscriptions()
+    activeSubscriptions.value = subscriptions
     activeWalletSubscription.value = subscriptions.find((sub) =>
       sub.status === 'active' && sub.wallet_balance_usd != null
     ) ?? null
   } catch (error) {
     console.error('Failed to load wallet subscription:', error)
+    activeSubscriptions.value = []
     activeWalletSubscription.value = null
   }
 }

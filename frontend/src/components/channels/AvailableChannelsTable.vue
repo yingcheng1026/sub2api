@@ -93,6 +93,7 @@
                   :subscription-type="(g.subscription_type || 'standard') as SubscriptionType"
                   :rate-multiplier="g.rate_multiplier"
                   :user-rate-multiplier="userGroupRates[g.id] ?? null"
+                  :locked-rate-multiplier="lockedGroupRates[g.id] ?? null"
                   always-show-rate
                 />
               </div>
@@ -115,6 +116,7 @@
                   :subscription-type="(g.subscription_type || 'standard') as SubscriptionType"
                   :rate-multiplier="g.rate_multiplier"
                   :user-rate-multiplier="userGroupRates[g.id] ?? null"
+                  :locked-rate-multiplier="lockedGroupRates[g.id] ?? null"
                   always-show-rate
                 />
               </div>
@@ -171,11 +173,14 @@ const props = defineProps<{
   emptyLabel: string
   /** 用户专属倍率（group_id → multiplier）；无专属时由 GroupBadge 仅显示默认倍率。 */
   userGroupRates: Record<number, number>
+  /** 订阅锁定倍率（group_id → multiplier）；优先于用户专属倍率。 */
+  lockedGroupRates: Record<number, number>
 }>()
 
 // Suppress unused warning — props is accessed via template automatically but
 // the explicit reference here keeps the linter from flagging userGroupRates.
 void props.userGroupRates
+void props.lockedGroupRates
 
 const { t } = useI18n()
 

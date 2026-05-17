@@ -80,6 +80,8 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 
 	// user_subscriptions: deleted_at for soft delete support (migration 012)
 	requireColumn(t, tx, "user_subscriptions", "deleted_at", "timestamp with time zone", 0, true)
+	requireColumn(t, tx, "user_subscriptions", "locked_rates", "jsonb", 0, true)
+	requireConstraintDefinitionContains(t, tx, "user_subscriptions", "chk_user_subscriptions_locked_rates_object", "jsonb_typeof", "locked_rates")
 
 	// orphan_allowed_groups_audit table should exist (migration 013)
 	var orphanAuditRegclass sql.NullString

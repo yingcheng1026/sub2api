@@ -541,6 +541,10 @@ func (s *SubscriptionService) createWalletSubscription(ctx context.Context, inpu
 
 	initial := *input.WalletInitialUSD
 	balance := initial
+	lockedRates, err := s.buildMonthlyLockedRatesForPlan(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("build monthly locked rates: %w", err)
+	}
 	sub := &UserSubscription{
 		UserID:           input.UserID,
 		GroupID:          nil,
@@ -549,6 +553,7 @@ func (s *SubscriptionService) createWalletSubscription(ctx context.Context, inpu
 		Status:           SubscriptionStatusActive,
 		WalletInitialUSD: &initial,
 		WalletBalanceUSD: &balance,
+		LockedRates:      lockedRates,
 		AssignedAt:       now,
 		Notes:            input.Notes,
 		CreatedAt:        now,

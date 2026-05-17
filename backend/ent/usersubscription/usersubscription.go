@@ -47,6 +47,8 @@ const (
 	FieldWalletBalanceUsd = "wallet_balance_usd"
 	// FieldWalletInitialUsd holds the string denoting the wallet_initial_usd field in the database.
 	FieldWalletInitialUsd = "wallet_initial_usd"
+	// FieldLockedRates holds the string denoting the locked_rates field in the database.
+	FieldLockedRates = "locked_rates"
 	// FieldAssignedBy holds the string denoting the assigned_by field in the database.
 	FieldAssignedBy = "assigned_by"
 	// FieldAssignedAt holds the string denoting the assigned_at field in the database.
@@ -121,6 +123,7 @@ var Columns = []string{
 	FieldMonthlyUsageUsd,
 	FieldWalletBalanceUsd,
 	FieldWalletInitialUsd,
+	FieldLockedRates,
 	FieldAssignedBy,
 	FieldAssignedAt,
 	FieldNotes,

@@ -1242,13 +1242,68 @@ func (h *GatewayHandler) usageQuotaLimited(c *gin.Context, ctx context.Context, 
 	if modelStats != nil {
 		resp["model_stats"] = modelStats
 	}
+	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	if rateCtx := h.usageRateContext(apiKey, subscription); rateCtx != nil {
+		resp["rate_context"] = rateCtx
+	}
 
 	c.JSON(http.StatusOK, resp)
 }
 
 // usageUnrestricted 处理 unrestricted 模式的响应（向后兼容）
 func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, usageData gin.H, modelStats any) {
+	subscription, hasSubscription := middleware2.GetSubscriptionFromContext(c)
+	isSubscriptionBilling, effectiveGroup := service.EffectiveBillingContext(apiKey.Group, subscription)
+
 	// 订阅模式
+	if hasSubscription && isSubscriptionBilling {
+		resp := gin.H{
+			"mode":     "unrestricted",
+			"isValid":  true,
+			"planName": usagePlanName(apiKey.Group, effectiveGroup, subscription),
+			"unit":     "USD",
+		}
+		if subscription.IsWalletMode() {
+			remaining := 0.0
+			if subscription.WalletBalanceUSD != nil {
+				remaining = *subscription.WalletBalanceUSD
+			}
+			resp["remaining"] = remaining
+			resp["balance"] = remaining
+			resp["subscription"] = gin.H{
+				"wallet_balance_usd": subscription.WalletBalanceUSD,
+				"wallet_initial_usd": subscription.WalletInitialUSD,
+				"locked_rates":       subscription.LockedRates,
+				"expires_at":         subscription.ExpiresAt,
+			}
+		} else if effectiveGroup != nil {
+			remaining := h.calculateSubscriptionRemaining(effectiveGroup, subscription)
+			resp["remaining"] = remaining
+			resp["subscription"] = gin.H{
+				"daily_usage_usd":   subscription.DailyUsageUSD,
+				"weekly_usage_usd":  subscription.WeeklyUsageUSD,
+				"monthly_usage_usd": subscription.MonthlyUsageUSD,
+				"daily_limit_usd":   effectiveGroup.DailyLimitUSD,
+				"weekly_limit_usd":  effectiveGroup.WeeklyLimitUSD,
+				"monthly_limit_usd": effectiveGroup.MonthlyLimitUSD,
+				"locked_rates":      subscription.LockedRates,
+				"expires_at":        subscription.ExpiresAt,
+			}
+		}
+		if rateCtx := h.usageRateContext(apiKey, subscription); rateCtx != nil {
+			resp["rate_context"] = rateCtx
+		}
+
+		if usageData != nil {
+			resp["usage"] = usageData
+		}
+		if modelStats != nil {
+			resp["model_stats"] = modelStats
+		}
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
 	if apiKey.Group != nil && apiKey.Group.IsSubscriptionType() {
 		resp := gin.H{
 			"mode":     "unrestricted",
@@ -1256,23 +1311,9 @@ func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, 
 			"planName": apiKey.Group.Name,
 			"unit":     "USD",
 		}
-
-		// 订阅信息可能不在 context 中（/v1/usage 路径跳过了中间件的计费检查）
-		subscription, ok := middleware2.GetSubscriptionFromContext(c)
-		if ok {
-			remaining := h.calculateSubscriptionRemaining(apiKey.Group, subscription)
-			resp["remaining"] = remaining
-			resp["subscription"] = gin.H{
-				"daily_usage_usd":   subscription.DailyUsageUSD,
-				"weekly_usage_usd":  subscription.WeeklyUsageUSD,
-				"monthly_usage_usd": subscription.MonthlyUsageUSD,
-				"daily_limit_usd":   apiKey.Group.DailyLimitUSD,
-				"weekly_limit_usd":  apiKey.Group.WeeklyLimitUSD,
-				"monthly_limit_usd": apiKey.Group.MonthlyLimitUSD,
-				"expires_at":        subscription.ExpiresAt,
-			}
+		if rateCtx := h.usageRateContext(apiKey, nil); rateCtx != nil {
+			resp["rate_context"] = rateCtx
 		}
-
 		if usageData != nil {
 			resp["usage"] = usageData
 		}
@@ -1304,7 +1345,46 @@ func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, 
 	if modelStats != nil {
 		resp["model_stats"] = modelStats
 	}
+	if rateCtx := h.usageRateContext(apiKey, nil); rateCtx != nil {
+		resp["rate_context"] = rateCtx
+	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func (h *GatewayHandler) usageRateContext(apiKey *service.APIKey, subscription *service.UserSubscription) gin.H {
+	if apiKey == nil {
+		return nil
+	}
+	systemDefault := 1.0
+	if h != nil && h.cfg != nil {
+		systemDefault = h.cfg.Default.RateMultiplier
+	}
+	resolution := service.ResolveSubscriptionDisplayRateMultiplier(apiKey.GroupID, apiKey.Group, subscription, systemDefault)
+	out := gin.H{
+		"effective_rate_multiplier": resolution.Multiplier,
+		"rate_source":               resolution.Source,
+	}
+	if subscription != nil && len(subscription.LockedRates) > 0 {
+		out["locked_rates"] = subscription.LockedRates
+	}
+	if apiKey.Group != nil {
+		out["group_id"] = apiKey.Group.ID
+		out["group_rate_multiplier"] = apiKey.Group.RateMultiplier
+	}
+	return out
+}
+
+func usagePlanName(calledGroup, effectiveGroup *service.Group, subscription *service.UserSubscription) string {
+	if subscription != nil && subscription.IsWalletMode() {
+		return "钱包余额"
+	}
+	if effectiveGroup != nil && effectiveGroup.Name != "" {
+		return effectiveGroup.Name
+	}
+	if calledGroup != nil && calledGroup.Name != "" {
+		return calledGroup.Name
+	}
+	return "订阅"
 }
 
 // calculateSubscriptionRemaining 计算订阅剩余可用额度

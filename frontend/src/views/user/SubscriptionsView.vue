@@ -31,7 +31,7 @@
           :subscription="sub"
           @renew="goRenew(sub)"
         />
-        <GroupRateMultiplierList />
+        <GroupRateMultiplierList :subscription="walletSubscriptions[0]" />
       </div>
 
       <!-- 老 group 订阅 (v3) Grid -->

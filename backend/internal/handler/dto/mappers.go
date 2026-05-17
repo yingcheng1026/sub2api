@@ -766,11 +766,23 @@ func userSubscriptionFromServiceBase(sub *service.UserSubscription) UserSubscrip
 		MonthlyUsageUSD:    sub.MonthlyUsageUSD,
 		WalletBalanceUSD:   sub.WalletBalanceUSD,
 		WalletInitialUSD:   sub.WalletInitialUSD,
+		LockedRates:        cloneLockedRatesDTO(sub.LockedRates),
 		CreatedAt:          sub.CreatedAt,
 		UpdatedAt:          sub.UpdatedAt,
 		User:               UserFromServiceShallow(sub.User),
 		Group:              GroupFromServiceShallow(sub.Group),
 	}
+}
+
+func cloneLockedRatesDTO(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func BulkAssignResultFromService(r *service.BulkAssignResult) *BulkAssignResult {

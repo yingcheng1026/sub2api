@@ -226,6 +226,12 @@ func (_c *UserSubscriptionCreate) SetNillableWalletInitialUsd(v *float64) *UserS
 	return _c
 }
 
+// SetLockedRates sets the "locked_rates" field.
+func (_c *UserSubscriptionCreate) SetLockedRates(v map[string]float64) *UserSubscriptionCreate {
+	_c.mutation.SetLockedRates(v)
+	return _c
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (_c *UserSubscriptionCreate) SetAssignedBy(v int64) *UserSubscriptionCreate {
 	_c.mutation.SetAssignedBy(v)
@@ -526,6 +532,10 @@ func (_c *UserSubscriptionCreate) createSpec() (*UserSubscription, *sqlgraph.Cre
 	if value, ok := _c.mutation.WalletInitialUsd(); ok {
 		_spec.SetField(usersubscription.FieldWalletInitialUsd, field.TypeFloat64, value)
 		_node.WalletInitialUsd = &value
+	}
+	if value, ok := _c.mutation.LockedRates(); ok {
+		_spec.SetField(usersubscription.FieldLockedRates, field.TypeJSON, value)
+		_node.LockedRates = value
 	}
 	if value, ok := _c.mutation.AssignedAt(); ok {
 		_spec.SetField(usersubscription.FieldAssignedAt, field.TypeTime, value)
@@ -922,6 +932,24 @@ func (u *UserSubscriptionUpsert) ClearWalletInitialUsd() *UserSubscriptionUpsert
 	return u
 }
 
+// SetLockedRates sets the "locked_rates" field.
+func (u *UserSubscriptionUpsert) SetLockedRates(v map[string]float64) *UserSubscriptionUpsert {
+	u.Set(usersubscription.FieldLockedRates, v)
+	return u
+}
+
+// UpdateLockedRates sets the "locked_rates" field to the value that was provided on create.
+func (u *UserSubscriptionUpsert) UpdateLockedRates() *UserSubscriptionUpsert {
+	u.SetExcluded(usersubscription.FieldLockedRates)
+	return u
+}
+
+// ClearLockedRates clears the value of the "locked_rates" field.
+func (u *UserSubscriptionUpsert) ClearLockedRates() *UserSubscriptionUpsert {
+	u.SetNull(usersubscription.FieldLockedRates)
+	return u
+}
+
 // SetAssignedBy sets the "assigned_by" field.
 func (u *UserSubscriptionUpsert) SetAssignedBy(v int64) *UserSubscriptionUpsert {
 	u.Set(usersubscription.FieldAssignedBy, v)
@@ -1306,6 +1334,27 @@ func (u *UserSubscriptionUpsertOne) UpdateWalletInitialUsd() *UserSubscriptionUp
 func (u *UserSubscriptionUpsertOne) ClearWalletInitialUsd() *UserSubscriptionUpsertOne {
 	return u.Update(func(s *UserSubscriptionUpsert) {
 		s.ClearWalletInitialUsd()
+	})
+}
+
+// SetLockedRates sets the "locked_rates" field.
+func (u *UserSubscriptionUpsertOne) SetLockedRates(v map[string]float64) *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetLockedRates(v)
+	})
+}
+
+// UpdateLockedRates sets the "locked_rates" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertOne) UpdateLockedRates() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateLockedRates()
+	})
+}
+
+// ClearLockedRates clears the value of the "locked_rates" field.
+func (u *UserSubscriptionUpsertOne) ClearLockedRates() *UserSubscriptionUpsertOne {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearLockedRates()
 	})
 }
 
@@ -1867,6 +1916,27 @@ func (u *UserSubscriptionUpsertBulk) UpdateWalletInitialUsd() *UserSubscriptionU
 func (u *UserSubscriptionUpsertBulk) ClearWalletInitialUsd() *UserSubscriptionUpsertBulk {
 	return u.Update(func(s *UserSubscriptionUpsert) {
 		s.ClearWalletInitialUsd()
+	})
+}
+
+// SetLockedRates sets the "locked_rates" field.
+func (u *UserSubscriptionUpsertBulk) SetLockedRates(v map[string]float64) *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.SetLockedRates(v)
+	})
+}
+
+// UpdateLockedRates sets the "locked_rates" field to the value that was provided on create.
+func (u *UserSubscriptionUpsertBulk) UpdateLockedRates() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.UpdateLockedRates()
+	})
+}
+
+// ClearLockedRates clears the value of the "locked_rates" field.
+func (u *UserSubscriptionUpsertBulk) ClearLockedRates() *UserSubscriptionUpsertBulk {
+	return u.Update(func(s *UserSubscriptionUpsert) {
+		s.ClearLockedRates()
 	})
 }
 
