@@ -671,8 +671,11 @@ func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user 
 		return ErrBillingServiceUnavailable
 	}
 
-	// 判断计费模式
-	isSubscriptionMode := group != nil && group.IsSubscriptionType() && subscription != nil
+	// 判断计费模式。effectiveGroup 在 plan_groups 覆盖切换时是 sub 主 group，
+	// 而不是被调用的 standard group，避免老 bug:limits 跑到 limits=0 的 standard group
+	// 上"无限"过关又静默扣 user.balance。详见 2026-05-16 group-switch-billing-fix 设计 doc。
+	isSubscriptionMode := shouldUseSubscriptionBilling(subscription, group)
+	effectiveGroup := effectiveBillingGroup(group, subscription)
 
 	if isSubscriptionMode {
 		// v4 钱包模式优先：subscription.wallet_balance_usd != NULL → 走钱包预检，
@@ -681,7 +684,7 @@ func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user 
 			if err := s.checkWalletEligibility(subscription); err != nil {
 				return err
 			}
-		} else if err := s.checkSubscriptionEligibility(ctx, user.ID, group, subscription); err != nil {
+		} else if err := s.checkSubscriptionEligibility(ctx, user.ID, effectiveGroup, subscription); err != nil {
 			return err
 		}
 	} else {
