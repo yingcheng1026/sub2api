@@ -610,7 +610,10 @@ func acquireKiroSidecarSlot(ctx context.Context, maxConcurrency int) (func(), er
 		maxConcurrency = 1
 	}
 	raw, _ := kiroSidecarLimiters.LoadOrStore(maxConcurrency, semaphore.NewWeighted(int64(maxConcurrency)))
-	limiter := raw.(*semaphore.Weighted)
+	limiter, ok := raw.(*semaphore.Weighted)
+	if !ok {
+		return nil, errors.New("kiro sidecar limiter has invalid type")
+	}
 	if err := limiter.Acquire(ctx, kiroSidecarLimiterAcquireWeight); err != nil {
 		return nil, err
 	}

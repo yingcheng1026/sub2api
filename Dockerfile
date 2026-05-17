@@ -7,7 +7,7 @@
 # =============================================================================
 
 ARG NODE_IMAGE=node:24-alpine
-ARG GOLANG_IMAGE=golang:1.26.2-alpine
+ARG GOLANG_IMAGE=golang:1.26.3-alpine
 ARG ALPINE_IMAGE=alpine:3.21
 ARG POSTGRES_IMAGE=postgres:18-alpine
 ARG GOPROXY=https://goproxy.cn,direct
@@ -16,7 +16,10 @@ ARG GOSUMDB=sum.golang.google.cn
 # -----------------------------------------------------------------------------
 # Stage 1: Frontend Builder
 # -----------------------------------------------------------------------------
-FROM ${NODE_IMAGE} AS frontend-builder
+# --platform=$BUILDPLATFORM: 在 host 原生架构跑 (Apple Silicon arm64 / Intel amd64
+# 都不走 QEMU emulation),避免 esbuild 在 QEMU 下 crash。frontend dist 是纯静态
+# 文件,跟最终 image 架构无关。
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS frontend-builder
 
 WORKDIR /app/frontend
 
@@ -32,13 +35,17 @@ RUN pnpm install --frozen-lockfile
 
 # Copy frontend source and build
 COPY frontend/ ./
-# 在低内存环境（≤2GB）显式提高 Node 堆限制，避免 vite build 的 OOM。
-RUN NODE_OPTIONS="--max-old-space-size=3072" pnpm run build
+# FRONTEND_NODE_OPTIONS 可调: 默认 3072 适合本地 build (Mac / 大内存机);
+# VPS build 时降到 --max-old-space-size=1024 或 768 避免 OOM。
+ARG FRONTEND_NODE_OPTIONS="--max-old-space-size=3072"
+RUN NODE_OPTIONS="${FRONTEND_NODE_OPTIONS}" pnpm run build
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder
 # -----------------------------------------------------------------------------
-FROM ${GOLANG_IMAGE} AS backend-builder
+# --platform=$BUILDPLATFORM: host 原生跑 go (避免 QEMU 拖慢 ~3 倍);
+# 配合 GOARCH=$TARGETARCH 跨编译到目标架构,产 amd64 binary 塞进 amd64 final image。
+FROM --platform=$BUILDPLATFORM ${GOLANG_IMAGE} AS backend-builder
 
 # Build arguments for version info (set by CI)
 ARG VERSION=
@@ -48,6 +55,8 @@ ARG GOPROXY
 ARG GOSUMDB
 ARG GO_BUILD_GOMAXPROCS=
 ARG GO_BUILD_FLAGS=
+# buildx auto-injects TARGETARCH when --platform is set (e.g. linux/amd64 → amd64)
+ARG TARGETARCH
 
 ENV GOPROXY=${GOPROXY}
 ENV GOSUMDB=${GOSUMDB}
@@ -73,7 +82,7 @@ RUN VERSION_VALUE="${VERSION}" && \
     if [ -z "${VERSION_VALUE}" ]; then VERSION_VALUE="$(tr -d '\r\n' < ./cmd/server/VERSION)"; fi && \
     DATE_VALUE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     if [ -n "${GO_BUILD_GOMAXPROCS}" ]; then export GOMAXPROCS="${GO_BUILD_GOMAXPROCS}"; fi && \
-    CGO_ENABLED=0 GOOS=linux go build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build \
     ${GO_BUILD_FLAGS} \
     -tags embed \
     -ldflags="-s -w -X main.Version=${VERSION_VALUE} -X main.Commit=${COMMIT} -X main.Date=${DATE_VALUE} -X main.BuildType=release" \

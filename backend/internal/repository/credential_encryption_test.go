@@ -47,7 +47,10 @@ func TestEncryptAccountCredentialsProtectsSensitiveKeysOnly(t *testing.T) {
 	if stored["access_token"] == "at-secret" {
 		t.Fatal("access_token was stored as plaintext")
 	}
-	nested := stored["nested"].(map[string]any)
+	nested, ok := stored["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("nested credentials = %#v, want map[string]any", stored["nested"])
+	}
 	if nested["refresh_token"] == "rt-secret" {
 		t.Fatal("nested refresh_token was stored as plaintext")
 	}

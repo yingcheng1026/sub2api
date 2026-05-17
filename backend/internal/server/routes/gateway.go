@@ -243,13 +243,6 @@ func getGroupPlatform(c *gin.Context) string {
 	return apiKey.Group.Platform
 }
 
-func isKiroRouteEnabled(cfg *config.Config) bool {
-	if cfg != nil && cfg.Kiro.Enabled && cfg.Kiro.RouteEnabled {
-		return true
-	}
-	return envBool("KIRO_ENABLED") && envBool("KIRO_ROUTE_ENABLED")
-}
-
 func isCursorRouteEnabled(cfg *config.Config) bool {
 	if cfg != nil && cfg.Cursor.Enabled && cfg.Cursor.RouteEnabled {
 		return true

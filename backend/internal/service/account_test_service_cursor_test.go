@@ -138,6 +138,6 @@ func TestAccountTestService_CursorRequiresSidecarConfigured(t *testing.T) {
 	err := svc.TestAccountConnection(c, 84, "claude-sonnet-4-6", "hi", AccountTestModeDefault)
 
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "Cursor sidecar is not configured")
-	require.Contains(t, strings.TrimSpace(rec.Body.String()), "Cursor sidecar is not configured")
+	require.Contains(t, err.Error(), "cursor sidecar is not configured")
+	require.Contains(t, strings.TrimSpace(rec.Body.String()), "cursor sidecar is not configured")
 }

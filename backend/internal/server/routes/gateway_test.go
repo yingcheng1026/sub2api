@@ -59,15 +59,6 @@ func requireRouteRegistered(t *testing.T, router *gin.Engine, method, path strin
 	t.Fatalf("route %s %s is not registered", method, path)
 }
 
-func requireRouteNotRegistered(t *testing.T, router *gin.Engine, method, path string) {
-	t.Helper()
-	for _, route := range router.Routes() {
-		if route.Method == method && route.Path == path {
-			t.Fatalf("route %s %s should not be registered", method, path)
-		}
-	}
-}
-
 func TestGatewayRoutesOpenAIResponsesCompactPathIsRegistered(t *testing.T) {
 	router := newGatewayRoutesTestRouter()
 

@@ -30,7 +30,8 @@ func TestShouldUseSubscriptionBilling_CoveringMonthly(t *testing.T) {
 	}
 
 	t.Run("nil_subscription_uses_balance", func(t *testing.T) {
-		require.False(t, shouldUseSubscriptionBilling(nil, standardGroup))
+		isSubBilling, _ := EffectiveBillingContext(standardGroup, nil)
+		require.False(t, isSubBilling)
 	})
 
 	t.Run("wallet_subscription_any_group_uses_subscription", func(t *testing.T) {
@@ -40,7 +41,8 @@ func TestShouldUseSubscriptionBilling_CoveringMonthly(t *testing.T) {
 			WalletBalanceUSD: &bal,
 			Status:           SubscriptionStatusActive,
 		}
-		require.True(t, shouldUseSubscriptionBilling(walletSub, standardGroup),
+		isSubBilling, _ := EffectiveBillingContext(standardGroup, walletSub)
+		require.True(t, isSubBilling,
 			"钱包覆盖一切非订阅 group")
 	})
 
@@ -52,7 +54,8 @@ func TestShouldUseSubscriptionBilling_CoveringMonthly(t *testing.T) {
 			Group:   subGroup,
 			Status:  SubscriptionStatusActive,
 		}
-		require.True(t, shouldUseSubscriptionBilling(monthlySub, subGroup),
+		isSubBilling, _ := EffectiveBillingContext(subGroup, monthlySub)
+		require.True(t, isSubBilling,
 			"exact match 走订阅 (经典 v3 path)")
 	})
 
@@ -66,7 +69,8 @@ func TestShouldUseSubscriptionBilling_CoveringMonthly(t *testing.T) {
 			Group:   subGroup,
 			Status:  SubscriptionStatusActive,
 		}
-		require.True(t, shouldUseSubscriptionBilling(monthlySub, standardGroup),
+		isSubBilling, _ := EffectiveBillingContext(standardGroup, monthlySub)
+		require.True(t, isSubBilling,
 			"plan_groups 覆盖时月卡也要走订阅,不能 fallback balance")
 	})
 }
@@ -78,12 +82,14 @@ func TestEffectiveBillingGroup(t *testing.T) {
 	standardGroup := &Group{ID: 3, Name: "openai-default", SubscriptionType: SubscriptionTypeStandard}
 
 	t.Run("nil_subscription_returns_called", func(t *testing.T) {
-		require.Equal(t, standardGroup, effectiveBillingGroup(standardGroup, nil))
+		_, effectiveGroup := EffectiveBillingContext(standardGroup, nil)
+		require.Equal(t, standardGroup, effectiveGroup)
 	})
 
 	t.Run("wallet_keeps_called_group", func(t *testing.T) {
 		walletSub := &UserSubscription{WalletBalanceUSD: &bal, Status: SubscriptionStatusActive}
-		require.Equal(t, standardGroup, effectiveBillingGroup(standardGroup, walletSub),
+		_, effectiveGroup := EffectiveBillingContext(standardGroup, walletSub)
+		require.Equal(t, standardGroup, effectiveGroup,
 			"钱包模式不绑 group,limits 检查不依赖 group")
 	})
 
@@ -94,7 +100,8 @@ func TestEffectiveBillingGroup(t *testing.T) {
 			Status:  SubscriptionStatusActive,
 		}
 		// 关键:返回 sub 主 group 而不是 called group → limits 用 sub.Group 的 limits 检查
-		require.Equal(t, subGroup, effectiveBillingGroup(standardGroup, monthlySub),
+		_, effectiveGroup := EffectiveBillingContext(standardGroup, monthlySub)
+		require.Equal(t, subGroup, effectiveGroup,
 			"月卡 covering 用 sub.Group 不是 called group")
 	})
 
@@ -105,6 +112,7 @@ func TestEffectiveBillingGroup(t *testing.T) {
 			Group:   nil,
 			Status:  SubscriptionStatusActive,
 		}
-		require.Equal(t, standardGroup, effectiveBillingGroup(standardGroup, subWithoutGroup))
+		_, effectiveGroup := EffectiveBillingContext(standardGroup, subWithoutGroup)
+		require.Equal(t, standardGroup, effectiveGroup)
 	})
 }

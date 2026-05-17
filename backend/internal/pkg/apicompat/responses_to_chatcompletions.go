@@ -395,6 +395,8 @@ type BufferedResponseAccumulator struct {
 	reasoning            strings.Builder
 	funcCalls            []bufferedFuncCall
 	outputIndexToFuncIdx map[int]int
+	responseID           string
+	responseModel        string
 }
 
 // NewBufferedResponseAccumulator returns an initialised accumulator.
@@ -408,6 +410,17 @@ func NewBufferedResponseAccumulator() *BufferedResponseAccumulator {
 // content it carries. Only delta events that contribute to the final output
 // are handled; all other event types are silently ignored.
 func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) {
+	if event == nil {
+		return
+	}
+	if event.Response != nil {
+		if a.responseID == "" {
+			a.responseID = strings.TrimSpace(event.Response.ID)
+		}
+		if a.responseModel == "" {
+			a.responseModel = strings.TrimSpace(event.Response.Model)
+		}
+	}
 	switch event.Type {
 	case "response.output_text.delta":
 		if event.Delta != "" {
@@ -433,6 +446,22 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 			_, _ = a.reasoning.WriteString(event.Delta)
 		}
 	}
+}
+
+// ResponseID returns the first response ID observed in the stream.
+func (a *BufferedResponseAccumulator) ResponseID() string {
+	if a == nil {
+		return ""
+	}
+	return a.responseID
+}
+
+// ResponseModel returns the first response model observed in the stream.
+func (a *BufferedResponseAccumulator) ResponseModel() string {
+	if a == nil {
+		return ""
+	}
+	return a.responseModel
 }
 
 // HasContent reports whether any content has been accumulated.
