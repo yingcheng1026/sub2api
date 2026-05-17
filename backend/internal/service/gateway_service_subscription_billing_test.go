@@ -184,10 +184,15 @@ func TestShouldUseSubscriptionBilling_WalletModeIgnoresStandardGroup(t *testing.
 			want:         true,
 		},
 		{
-			name:         "v3 subscription without subscription group uses balance billing",
+			// 2026-05-17 follow-up:语义升级。一旦 middleware 注入 subscription
+			// (经 GetActiveSubscriptionCoveringGroup 找到 plan_groups 覆盖),
+			// billing 就该信它走订阅 quota,而不是 fallback 到主余额 balance
+			// (避免老 bug:24+ 用户 818 次静默扣 balance)。
+			// 详见 docs/plans/2026-05-16-wallet-v4-group-switch-billing-fix.md。
+			name:         "v3 subscription on standard group (covering) uses subscription billing",
 			subscription: &UserSubscription{ID: 16},
 			group:        &Group{ID: 3},
-			want:         false,
+			want:         true,
 		},
 	}
 
