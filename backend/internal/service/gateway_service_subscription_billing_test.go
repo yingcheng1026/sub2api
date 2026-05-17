@@ -96,9 +96,9 @@ func TestBuildUsageBillingCommand_WalletModeRoutesToWalletCost(t *testing.T) {
 	t.Run("wallet mode subscription deducts WalletCost", func(t *testing.T) {
 		t.Parallel()
 		p := &postUsageBillingParams{
-			Cost:   &CostBreakdown{TotalCost: 1.0, ActualCost: 2.5},
-			User:   &User{ID: 1},
-			APIKey: &APIKey{ID: 2, GroupID: &groupID},
+			Cost:    &CostBreakdown{TotalCost: 1.0, ActualCost: 2.5},
+			User:    &User{ID: 1},
+			APIKey:  &APIKey{ID: 2, GroupID: &groupID},
 			Account: &Account{ID: 3},
 			Subscription: &UserSubscription{
 				ID: subID,
@@ -149,4 +149,55 @@ func TestBuildUsageBillingCommand_WalletModeRoutesToWalletCost(t *testing.T) {
 			t.Errorf("WalletCost must be 0 in v3 mode, got %v", cmd.WalletCost)
 		}
 	})
+}
+
+func TestShouldUseSubscriptionBilling_WalletModeIgnoresStandardGroup(t *testing.T) {
+	t.Parallel()
+
+	walletBal := 100.0
+
+	tests := []struct {
+		name         string
+		subscription *UserSubscription
+		group        *Group
+		want         bool
+	}{
+		{
+			name:         "nil subscription uses balance billing",
+			subscription: nil,
+			group:        &Group{SubscriptionType: SubscriptionTypeSubscription},
+			want:         false,
+		},
+		{
+			name: "wallet mode with standard group uses subscription billing",
+			subscription: &UserSubscription{
+				ID:               45,
+				WalletBalanceUSD: &walletBal,
+			},
+			group: &Group{ID: 3},
+			want:  true,
+		},
+		{
+			name:         "v3 subscription group still uses subscription billing",
+			subscription: &UserSubscription{ID: 16},
+			group:        &Group{SubscriptionType: SubscriptionTypeSubscription},
+			want:         true,
+		},
+		{
+			name:         "v3 subscription without subscription group uses balance billing",
+			subscription: &UserSubscription{ID: 16},
+			group:        &Group{ID: 3},
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := shouldUseSubscriptionBilling(tt.subscription, tt.group); got != tt.want {
+				t.Fatalf("shouldUseSubscriptionBilling() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

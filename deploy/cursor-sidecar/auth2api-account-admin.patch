@@ -45,7 +45,7 @@ index 95da10c..6d6056b 100644
 @@ -406,6 +406,37 @@ export class AccountManager {
      };
    }
- 
+
 +  getAccountByRef(ref: string): AccountResult {
 +    const accountRef = ref.trim();
 +    if (!accountRef) {
@@ -82,7 +82,7 @@ index 95da10c..6d6056b 100644
      if (acct) {
 @@ -507,6 +538,7 @@ export class AccountManager {
    }
- 
+
    startAutoRefresh(): void {
 +    if (this.refreshTimer) return;
      const timer = setInterval(
@@ -90,7 +90,7 @@ index 95da10c..6d6056b 100644
          this.refreshAll().catch((err) =>
 @@ -532,6 +564,7 @@ export class AccountManager {
    }
- 
+
    startStatsLogger(): void {
 +    if (this.statsTimer) return;
      const timer = setInterval(() => this.logStats(), 5 * 60 * 1000);
@@ -103,7 +103,7 @@ index ce8cd01..b54951e 100644
 @@ -23,6 +23,12 @@ function internalError(resp: ExpressResponse): void {
    }
  }
- 
+
 +function cursorAccountRef(req: Request, providerId: string): string | undefined {
 +  if (providerId !== "cursor") return undefined;
 +  const ref = req.get("x-cursor-account-ref")?.trim();
@@ -114,7 +114,7 @@ index ce8cd01..b54951e 100644
   * Codex-specific path for /v1/messages. Translates the Anthropic Messages
   * request into a Responses request, applies codex's required defaults
 @@ -220,6 +226,7 @@ export function createMessagesHandler(
- 
+
        await proxyWithRetry("Messages", resp, config, {
          manager: provider.manager,
 +        accountRef: cursorAccountRef(req, provider.id),
@@ -136,7 +136,7 @@ index c356894..8b3a60a 100644
 @@ -53,6 +53,11 @@ function internalError(resp: ExpressResponse): void {
    }
  }
- 
+
 +function cursorAccountRef(req: Request): string | undefined {
 +  const ref = req.get("x-cursor-account-ref")?.trim();
 +  return ref || undefined;
@@ -146,7 +146,7 @@ index c356894..8b3a60a 100644
   * Codex-specific path for /v1/chat/completions. Translates the incoming
   * Chat Completions body into a Responses body, applies codex's required
 @@ -370,6 +375,7 @@ async function proxyCursorChatCompletions(args: {
- 
+
    await proxyWithRetry("ChatCompletions(cursor)", resp, config, {
      manager: provider.manager,
 +    accountRef: cursorAccountRef(req),
@@ -178,7 +178,7 @@ index a48328f..6dbf550 100644
 @@ -17,6 +19,33 @@ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
  const RATE_LIMIT_WINDOW_MS = 60 * 1000;
  const RATE_LIMIT_MAX = 60;
- 
+
 +function requiredString(body: any, key: string): string {
 +  const value = body?.[key];
 +  return typeof value === "string" ? value.trim() : "";
@@ -212,7 +212,7 @@ index a48328f..6dbf550 100644
 @@ -226,6 +255,81 @@ export function createServer(
      });
    });
- 
+
 +  // POST /admin/accounts/cursor — provision one Cursor token into the sidecar.
 +  //
 +  // The response intentionally never echoes access_token or refresh_token.
@@ -291,12 +291,308 @@ index a48328f..6dbf550 100644
    // POST /admin/reload — re-reads token files from auth-dir and reconciles
    // each provider's in-memory state. Called automatically by `--login` after
    // a successful re-auth (see notifyServerReload in src/index.ts), and
+diff --git a/src/upstream/cursor-api.ts b/src/upstream/cursor-api.ts
+index 423f328..3a63696 100644
+--- a/src/upstream/cursor-api.ts
++++ b/src/upstream/cursor-api.ts
+@@ -995,6 +995,137 @@ interface ResponsesSseOptions {
+   reasoning?: string;
+ }
+
++interface CursorTextToolCall {
++  name: string;
++  input: Record<string, unknown>;
++}
++
++interface CursorTextToolParseResult {
++  leadingText: string;
++  trailingText: string;
++  toolCalls: CursorTextToolCall[];
++}
++
++const CURSOR_TOOL_MARKERS = {
++  callsBegin: ["<\uFF5Ctool\u2581calls\u2581begin\uFF5C>", "<|tool_calls_begin|>"],
++  callsEnd: ["<\uFF5Ctool\u2581calls\u2581end\uFF5C>", "<|tool_calls_end|>"],
++  callBegin: ["<\uFF5Ctool\u2581call\u2581begin\uFF5C>", "<|tool_call_begin|>"],
++  callEnd: ["<\uFF5Ctool\u2581call\u2581end\uFF5C>", "<|tool_call_end|>"],
++  sep: ["<\uFF5Ctool\u2581sep\uFF5C>", "<|tool_sep|>"],
++};
++
++function findAnyMarker(
++  text: string,
++  markers: string[],
++  fromIndex = 0,
++): { index: number; marker: string } | null {
++  let best: { index: number; marker: string } | null = null;
++  for (const marker of markers) {
++    const index = text.indexOf(marker, fromIndex);
++    if (index < 0) continue;
++    if (!best || index < best.index) best = { index, marker };
++  }
++  return best;
++}
++
++function splitByAnyMarker(text: string, markers: string[]): string[] {
++  const parts: string[] = [];
++  let pos = 0;
++  while (pos <= text.length) {
++    const found = findAnyMarker(text, markers, pos);
++    if (!found) {
++      parts.push(text.slice(pos));
++      break;
++    }
++    parts.push(text.slice(pos, found.index));
++    pos = found.index + found.marker.length;
++  }
++  return parts;
++}
++
++function coerceCursorToolValue(raw: string): unknown {
++  const trimmed = raw.trim();
++  if (!trimmed) return "";
++  if (/^[\[{"]/.test(trimmed) || /^(true|false|null|-?\d+(\.\d+)?)$/.test(trimmed)) {
++    try {
++      return JSON.parse(trimmed);
++    } catch {
++      return raw.replace(/^\s+|\s+$/g, "");
++    }
++  }
++  return raw.replace(/^\s+|\s+$/g, "");
++}
++
++function renameCursorInputKey(toolName: string, key: string): string {
++  if (toolName === "Glob") {
++    if (key === "glob_pattern") return "pattern";
++    if (key === "target_directory") return "path";
++  }
++  if (toolName === "Read") {
++    if (key === "target_file" || key === "file" || key === "path") return "file_path";
++  }
++  return key;
++}
++
++function renameCursorToolName(name: string): string {
++  if (name === "Shell" || name === "Terminal") return "Bash";
++  return name;
++}
++
++function parseCursorToolBlock(block: string): CursorTextToolCall | null {
++  const segments = splitByAnyMarker(block, CURSOR_TOOL_MARKERS.sep);
++  const header = (segments.shift() || "").trim();
++  const rawName = header.split(/\r?\n/).find((line) => line.trim())?.trim() || "";
++  if (!rawName) return null;
++  const name = renameCursorToolName(rawName);
++
++  const input: Record<string, unknown> = {};
++  for (const segment of segments) {
++    const lines = segment.replace(/^\s+/, "").split(/\r?\n/);
++    const rawKey = (lines.shift() || "").trim();
++    if (!rawKey) continue;
++    const key = renameCursorInputKey(name, rawKey);
++    input[key] = coerceCursorToolValue(lines.join("\n"));
++  }
++  return { name, input };
++}
++
++export function __parseCursorTextToolCalls(
++  text: string,
++): CursorTextToolParseResult | null {
++  const callsBegin = findAnyMarker(text, CURSOR_TOOL_MARKERS.callsBegin);
++  if (!callsBegin) return null;
++
++  const callsEnd = findAnyMarker(
++    text,
++    CURSOR_TOOL_MARKERS.callsEnd,
++    callsBegin.index + callsBegin.marker.length,
++  );
++  const leadingText = text.slice(0, callsBegin.index);
++  const innerStart = callsBegin.index + callsBegin.marker.length;
++  const innerEnd = callsEnd?.index ?? text.length;
++  const inner = text.slice(innerStart, innerEnd);
++  const trailingText = callsEnd
++    ? text.slice(callsEnd.index + callsEnd.marker.length)
++    : "";
++
++  const toolCalls: CursorTextToolCall[] = [];
++  let pos = 0;
++  while (pos < inner.length) {
++    const callBegin = findAnyMarker(inner, CURSOR_TOOL_MARKERS.callBegin, pos);
++    if (!callBegin) break;
++    const blockStart = callBegin.index + callBegin.marker.length;
++    const callEnd = findAnyMarker(inner, CURSOR_TOOL_MARKERS.callEnd, blockStart);
++    const blockEnd = callEnd?.index ?? inner.length;
++    const parsed = parseCursorToolBlock(inner.slice(blockStart, blockEnd));
++    if (parsed) toolCalls.push(parsed);
++    pos = callEnd ? callEnd.index + callEnd.marker.length : inner.length;
++  }
++
++  if (!toolCalls.length) return null;
++  return { leadingText, trailingText, toolCalls };
++}
++
+ function buildResponsesCompletedSse(model: string, opts: ResponsesSseOptions): string {
+   const id = `resp_${uuidv4().replace(/-/g, "")}`;
+   const created = Math.floor(Date.now() / 1000);
+@@ -1282,24 +1413,51 @@ async function* anthropicMessagesGenerator(
+     },
+   });
+
+-  let thinkingOpen = false;
+-  let textOpen = false;
+-  let thinkingIndex = -1;
+-  let textIndex = -1;
+   let nextIndex = 0;
++  let reasoningBuffer = "";
++  let textBuffer = "";
+   const closeBlock = (idx: number): string =>
+     sseEvent("content_block_stop", { type: "content_block_stop", index: idx });
++  function* emitTextBlock(text: string): Generator<string> {
++    if (!text) return;
++    const index = nextIndex++;
++    yield sseEvent("content_block_start", {
++      type: "content_block_start",
++      index,
++      content_block: { type: "text", text: "" },
++    });
++    yield sseEvent("content_block_delta", {
++      type: "content_block_delta",
++      index,
++      delta: { type: "text_delta", text },
++    });
++    yield closeBlock(index);
++  }
++  function* emitToolUseBlock(tool: CursorTextToolCall): Generator<string> {
++    const index = nextIndex++;
++    yield sseEvent("content_block_start", {
++      type: "content_block_start",
++      index,
++      content_block: {
++        type: "tool_use",
++        id: `toolu_${uuidv4().replace(/-/g, "")}`,
++        name: tool.name,
++        input: {},
++      },
++    });
++    yield sseEvent("content_block_delta", {
++      type: "content_block_delta",
++      index,
++      delta: {
++        type: "input_json_delta",
++        partial_json: JSON.stringify(tool.input || {}),
++      },
++    });
++    yield closeBlock(index);
++  }
+
+   for await (const item of src) {
+     if (item.__done) {
+-      if (thinkingOpen) {
+-        yield closeBlock(thinkingIndex);
+-        thinkingOpen = false;
+-      }
+-      if (textOpen) {
+-        yield closeBlock(textIndex);
+-        textOpen = false;
+-      }
+       if (item.error && !item.aggregatedText && !item.aggregatedReasoning) {
+         yield sseEvent("error", {
+           type: "error",
+@@ -1307,9 +1465,35 @@ async function* anthropicMessagesGenerator(
+         });
+         return;
+       }
++      const parsedReasoningTools = __parseCursorTextToolCalls(reasoningBuffer);
++      const parsedTextTools = parsedReasoningTools
++        ? null
++        : __parseCursorTextToolCalls(textBuffer);
++      let usedTool = false;
++      if (parsedReasoningTools) {
++        for (const event of emitTextBlock(parsedReasoningTools.leadingText)) yield event;
++        for (const tool of parsedReasoningTools.toolCalls) {
++          usedTool = true;
++          for (const event of emitToolUseBlock(tool)) yield event;
++        }
++        for (const event of emitTextBlock(parsedReasoningTools.trailingText)) yield event;
++        for (const event of emitTextBlock(textBuffer)) yield event;
++      } else if (parsedTextTools) {
++        if (!parsedTextTools.leadingText && !textBuffer) {
++          for (const event of emitTextBlock(reasoningBuffer)) yield event;
++        }
++        for (const event of emitTextBlock(parsedTextTools.leadingText)) yield event;
++        for (const tool of parsedTextTools.toolCalls) {
++          usedTool = true;
++          for (const event of emitToolUseBlock(tool)) yield event;
++        }
++        for (const event of emitTextBlock(parsedTextTools.trailingText)) yield event;
++      } else {
++        for (const event of emitTextBlock(textBuffer || reasoningBuffer)) yield event;
++      }
+       yield sseEvent("message_delta", {
+         type: "message_delta",
+-        delta: { stop_reason: "end_turn", stop_sequence: null },
++        delta: { stop_reason: usedTool ? "tool_use" : "end_turn", stop_sequence: null },
+         usage: { output_tokens: 0 },
+       });
+       yield sseEvent("message_stop", { type: "message_stop" });
+@@ -1317,48 +1501,17 @@ async function* anthropicMessagesGenerator(
+     }
+
+     if (item.reasoningDelta) {
+-      // Claude Code expects thinking blocks to come before text blocks.
+-      // Once text starts we stop emitting reasoning even if more arrives.
+-      if (textOpen) {
++      if (textBuffer) {
+         // After text has begun, treat any trailing reasoning as continuation
+         // of the text channel — we cannot interleave two open blocks under
+         // the Anthropic schema.
++        textBuffer += item.reasoningDelta;
+       } else {
+-        if (!thinkingOpen) {
+-          thinkingIndex = nextIndex++;
+-          yield sseEvent("content_block_start", {
+-            type: "content_block_start",
+-            index: thinkingIndex,
+-            content_block: { type: "thinking", thinking: "" },
+-          });
+-          thinkingOpen = true;
+-        }
+-        yield sseEvent("content_block_delta", {
+-          type: "content_block_delta",
+-          index: thinkingIndex,
+-          delta: { type: "thinking_delta", thinking: item.reasoningDelta },
+-        });
++        reasoningBuffer += item.reasoningDelta;
+       }
+     }
+     if (item.textDelta) {
+-      if (thinkingOpen) {
+-        yield closeBlock(thinkingIndex);
+-        thinkingOpen = false;
+-      }
+-      if (!textOpen) {
+-        textIndex = nextIndex++;
+-        yield sseEvent("content_block_start", {
+-          type: "content_block_start",
+-          index: textIndex,
+-          content_block: { type: "text", text: "" },
+-        });
+-        textOpen = true;
+-      }
+-      yield sseEvent("content_block_delta", {
+-        type: "content_block_delta",
+-        index: textIndex,
+-        delta: { type: "text_delta", text: item.textDelta },
+-      });
++      textBuffer += item.textDelta;
+     }
+   }
+ }
 diff --git a/src/utils/http.ts b/src/utils/http.ts
 index 660555a..7944e3a 100644
 --- a/src/utils/http.ts
 +++ b/src/utils/http.ts
 @@ -82,6 +82,7 @@ export function accountUnavailable(
- 
+
  export interface ProxyOptions {
    manager: AccountManager;
 +  accountRef?: string;
@@ -304,7 +600,7 @@ index 660555a..7944e3a 100644
      account: AvailableAccount,
      signal: AbortSignal,
 @@ -140,7 +141,9 @@ export async function proxyWithRetry(
- 
+
    try {
      for (let attempt = 0; attempt < maxRetries; attempt++) {
 -      const result = manager.getNextAccount();
@@ -314,6 +610,192 @@ index 660555a..7944e3a 100644
        if (!result.account) {
          return accountUnavailable(resp, result, manager.provider);
        }
+diff --git a/tests/cursor.test.ts b/tests/cursor.test.ts
+index 8f2b678..62970c0 100644
+--- a/tests/cursor.test.ts
++++ b/tests/cursor.test.ts
+@@ -12,6 +12,7 @@ import {
+ import { refreshCursorTokens } from "../src/auth/cursor/oauth";
+ import {
+   __buildCursorHeaders,
++  __parseCursorTextToolCalls,
+   __resolveCursorModel,
+   __setCursorTransport,
+   callCursorResponses,
+@@ -436,6 +437,173 @@ test("cursor streaming decoder flushes pending reasoning when text arrives witho
+   assert.equal(text, "Hello.");
+ });
+
++test("cursor text tool-call parser reads Cursor tool markers", () => {
++  const text =
++    "Checking files.\n" +
++    "<\uFF5Ctool\u2581calls\u2581begin\uFF5C><\uFF5Ctool\u2581call\u2581begin\uFF5C>\n" +
++    "Glob\n" +
++    "<\uFF5Ctool\u2581sep\uFF5C>glob_pattern\n" +
++    "AGENTS.md\n" +
++    "<\uFF5Ctool\u2581sep\uFF5C>target_directory\n" +
++    "/workspace\n" +
++    "<\uFF5Ctool\u2581call\u2581end\uFF5C><\uFF5Ctool\u2581calls\u2581end\uFF5C>";
++
++  const parsed = __parseCursorTextToolCalls(text);
++
++  assert.ok(parsed);
++  assert.equal(parsed.leadingText, "Checking files.\n");
++  assert.equal(parsed.toolCalls.length, 1);
++  assert.equal(parsed.toolCalls[0].name, "Glob");
++  assert.deepEqual(parsed.toolCalls[0].input, {
++    pattern: "AGENTS.md",
++    path: "/workspace",
++  });
++});
++
++test("cursor anthropic messages maps Cursor tool markers to tool_use blocks", async (t) => {
++  const toolText =
++    "Checking files.\n" +
++    "<\uFF5Ctool\u2581calls\u2581begin\uFF5C><\uFF5Ctool\u2581call\u2581begin\uFF5C>\n" +
++    "Glob\n" +
++    "<\uFF5Ctool\u2581sep\uFF5C>glob_pattern\n" +
++    "AGENTS.md\n" +
++    "<\uFF5Ctool\u2581sep\uFF5C>target_directory\n" +
++    "/workspace\n" +
++    "<\uFF5Ctool\u2581call\u2581end\uFF5C><\uFF5Ctool\u2581calls\u2581end\uFF5C>";
++  __setCursorTransport(async () => ({
++    status: 200,
++    headers: { "content-type": "application/connect+proto" },
++    body: connectProtoTextFrame(toolText),
++  }));
++  t.after(() => __setCursorTransport(null));
++
++  const cfg = makeConfig();
++  const account = {
++    token: {
++      accessToken: "a",
++      refreshToken: "r",
++      email: "x@cursor.com",
++      accountUuid: "uuid",
++      provider: "cursor" as const,
++      cursorServiceMachineId: "m",
++      cursorClientVersion: "cli-test",
++    },
++  } as any;
++
++  const upstream = await callCursorResponses({
++    body: {
++      model: "cursor-default",
++      messages: [{ role: "user", content: "check" }],
++      stream: true,
++    },
++    request: { body: {} } as any,
++    account,
++    config: cfg,
++    responseFormat: "anthropic-messages",
++  });
++  const sse = await upstream.text();
++
++  assert.match(sse, /"content_block":\{"type":"tool_use"/);
++  assert.match(sse, /"name":"Glob"/);
++  assert.match(sse, /"type":"input_json_delta"/);
++  assert.match(sse, /pattern/);
++  assert.match(sse, /path/);
++  assert.match(sse, /"stop_reason":"tool_use"/);
++  assert.doesNotMatch(sse, /tool\u2581calls/);
++});
++
++test("cursor anthropic messages maps reasoning tool markers to tool_use blocks", async (t) => {
++  const toolThinking =
++    "Using a shell fallback.\n" +
++    "<\uFF5Ctool\u2581calls\u2581begin\uFF5C><\uFF5Ctool\u2581call\u2581begin\uFF5C>\n" +
++    "Shell\n" +
++    "<\uFF5Ctool\u2581sep\uFF5C>command\n" +
++    "ls -la AGENTS.md\n" +
++    "<\uFF5Ctool\u2581sep\uFF5C>description\n" +
++    "Check AGENTS.md\n" +
++    "<\uFF5Ctool\u2581call\u2581end\uFF5C><\uFF5Ctool\u2581calls\u2581end\uFF5C>";
++  __setCursorTransport(async () => ({
++    status: 200,
++    headers: { "content-type": "application/connect+proto" },
++    body: connectProtoReasoningFrame(toolThinking),
++  }));
++  t.after(() => __setCursorTransport(null));
++
++  const cfg = makeConfig();
++  const account = {
++    token: {
++      accessToken: "a",
++      refreshToken: "r",
++      email: "x@cursor.com",
++      accountUuid: "uuid",
++      provider: "cursor" as const,
++      cursorServiceMachineId: "m",
++      cursorClientVersion: "cli-test",
++    },
++  } as any;
++
++  const upstream = await callCursorResponses({
++    body: {
++      model: "cursor-default",
++      messages: [{ role: "user", content: "check" }],
++      stream: true,
++    },
++    request: { body: {} } as any,
++    account,
++    config: cfg,
++    responseFormat: "anthropic-messages",
++  });
++  const sse = await upstream.text();
++
++  assert.match(sse, /"content_block":\{"type":"text"/);
++  assert.match(sse, /"content_block":\{"type":"tool_use"/);
++  assert.match(sse, /"name":"Bash"/);
++  assert.match(sse, /"type":"input_json_delta"/);
++  assert.match(sse, /ls -la AGENTS\.md/);
++  assert.match(sse, /"stop_reason":"tool_use"/);
++  assert.doesNotMatch(sse, /tool\u2581calls/);
++});
++
++test("cursor anthropic messages falls back to text for non-tool reasoning", async (t) => {
++  __setCursorTransport(async () => ({
++    status: 200,
++    headers: { "content-type": "application/connect+proto" },
++    body: connectProtoReasoningFrame("CC_SIMPLE_OK"),
++  }));
++  t.after(() => __setCursorTransport(null));
++
++  const cfg = makeConfig();
++  const account = {
++    token: {
++      accessToken: "a",
++      refreshToken: "r",
++      email: "x@cursor.com",
++      accountUuid: "uuid",
++      provider: "cursor" as const,
++      cursorServiceMachineId: "m",
++      cursorClientVersion: "cli-test",
++    },
++  } as any;
++
++  const upstream = await callCursorResponses({
++    body: {
++      model: "cursor-default",
++      messages: [{ role: "user", content: "say ok" }],
++      stream: true,
++    },
++    request: { body: {} } as any,
++    account,
++    config: cfg,
++    responseFormat: "anthropic-messages",
++  });
++  const sse = await upstream.text();
++
++  assert.match(sse, /"content_block":\{"type":"text"/);
++  assert.match(sse, /CC_SIMPLE_OK/);
++  assert.doesNotMatch(sse, /"type":"thinking"/);
++  assert.match(sse, /"stop_reason":"end_turn"/);
++});
++
+ test("extractCursorModelIds reads the structured models[] field", () => {
+   const sample = {
+     models: [
 diff --git a/tests/smoke.test.ts b/tests/smoke.test.ts
 index ab14e8e..08040e7 100644
 --- a/tests/smoke.test.ts
@@ -321,7 +803,7 @@ index ab14e8e..08040e7 100644
 @@ -1063,6 +1063,119 @@ test("POST /admin/reload requires the API key", async (t) => {
    assert.equal(wrongAuth.status, 403);
  });
- 
+
 +test("POST /admin/accounts/cursor provisions token without echoing secrets", async (t) => {
 +  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
 +  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
