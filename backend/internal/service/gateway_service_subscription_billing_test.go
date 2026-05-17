@@ -200,8 +200,8 @@ func TestShouldUseSubscriptionBilling_WalletModeIgnoresStandardGroup(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := shouldUseSubscriptionBilling(tt.subscription, tt.group); got != tt.want {
-				t.Fatalf("shouldUseSubscriptionBilling() = %v, want %v", got, tt.want)
+			if got, _ := EffectiveBillingContext(tt.group, tt.subscription); got != tt.want {
+				t.Fatalf("EffectiveBillingContext() subscription billing = %v, want %v", got, tt.want)
 			}
 		})
 	}

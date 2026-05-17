@@ -839,7 +839,10 @@ func acquireCursorSidecarSlot(ctx context.Context, maxConcurrency int) (func(), 
 		maxConcurrency = 1
 	}
 	raw, _ := cursorSidecarLimiters.LoadOrStore(maxConcurrency, semaphore.NewWeighted(int64(maxConcurrency)))
-	limiter := raw.(*semaphore.Weighted)
+	limiter, ok := raw.(*semaphore.Weighted)
+	if !ok {
+		return nil, errors.New("cursor sidecar limiter has invalid type")
+	}
 	if err := limiter.Acquire(ctx, cursorSidecarLimiterAcquireWeight); err != nil {
 		return nil, err
 	}

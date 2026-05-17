@@ -9,23 +9,20 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 )
 
-func isResponsesTerminalEventType(eventType string) bool {
-	switch eventType {
-	case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
-		return true
-	default:
-		return false
-	}
-}
-
 func synthesizeBufferedResponsesResponse(acc *apicompat.BufferedResponseAccumulator, requestID, model string) *apicompat.ResponsesResponse {
 	if acc == nil || !acc.HasContent() || acc.HasFunctionCalls() {
 		return nil
 	}
 
-	id := strings.TrimSpace(requestID)
+	id := strings.TrimSpace(acc.ResponseID())
+	if id == "" {
+		id = strings.TrimSpace(requestID)
+	}
 	if id == "" {
 		id = fmt.Sprintf("resp_%d", time.Now().UnixNano())
+	}
+	if observedModel := strings.TrimSpace(acc.ResponseModel()); observedModel != "" {
+		model = observedModel
 	}
 
 	return &apicompat.ResponsesResponse{

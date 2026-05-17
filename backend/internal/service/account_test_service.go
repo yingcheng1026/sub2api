@@ -998,18 +998,18 @@ func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *
 
 func (s *AccountTestService) buildKiroSidecarEndpoint(path string) (string, error) {
 	if s.cfg == nil || strings.TrimSpace(s.cfg.Kiro.SidecarURL) == "" {
-		return "", fmt.Errorf("Kiro sidecar is not configured")
+		return "", fmt.Errorf("kiro sidecar is not configured")
 	}
 	raw := strings.TrimSpace(s.cfg.Kiro.SidecarURL)
 	if err := config.ValidateAbsoluteHTTPURL(raw); err != nil {
-		return "", fmt.Errorf("Invalid Kiro sidecar URL: %s", err.Error())
+		return "", fmt.Errorf("invalid Kiro sidecar URL: %s", err.Error())
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("Invalid Kiro sidecar URL: %s", err.Error())
+		return "", fmt.Errorf("invalid Kiro sidecar URL: %s", err.Error())
 	}
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
-		return "", fmt.Errorf("Invalid Kiro sidecar URL: must not include userinfo or query")
+		return "", fmt.Errorf("invalid Kiro sidecar URL: must not include userinfo or query")
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + path
 	u.RawQuery = ""
@@ -1118,7 +1118,7 @@ func (s *AccountTestService) ListCursorSidecarModels(ctx context.Context) ([]Cur
 
 	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Cursor sidecar models request failed: %w", err)
+		return nil, fmt.Errorf("cursor sidecar models request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1127,12 +1127,12 @@ func (s *AccountTestService) ListCursorSidecarModels(ctx context.Context) ([]Cur
 		return nil, fmt.Errorf("read Cursor sidecar models response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("Cursor sidecar models returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("cursor sidecar models returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	models := parseCursorSidecarModels(body)
 	if len(models) == 0 {
-		return nil, fmt.Errorf("Cursor sidecar models response did not include data")
+		return nil, fmt.Errorf("cursor sidecar models response did not include data")
 	}
 	return models, nil
 }
@@ -1194,20 +1194,20 @@ func normalizeCursorTestModel(account *Account, modelID string) string {
 func (s *AccountTestService) buildCursorSidecarEndpoint(path string) (string, error) {
 	raw := s.cursorSidecarURL()
 	if raw == "" {
-		return "", fmt.Errorf("Cursor sidecar is not configured")
+		return "", fmt.Errorf("cursor sidecar is not configured")
 	}
 	if err := config.ValidateAbsoluteHTTPURL(raw); err != nil {
-		return "", fmt.Errorf("Invalid Cursor sidecar URL: %s", err.Error())
+		return "", fmt.Errorf("invalid Cursor sidecar URL: %s", err.Error())
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("Invalid Cursor sidecar URL: %s", err.Error())
+		return "", fmt.Errorf("invalid Cursor sidecar URL: %s", err.Error())
 	}
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery {
-		return "", fmt.Errorf("Invalid Cursor sidecar URL: must not include userinfo or query")
+		return "", fmt.Errorf("invalid Cursor sidecar URL: must not include userinfo or query")
 	}
 	if strings.TrimSpace(path) == "" || !strings.HasPrefix(path, "/") {
-		return "", fmt.Errorf("Invalid Cursor sidecar path: must be absolute")
+		return "", fmt.Errorf("invalid Cursor sidecar path: must be absolute")
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + path
 	u.RawQuery = ""
