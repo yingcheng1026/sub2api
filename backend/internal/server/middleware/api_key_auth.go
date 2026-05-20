@@ -285,20 +285,23 @@ func apiKeyAuthWithSubscription(
 					_, effectiveGroup := service.EffectiveBillingContext(apiKey.Group, subscription)
 					needsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, effectiveGroup)
 					if validateErr != nil {
-						code := "SUBSCRIPTION_INVALID"
-						status := 403
-						if errors.Is(validateErr, service.ErrDailyLimitExceeded) ||
-							errors.Is(validateErr, service.ErrWeeklyLimitExceeded) ||
-							errors.Is(validateErr, service.ErrMonthlyLimitExceeded) {
-							code = "USAGE_LIMIT_EXCEEDED"
-							status = 429
+						if isSubscriptionUsageLimitError(validateErr) && apiKey.User.Balance > 0 {
+							// 月包额度用完但主余额可用时，降级为余额扣费；下游不要再看到订阅上下文。
+							subscription = nil
+						} else {
+							code := "SUBSCRIPTION_INVALID"
+							status := 403
+							if isSubscriptionUsageLimitError(validateErr) {
+								code = "USAGE_LIMIT_EXCEEDED"
+								status = 429
+							}
+							AbortWithError(c, status, code, validateErr.Error())
+							return
 						}
-						AbortWithError(c, status, code, validateErr.Error())
-						return
 					}
 
 					// 窗口维护异步化（不阻塞请求）
-					if needsMaintenance {
+					if subscription != nil && needsMaintenance {
 						maintenanceCopy := *subscription
 						subscriptionService.DoWindowMaintenance(&maintenanceCopy)
 					}
@@ -376,6 +379,12 @@ func GetSubscriptionFromContext(c *gin.Context) (*service.UserSubscription, bool
 	}
 	subscription, ok := value.(*service.UserSubscription)
 	return subscription, ok
+}
+
+func isSubscriptionUsageLimitError(err error) bool {
+	return errors.Is(err, service.ErrDailyLimitExceeded) ||
+		errors.Is(err, service.ErrWeeklyLimitExceeded) ||
+		errors.Is(err, service.ErrMonthlyLimitExceeded)
 }
 
 func setGroupContext(c *gin.Context, group *service.Group) {

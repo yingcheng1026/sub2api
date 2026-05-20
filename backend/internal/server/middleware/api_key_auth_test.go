@@ -137,9 +137,70 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		require.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("standard_mode_enforces_quota_check", func(t *testing.T) {
+	t.Run("standard_mode_subscription_limit_falls_back_to_balance", func(t *testing.T) {
 		cfg := &config.Config{RunMode: config.RunModeStandard}
 		apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
+
+		now := time.Now()
+		groupID := group.ID
+		sub := &service.UserSubscription{
+			ID:               55,
+			UserID:           user.ID,
+			GroupID:          &groupID,
+			Status:           service.SubscriptionStatusActive,
+			ExpiresAt:        now.Add(24 * time.Hour),
+			DailyWindowStart: &now,
+			DailyUsageUSD:    10,
+		}
+		subscriptionRepo := &stubUserSubscriptionRepo{
+			getActive: func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+				if sub.GroupID == nil || userID != sub.UserID || groupID != *sub.GroupID {
+					return nil, service.ErrSubscriptionNotFound
+				}
+				clone := *sub
+				return &clone, nil
+			},
+			updateStatus:   func(ctx context.Context, subscriptionID int64, status string) error { return nil },
+			activateWindow: func(ctx context.Context, id int64, start time.Time) error { return nil },
+			resetDaily:     func(ctx context.Context, id int64, start time.Time) error { return nil },
+			resetWeekly:    func(ctx context.Context, id int64, start time.Time) error { return nil },
+			resetMonthly:   func(ctx context.Context, id int64, start time.Time) error { return nil },
+		}
+		subscriptionService := service.NewSubscriptionService(nil, subscriptionRepo, nil, nil, cfg)
+
+		router := gin.New()
+		router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(apiKeyService, subscriptionService, cfg)))
+		var hasSubscription bool
+		router.GET("/t", func(c *gin.Context) {
+			_, hasSubscription = GetSubscriptionFromContext(c)
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/t", nil)
+		req.Header.Set("x-api-key", apiKey.Key)
+		router.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.False(t, hasSubscription, "over-limit subscription should be removed from context so downstream bills balance")
+	})
+
+	t.Run("standard_mode_enforces_quota_check_without_balance", func(t *testing.T) {
+		cfg := &config.Config{RunMode: config.RunModeStandard}
+		zeroBalanceUser := *user
+		zeroBalanceUser.Balance = 0
+		zeroBalanceAPIKey := *apiKey
+		zeroBalanceAPIKey.User = &zeroBalanceUser
+		zeroBalanceAPIKeyRepo := &stubApiKeyRepo{
+			getByKey: func(ctx context.Context, key string) (*service.APIKey, error) {
+				if key != zeroBalanceAPIKey.Key {
+					return nil, service.ErrAPIKeyNotFound
+				}
+				clone := zeroBalanceAPIKey
+				return &clone, nil
+			},
+		}
+		apiKeyService := service.NewAPIKeyService(zeroBalanceAPIKeyRepo, nil, nil, nil, nil, nil, cfg)
 
 		now := time.Now()
 		groupID := group.ID
@@ -171,7 +232,7 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/t", nil)
-		req.Header.Set("x-api-key", apiKey.Key)
+		req.Header.Set("x-api-key", zeroBalanceAPIKey.Key)
 		router.ServeHTTP(w, req)
 
 		require.Equal(t, http.StatusTooManyRequests, w.Code)
@@ -749,11 +810,11 @@ type stubUserSubscriptionRepo struct {
 	getActiveWallet      func(ctx context.Context, userID int64) (*service.UserSubscription, error)
 	getActiveByPlanCover func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
 	hasAnyActive         func(ctx context.Context, userID int64) (bool, error)
-	updateStatus    func(ctx context.Context, subscriptionID int64, status string) error
-	activateWindow  func(ctx context.Context, id int64, start time.Time) error
-	resetDaily      func(ctx context.Context, id int64, start time.Time) error
-	resetWeekly     func(ctx context.Context, id int64, start time.Time) error
-	resetMonthly    func(ctx context.Context, id int64, start time.Time) error
+	updateStatus         func(ctx context.Context, subscriptionID int64, status string) error
+	activateWindow       func(ctx context.Context, id int64, start time.Time) error
+	resetDaily           func(ctx context.Context, id int64, start time.Time) error
+	resetWeekly          func(ctx context.Context, id int64, start time.Time) error
+	resetMonthly         func(ctx context.Context, id int64, start time.Time) error
 }
 
 func (r *stubUserSubscriptionRepo) Create(ctx context.Context, sub *service.UserSubscription) error {
