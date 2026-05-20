@@ -83,19 +83,24 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 
 			needsMaintenance, err := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
 			if err != nil {
-				status := 403
-				if errors.Is(err, service.ErrDailyLimitExceeded) ||
-					errors.Is(err, service.ErrWeeklyLimitExceeded) ||
-					errors.Is(err, service.ErrMonthlyLimitExceeded) {
-					status = 429
+				if isSubscriptionUsageLimitError(err) && apiKey.User.Balance > 0 {
+					// 月包额度用完但主余额可用时，降级为余额扣费；下游不要再看到订阅上下文。
+					subscription = nil
+				} else {
+					status := 403
+					if isSubscriptionUsageLimitError(err) {
+						status = 429
+					}
+					abortWithGoogleError(c, status, err.Error())
+					return
 				}
-				abortWithGoogleError(c, status, err.Error())
-				return
 			}
 
-			c.Set(string(ContextKeySubscription), subscription)
+			if subscription != nil {
+				c.Set(string(ContextKeySubscription), subscription)
+			}
 
-			if needsMaintenance {
+			if subscription != nil && needsMaintenance {
 				maintenanceCopy := *subscription
 				subscriptionService.DoWindowMaintenance(&maintenanceCopy)
 			}

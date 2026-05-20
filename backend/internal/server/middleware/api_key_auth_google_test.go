@@ -636,7 +636,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_SubscriptionLimitExceededReturns429(t 
 		ID:          999,
 		Role:        service.RoleUser,
 		Status:      service.StatusActive,
-		Balance:     10,
+		Balance:     0,
 		Concurrency: 3,
 	}
 	apiKey := &service.APIKey{
