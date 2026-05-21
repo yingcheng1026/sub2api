@@ -302,20 +302,6 @@ const sortTestModels = (models: ClaudeModel[]) => {
   })
 }
 
-// Load available models when modal opens
-watch(
-  () => props.show,
-  async (newVal) => {
-    if (newVal && props.account) {
-      testPrompt.value = ''
-      resetState()
-      await loadAvailableModels()
-    } else {
-      abortStream()
-    }
-  }
-)
-
 watch(selectedModelId, () => {
   if (supportsImageTest.value && !testPrompt.value.trim()) {
     testPrompt.value = t('admin.accounts.imagePromptDefault')
@@ -372,6 +358,21 @@ const abortStream = () => {
     abortController = null
   }
 }
+
+// Load available models when modal opens, including initial render via v-if.
+watch(
+  () => props.show,
+  async (newVal) => {
+    if (newVal && props.account) {
+      testPrompt.value = ''
+      resetState()
+      await loadAvailableModels()
+    } else {
+      abortStream()
+    }
+  },
+  { immediate: true }
+)
 
 const addLine = (text: string, className: string = 'text-gray-300') => {
   outputLines.value.push({ text, class: className })
