@@ -273,6 +273,7 @@ const selectedModelId = ref('')
 const testPrompt = ref('')
 const loadingModels = ref(false)
 let abortController: AbortController | null = null
+let modelLoadSeq = 0
 const generatedImages = ref<PreviewImage[]>([])
 const previewImageUrl = ref('')
 const prioritizedGeminiModels = ['gemini-3.1-flash-image', 'gemini-2.5-flash-image', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-3-pro-preview', 'gemini-2.0-flash']
@@ -309,18 +310,23 @@ watch(selectedModelId, () => {
 })
 
 const loadAvailableModels = async () => {
-  if (!props.account) return
+  const account = props.account
+  if (!account) return
+
+  const loadSeq = ++modelLoadSeq
 
   loadingModels.value = true
   selectedModelId.value = '' // Reset selection before loading
   try {
-    const models = await adminAPI.accounts.getAvailableModels(props.account.id)
-    availableModels.value = props.account.platform === 'gemini' || props.account.platform === 'antigravity'
+    const models = await adminAPI.accounts.getAvailableModels(account.id)
+    if (loadSeq !== modelLoadSeq || props.account?.id !== account.id) return
+
+    availableModels.value = account.platform === 'gemini' || account.platform === 'antigravity'
       ? sortTestModels(models)
       : models
     // Default selection by platform
     if (availableModels.value.length > 0) {
-      if (props.account.platform === 'gemini') {
+      if (account.platform === 'gemini') {
         selectedModelId.value = availableModels.value[0].id
       } else {
         // Try to select Sonnet as default, otherwise use first model
@@ -329,12 +335,16 @@ const loadAvailableModels = async () => {
       }
     }
   } catch (error) {
+    if (loadSeq !== modelLoadSeq || props.account?.id !== account.id) return
+
     console.error('Failed to load available models:', error)
     // Fallback to empty list
     availableModels.value = []
     selectedModelId.value = ''
   } finally {
-    loadingModels.value = false
+    if (loadSeq === modelLoadSeq && props.account?.id === account.id) {
+      loadingModels.value = false
+    }
   }
 }
 
@@ -359,16 +369,20 @@ const abortStream = () => {
   }
 }
 
-// Load available models when modal opens, including initial render via v-if.
+// Load available models when the modal opens or the selected account changes.
 watch(
-  () => props.show,
-  async (newVal) => {
-    if (newVal && props.account) {
+  () => [props.show, props.account?.id] as const,
+  async ([show, accountID]) => {
+    if (show && accountID) {
       testPrompt.value = ''
       resetState()
       await loadAvailableModels()
     } else {
+      modelLoadSeq += 1
       abortStream()
+      availableModels.value = []
+      selectedModelId.value = ''
+      loadingModels.value = false
     }
   },
   { immediate: true }

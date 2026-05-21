@@ -127,8 +127,18 @@ assert_account_test_modal_initial_load_guard() {
         return 1
     fi
 
+    if ! grep -Fq "props.account?.id" "${modal}"; then
+        echo "AccountTestModal model load guard failed: watcher must include account id changes." >&2
+        return 1
+    fi
+
     if ! grep -q "getAvailableModels).toHaveBeenCalledWith(42)" "${spec}"; then
         echo "AccountTestModal initial-open model load guard failed: missing regression assertion." >&2
+        return 1
+    fi
+
+    if ! grep -q "getAvailableModels).toHaveBeenNthCalledWith(2, 84)" "${spec}"; then
+        echo "AccountTestModal account-switch model load guard failed: missing regression assertion." >&2
         return 1
     fi
 }
