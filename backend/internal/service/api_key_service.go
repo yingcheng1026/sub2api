@@ -1005,17 +1005,13 @@ func (s *APIKeyService) SearchAPIKeys(ctx context.Context, userID int64, keyword
 	return keys, nil
 }
 
-// GetUserGroupRates 获取用户的专属分组倍率配置
-// 返回 map[groupID]rateMultiplier
+// GetUserGroupRates returns legacy per-user multipliers for old clients.
+// HandsFreeClub now treats groups.rate_multiplier as the only billing/display
+// source, so per-user rate multipliers must not affect customer-facing rates.
 func (s *APIKeyService) GetUserGroupRates(ctx context.Context, userID int64) (map[int64]float64, error) {
-	if s.userGroupRateRepo == nil {
-		return nil, nil
-	}
-	rates, err := s.userGroupRateRepo.GetByUserID(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("get user group rates: %w", err)
-	}
-	return rates, nil
+	_ = ctx
+	_ = userID
+	return map[int64]float64{}, nil
 }
 
 // CheckAPIKeyQuotaAndExpiry checks if the API key is valid for use (not expired, quota not exhausted)

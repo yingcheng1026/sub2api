@@ -136,8 +136,7 @@ type UpdateUserInput struct {
 	RPMLimit      *int     // 使用指针区分"未提供"和"设置为0"
 	Status        string
 	AllowedGroups *[]int64 // 使用指针区分"未提供"和"设置为空数组"
-	// GroupRates 用户专属分组倍率配置
-	// map[groupID]*rate，nil 表示删除该分组的专属倍率
+	// GroupRates 是历史兼容入口；非 nil rate 会被拒绝，nil 仅用于清理旧倍率。
 	GroupRates map[int64]*float64
 }
 
@@ -601,44 +600,21 @@ func (s *adminServiceImpl) ListUsers(ctx context.Context, page, pageSize int, fi
 			}
 		}
 	}
-	// 批量加载用户专属分组倍率
-	if s.userGroupRateRepo != nil && len(users) > 0 {
-		if batchRepo, ok := s.userGroupRateRepo.(userGroupRateBatchReader); ok {
-			userIDs := make([]int64, 0, len(users))
-			for i := range users {
-				userIDs = append(userIDs, users[i].ID)
-			}
-			ratesByUser, err := batchRepo.GetByUserIDs(ctx, userIDs)
-			if err != nil {
-				logger.LegacyPrintf("service.admin", "failed to load user group rates in batch: err=%v", err)
-				s.loadUserGroupRatesOneByOne(ctx, users)
-			} else {
-				for i := range users {
-					if rates, ok := ratesByUser[users[i].ID]; ok {
-						users[i].GroupRates = rates
-					}
-				}
-			}
-		} else {
-			s.loadUserGroupRatesOneByOne(ctx, users)
-		}
+	// 用户专属分组倍率已禁用，避免管理端继续展示历史覆盖层。
+	for i := range users {
+		users[i].GroupRates = map[int64]float64{}
 	}
 	return users, result.Total, nil
 }
 
 func (s *adminServiceImpl) loadUserGroupRatesOneByOne(ctx context.Context, users []User) {
-	if s.userGroupRateRepo == nil {
-		return
-	}
+	_ = s
+	_ = ctx
 	for i := range users {
-		rates, err := s.userGroupRateRepo.GetByUserID(ctx, users[i].ID)
-		if err != nil {
-			logger.LegacyPrintf("service.admin", "failed to load user group rates: user_id=%d err=%v", users[i].ID, err)
-			continue
-		}
-		users[i].GroupRates = rates
+		users[i].GroupRates = map[int64]float64{}
 	}
 }
+
 
 func (s *adminServiceImpl) GetUser(ctx context.Context, id int64) (*User, error) {
 	user, err := s.userRepo.GetByID(ctx, id)
@@ -651,15 +627,8 @@ func (s *adminServiceImpl) GetUser(ctx context.Context, id int64) (*User, error)
 	} else {
 		user.LastUsedAt = lastUsedAt
 	}
-	// 加载用户专属分组倍率
-	if s.userGroupRateRepo != nil {
-		rates, err := s.userGroupRateRepo.GetByUserID(ctx, id)
-		if err != nil {
-			logger.LegacyPrintf("service.admin", "failed to load user group rates: user_id=%d err=%v", id, err)
-		} else {
-			user.GroupRates = rates
-		}
-	}
+	// 用户专属分组倍率已禁用，管理端只保留空兼容字段。
+	user.GroupRates = map[int64]float64{}
 	return user, nil
 }
 
@@ -703,11 +672,11 @@ func (s *adminServiceImpl) assignDefaultSubscriptions(ctx context.Context, userI
 }
 
 func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *UpdateUserInput) (*User, error) {
-	// 校验用户专属分组倍率：必须 > 0（nil 合法，表示清除专属倍率）
+	// 用户专属分组倍率已禁用；后台分组倍率必须是唯一显示和计费来源。
 	if input.GroupRates != nil {
-		for groupID, rate := range input.GroupRates {
-			if rate != nil && *rate <= 0 {
-				return nil, fmt.Errorf("rate_multiplier must be > 0 (group_id=%d)", groupID)
+		for _, rate := range input.GroupRates {
+			if rate != nil {
+				return nil, ErrUserGroupRateMultiplierDisabled
 			}
 		}
 	}
@@ -2070,26 +2039,42 @@ func (s *adminServiceImpl) GetGroupAPIKeys(ctx context.Context, groupID int64, p
 
 func (s *adminServiceImpl) GetGroupRateMultipliers(ctx context.Context, groupID int64) ([]UserGroupRateEntry, error) {
 	if s.userGroupRateRepo == nil {
-		return nil, nil
+		return []UserGroupRateEntry{}, nil
 	}
-	return s.userGroupRateRepo.GetByGroupID(ctx, groupID)
+	entries, err := s.userGroupRateRepo.GetByGroupID(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	rpmEntries := make([]UserGroupRateEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.RPMOverride == nil {
+			continue
+		}
+		entry.RateMultiplier = nil
+		rpmEntries = append(rpmEntries, entry)
+	}
+	return rpmEntries, nil
 }
 
 func (s *adminServiceImpl) ClearGroupRateMultipliers(ctx context.Context, groupID int64) error {
 	if s.userGroupRateRepo == nil {
 		return nil
 	}
-	return s.userGroupRateRepo.DeleteByGroupID(ctx, groupID)
+	if err := s.userGroupRateRepo.SyncGroupRateMultipliers(ctx, groupID, nil); err != nil {
+		return err
+	}
+	if s.authCacheInvalidator != nil {
+		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(ctx, groupID)
+	}
+	return nil
 }
 
 func (s *adminServiceImpl) BatchSetGroupRateMultipliers(ctx context.Context, groupID int64, entries []GroupRateMultiplierInput) error {
+	if len(entries) > 0 {
+		return ErrUserGroupRateMultiplierDisabled
+	}
 	if s.userGroupRateRepo == nil {
 		return nil
-	}
-	for _, e := range entries {
-		if e.RateMultiplier <= 0 {
-			return fmt.Errorf("rate_multiplier must be > 0 (user_id=%d)", e.UserID)
-		}
 	}
 	return s.userGroupRateRepo.SyncGroupRateMultipliers(ctx, groupID, entries)
 }

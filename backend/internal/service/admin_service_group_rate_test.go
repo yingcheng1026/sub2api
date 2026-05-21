@@ -78,12 +78,13 @@ func (s *userGroupRateRepoStubForGroupRate) DeleteByUserID(_ context.Context, _ 
 }
 
 func TestAdminService_GetGroupRateMultipliers(t *testing.T) {
-	t.Run("returns entries for group", func(t *testing.T) {
+	t.Run("returns only rpm overrides and hides legacy rates", func(t *testing.T) {
+		rpmOverride := 120
 		repo := &userGroupRateRepoStubForGroupRate{
 			getByGroupIDData: map[int64][]UserGroupRateEntry{
 				10: {
 					{UserID: 1, UserName: "alice", UserEmail: "alice@test.com", RateMultiplier: ptrFloat(1.5)},
-					{UserID: 2, UserName: "bob", UserEmail: "bob@test.com", RateMultiplier: ptrFloat(0.8)},
+					{UserID: 2, UserName: "bob", UserEmail: "bob@test.com", RateMultiplier: ptrFloat(0.8), RPMOverride: &rpmOverride},
 				},
 			},
 		}
@@ -91,14 +92,10 @@ func TestAdminService_GetGroupRateMultipliers(t *testing.T) {
 
 		entries, err := svc.GetGroupRateMultipliers(context.Background(), 10)
 		require.NoError(t, err)
-		require.Len(t, entries, 2)
-		require.Equal(t, int64(1), entries[0].UserID)
-		require.Equal(t, "alice", entries[0].UserName)
-		require.NotNil(t, entries[0].RateMultiplier)
-		require.Equal(t, 1.5, *entries[0].RateMultiplier)
-		require.Equal(t, int64(2), entries[1].UserID)
-		require.NotNil(t, entries[1].RateMultiplier)
-		require.Equal(t, 0.8, *entries[1].RateMultiplier)
+		require.Len(t, entries, 1)
+		require.Equal(t, int64(2), entries[0].UserID)
+		require.Nil(t, entries[0].RateMultiplier)
+		require.Equal(t, 120, *entries[0].RPMOverride)
 	})
 
 	t.Run("returns nil when repo is nil", func(t *testing.T) {
@@ -106,7 +103,7 @@ func TestAdminService_GetGroupRateMultipliers(t *testing.T) {
 
 		entries, err := svc.GetGroupRateMultipliers(context.Background(), 10)
 		require.NoError(t, err)
-		require.Nil(t, entries)
+		require.Empty(t, entries)
 	})
 
 	t.Run("returns empty slice for group with no entries", func(t *testing.T) {
@@ -117,29 +114,31 @@ func TestAdminService_GetGroupRateMultipliers(t *testing.T) {
 
 		entries, err := svc.GetGroupRateMultipliers(context.Background(), 99)
 		require.NoError(t, err)
-		require.Nil(t, entries)
+		require.Empty(t, entries)
 	})
 
-	t.Run("propagates repo error", func(t *testing.T) {
+	t.Run("propagates repo error for clearing empty entries", func(t *testing.T) {
 		repo := &userGroupRateRepoStubForGroupRate{
 			getByGroupIDErr: errors.New("db error"),
 		}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
 
-		_, err := svc.GetGroupRateMultipliers(context.Background(), 10)
+		entries, err := svc.GetGroupRateMultipliers(context.Background(), 10)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "db error")
+		require.Nil(t, entries)
 	})
 }
 
 func TestAdminService_ClearGroupRateMultipliers(t *testing.T) {
-	t.Run("deletes by group ID", func(t *testing.T) {
+	t.Run("clears only rate multiplier part", func(t *testing.T) {
 		repo := &userGroupRateRepoStubForGroupRate{}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
 
 		err := svc.ClearGroupRateMultipliers(context.Background(), 42)
 		require.NoError(t, err)
-		require.Equal(t, []int64{42}, repo.deletedGroupIDs)
+		require.Equal(t, int64(42), repo.syncedGroupID)
+		require.Nil(t, repo.syncedEntries)
+		require.Empty(t, repo.deletedGroupIDs)
 	})
 
 	t.Run("returns nil when repo is nil", func(t *testing.T) {
@@ -151,18 +150,18 @@ func TestAdminService_ClearGroupRateMultipliers(t *testing.T) {
 
 	t.Run("propagates repo error", func(t *testing.T) {
 		repo := &userGroupRateRepoStubForGroupRate{
-			deleteByGroupErr: errors.New("delete failed"),
+			syncGroupErr: errors.New("sync failed"),
 		}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
 
 		err := svc.ClearGroupRateMultipliers(context.Background(), 42)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "delete failed")
+		require.Contains(t, err.Error(), "sync failed")
 	})
 }
 
 func TestAdminService_BatchSetGroupRateMultipliers(t *testing.T) {
-	t.Run("syncs entries to repo", func(t *testing.T) {
+	t.Run("rejects non-empty entries", func(t *testing.T) {
 		repo := &userGroupRateRepoStubForGroupRate{}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
 
@@ -171,9 +170,9 @@ func TestAdminService_BatchSetGroupRateMultipliers(t *testing.T) {
 			{UserID: 2, RateMultiplier: 0.8},
 		}
 		err := svc.BatchSetGroupRateMultipliers(context.Background(), 10, entries)
-		require.NoError(t, err)
-		require.Equal(t, int64(10), repo.syncedGroupID)
-		require.Equal(t, entries, repo.syncedEntries)
+		require.ErrorIs(t, err, ErrUserGroupRateMultiplierDisabled)
+		require.Zero(t, repo.syncedGroupID)
+		require.Nil(t, repo.syncedEntries)
 	})
 
 	t.Run("returns nil when repo is nil", func(t *testing.T) {
@@ -189,9 +188,7 @@ func TestAdminService_BatchSetGroupRateMultipliers(t *testing.T) {
 		}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
 
-		err := svc.BatchSetGroupRateMultipliers(context.Background(), 10, []GroupRateMultiplierInput{
-			{UserID: 1, RateMultiplier: 1.0},
-		})
+		err := svc.BatchSetGroupRateMultipliers(context.Background(), 10, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "sync failed")
 	})

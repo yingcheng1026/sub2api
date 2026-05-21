@@ -15,11 +15,6 @@
         <span class="line-through opacity-50 mr-0.5">{{ formatRate(rateMultiplier) }}x</span>
         <span class="font-bold">{{ formatRate(lockedRateMultiplier) }}x</span>
       </template>
-      <template v-else-if="hasCustomRate">
-        <!-- 原倍率删除线 + 专属倍率高亮 -->
-        <span class="line-through opacity-50 mr-0.5">{{ formatRate(rateMultiplier) }}x</span>
-        <span class="font-bold">{{ formatRate(userRateMultiplier) }}x</span>
-      </template>
       <template v-else>
         {{ labelText }}
       </template>
@@ -72,24 +67,13 @@ const hasLockedRate = computed(() => {
   )
 })
 
-// 是否有专属倍率（且与默认倍率不同）
-const hasCustomRate = computed(() => {
-  return (
-    !hasLockedRate.value &&
-    props.userRateMultiplier !== null &&
-    props.userRateMultiplier !== undefined &&
-    props.rateMultiplier !== undefined &&
-    props.userRateMultiplier !== props.rateMultiplier
-  )
-})
-
 // 是否显示右侧标签
 const showLabel = computed(() => {
   if (!props.showRate) return false
   // 订阅类型：显示天数或"订阅"
   if (isSubscription.value) return true
-  // 标准类型：显示倍率（包括专属倍率）
-  return props.rateMultiplier !== undefined || hasCustomRate.value || hasLockedRate.value
+  // 标准类型：只显示后台分组倍率
+  return props.rateMultiplier !== undefined || hasLockedRate.value
 })
 
 // Label text
@@ -112,9 +96,6 @@ const labelText = computed(() => {
 const labelTitle = computed(() => {
   if (hasLockedRate.value && props.rateMultiplier !== undefined) {
     return t('userSubscriptions.wallet.lockedRateHint', { base: formatRate(props.rateMultiplier) })
-  }
-  if (hasCustomRate.value && props.rateMultiplier !== undefined) {
-    return t('userSubscriptions.wallet.userOverrideHint', { base: formatRate(props.rateMultiplier) })
   }
   return undefined
 })

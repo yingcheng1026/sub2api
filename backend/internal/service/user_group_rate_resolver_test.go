@@ -44,7 +44,7 @@ func TestUserGroupRateResolverResolve_FallbackForNilResolverAndInvalidIDs(t *tes
 	require.Equal(t, 1.4, resolver.Resolve(context.Background(), 101, 0, 1.4))
 }
 
-func TestUserGroupRateResolverResolve_InvalidCacheEntryLoadsRepoAndCaches(t *testing.T) {
+func TestUserGroupRateResolverResolve_IgnoresLegacyRepoAndCache(t *testing.T) {
 	resetGatewayHotpathStatsForTest()
 
 	rate := 1.7
@@ -54,17 +54,17 @@ func TestUserGroupRateResolverResolve_InvalidCacheEntryLoadsRepoAndCaches(t *tes
 	resolver := newUserGroupRateResolver(repo, cache, time.Minute, nil, "service.test")
 
 	got := resolver.Resolve(context.Background(), 101, 202, 1.2)
-	require.Equal(t, rate, got)
-	require.Equal(t, 1, repo.calls)
+	require.Equal(t, 1.2, got)
+	require.Equal(t, 0, repo.calls)
 
 	cached, ok := cache.Get("101:202")
 	require.True(t, ok)
-	require.Equal(t, rate, cached)
+	require.Equal(t, "bad-cache", cached)
 
 	hit, miss, load, _, fallback := GatewayUserGroupRateCacheStats()
 	require.Equal(t, int64(0), hit)
-	require.Equal(t, int64(1), miss)
-	require.Equal(t, int64(1), load)
+	require.Equal(t, int64(0), miss)
+	require.Equal(t, int64(0), load)
 	require.Equal(t, int64(0), fallback)
 }
 
@@ -78,6 +78,6 @@ func TestGatewayServiceGetUserGroupRateMultiplier_FallbacksAndUsesExistingResolv
 	svc := &GatewayService{userGroupRateResolver: resolver}
 
 	got := svc.getUserGroupRateMultiplier(context.Background(), 101, 202, 1.2)
-	require.Equal(t, rate, got)
-	require.Equal(t, 1, repo.calls)
+	require.Equal(t, 1.2, got)
+	require.Equal(t, 0, repo.calls)
 }
