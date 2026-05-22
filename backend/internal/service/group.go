@@ -71,6 +71,7 @@ type Group struct {
 
 	AccountGroups           []AccountGroup
 	AccountCount            int64
+	AccountCountsLoaded     bool
 	ActiveAccountCount      int64
 	RateLimitedAccountCount int64
 }

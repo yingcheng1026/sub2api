@@ -94,9 +94,12 @@ func (r *groupRepository) GetByID(ctx context.Context, id int64) (*service.Group
 	if err != nil {
 		return nil, err
 	}
-	total, active, _ := r.GetAccountCount(ctx, out.ID)
-	out.AccountCount = total
-	out.ActiveAccountCount = active
+	total, active, err := r.GetAccountCount(ctx, out.ID)
+	if err == nil {
+		out.AccountCount = total
+		out.AccountCountsLoaded = true
+		out.ActiveAccountCount = active
+	}
 	return out, nil
 }
 
@@ -274,6 +277,7 @@ func (r *groupRepository) ListWithFilters(ctx context.Context, params pagination
 		for i := range outGroups {
 			c := counts[outGroups[i].ID]
 			outGroups[i].AccountCount = c.Total
+			outGroups[i].AccountCountsLoaded = true
 			outGroups[i].ActiveAccountCount = c.Active
 			outGroups[i].RateLimitedAccountCount = c.RateLimited
 		}
@@ -305,6 +309,7 @@ func (r *groupRepository) listWithAccountCountSort(ctx context.Context, q *dbent
 	for i := range outGroups {
 		c := counts[outGroups[i].ID]
 		outGroups[i].AccountCount = c.Total
+		outGroups[i].AccountCountsLoaded = true
 		outGroups[i].ActiveAccountCount = c.Active
 		outGroups[i].RateLimitedAccountCount = c.RateLimited
 	}
@@ -402,6 +407,7 @@ func (r *groupRepository) ListActive(ctx context.Context) ([]service.Group, erro
 		for i := range outGroups {
 			c := counts[outGroups[i].ID]
 			outGroups[i].AccountCount = c.Total
+			outGroups[i].AccountCountsLoaded = true
 			outGroups[i].ActiveAccountCount = c.Active
 			outGroups[i].RateLimitedAccountCount = c.RateLimited
 		}
@@ -432,6 +438,7 @@ func (r *groupRepository) ListActiveByPlatform(ctx context.Context, platform str
 		for i := range outGroups {
 			c := counts[outGroups[i].ID]
 			outGroups[i].AccountCount = c.Total
+			outGroups[i].AccountCountsLoaded = true
 			outGroups[i].ActiveAccountCount = c.Active
 			outGroups[i].RateLimitedAccountCount = c.RateLimited
 		}
