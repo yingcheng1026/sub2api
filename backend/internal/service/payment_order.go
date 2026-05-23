@@ -20,6 +20,20 @@ import (
 
 // --- Order Creation ---
 
+const paidTrialOncePlanName = "paid-trial-v3-30d"
+
+var paidTrialOnceBlockingStatuses = []string{
+	OrderStatusPending,
+	OrderStatusPaid,
+	OrderStatusRecharging,
+	OrderStatusCompleted,
+	OrderStatusRefundRequested,
+	OrderStatusRefunding,
+	OrderStatusPartiallyRefunded,
+	OrderStatusRefunded,
+	OrderStatusRefundFailed,
+}
+
 func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest) (*CreateOrderResponse, error) {
 	if req.OrderType == "" {
 		req.OrderType = payment.OrderTypeBalance
@@ -138,6 +152,9 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 	if err := s.checkDailyLimit(ctx, tx, req.UserID, limitAmount, cfg.DailyLimit); err != nil {
 		return nil, err
 	}
+	if err := s.checkPlanPurchaseLimit(ctx, tx, req.UserID, plan); err != nil {
+		return nil, err
+	}
 	tm := cfg.OrderTimeoutMin
 	if tm <= 0 {
 		tm = defaultOrderTimeoutMin
@@ -230,6 +247,36 @@ func (s *PaymentService) checkPendingLimit(ctx context.Context, tx *dbent.Tx, us
 			WithMetadata(map[string]string{"max": strconv.Itoa(max)})
 	}
 	return nil
+}
+
+func (s *PaymentService) checkPlanPurchaseLimit(ctx context.Context, tx *dbent.Tx, userID int64, plan *dbent.SubscriptionPlan) error {
+	if !isPaidTrialOncePlan(plan) {
+		return nil
+	}
+	exists, err := tx.PaymentOrder.Query().Where(
+		paymentorder.UserIDEQ(userID),
+		paymentorder.OrderTypeEQ(payment.OrderTypeSubscription),
+		paymentorder.PlanIDEQ(plan.ID),
+		paymentorder.StatusIn(paidTrialOnceBlockingStatuses...),
+	).Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check plan purchase limit: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	return infraerrors.Conflict("PLAN_PURCHASE_LIMIT_REACHED", "this plan can only be purchased once per user").
+		WithMetadata(map[string]string{
+			"plan_id":   strconv.FormatInt(plan.ID, 10),
+			"plan_name": plan.Name,
+		})
+}
+
+func isPaidTrialOncePlan(plan *dbent.SubscriptionPlan) bool {
+	if plan == nil {
+		return false
+	}
+	return strings.TrimSpace(plan.Name) == paidTrialOncePlanName
 }
 
 func buildPaymentOrderProviderSnapshot(sel *payment.InstanceSelection, req CreateOrderRequest) map[string]any {
