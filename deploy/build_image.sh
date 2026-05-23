@@ -203,7 +203,6 @@ assert_admin_wallet_display_guard() {
         return 1
     fi
 }
-
 main() {
     local image="${SUB2API_IMAGE:-${IMAGE:-}}"
     local repository
