@@ -641,19 +641,6 @@ const lineChartOptions = computed(() => ({
     }
   }
 }))
-
-// Load stats when modal opens
-watch(
-  () => props.show,
-  async (newVal) => {
-    if (newVal && props.account) {
-      await loadStats()
-    } else {
-      stats.value = null
-    }
-  }
-)
-
 const loadStats = async () => {
   if (!props.account) return
 
@@ -667,6 +654,21 @@ const loadStats = async () => {
     loading.value = false
   }
 }
+
+
+// Load stats when modal opens. AccountsView creates this modal with v-if after
+// showStats is already true, so the initial watcher run must also load data.
+watch(
+  () => props.show,
+  async (newVal) => {
+    if (newVal && props.account) {
+      await loadStats()
+    } else {
+      stats.value = null
+    }
+  },
+  { immediate: true }
+)
 
 const handleClose = () => {
   emit('close')
