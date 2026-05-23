@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -80,18 +81,29 @@ func createPaymentLimitUser(t *testing.T, ctx context.Context, client *dbent.Cli
 
 func createPaymentLimitPlan(t *testing.T, ctx context.Context, client *dbent.Client, name string) *dbent.SubscriptionPlan {
 	t.Helper()
+	group := createPaymentLimitGroup(t, ctx, client, "payment-limit-group-"+name)
 	plan, err := client.SubscriptionPlan.Create().
+		SetGroupID(group.ID).
 		SetName(name).
 		SetProductName("Payment Limit " + name).
 		SetPrice(29.9).
-		SetWalletQuotaUsd(100).
 		SetValidityDays(30).
 		SetValidityUnit("day").
-		SetPlanType("subscription").
 		SetForSale(true).
 		Save(ctx)
 	require.NoError(t, err)
 	return plan
+}
+
+func createPaymentLimitGroup(t *testing.T, ctx context.Context, client *dbent.Client, name string) *dbent.Group {
+	t.Helper()
+	group, err := client.Group.Create().
+		SetName(name).
+		SetSubscriptionType(SubscriptionTypeSubscription).
+		SetMonthlyLimitUsd(100).
+		Save(ctx)
+	require.NoError(t, err)
+	return group
 }
 
 func createPaymentLimitOrder(t *testing.T, ctx context.Context, client *dbent.Client, userID, planID int64, status string) *dbent.PaymentOrder {
@@ -104,7 +116,7 @@ func createPaymentLimitOrder(t *testing.T, ctx context.Context, client *dbent.Cl
 		SetPayAmount(29.9).
 		SetFeeRate(0).
 		SetRechargeCode("PAYMENT-LIMIT").
-		SetOutTradeNo("sub2_payment_limit_" + status).
+		SetOutTradeNo(fmt.Sprintf("sub2_payment_limit_%d_%s_%d", userID, status, time.Now().UnixNano())).
 		SetPaymentType(payment.TypeAlipay).
 		SetPaymentTradeNo("trade-payment-limit-" + status).
 		SetOrderType(payment.OrderTypeSubscription).

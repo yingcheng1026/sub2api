@@ -20,7 +20,11 @@ import (
 
 // --- Order Creation ---
 
-const paidTrialOncePlanName = "paid-trial-v3-30d"
+const (
+	paidTrialOncePlanID    int64 = 5
+	paidTrialOncePlanName        = "paid-trial-v3-30d"
+	paidTrialRedeemGroupID int64 = 13
+)
 
 var paidTrialOnceBlockingStatuses = []string{
 	OrderStatusPending,

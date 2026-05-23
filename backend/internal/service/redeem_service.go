@@ -6,10 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
+	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/internal/payment"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -319,11 +324,18 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	// 将事务放入 context，使 repository 方法能够使用同一事务
 	txCtx := dbent.NewTxContext(ctx, tx)
 
+	if err := s.checkPaidTrialRedeemLimit(txCtx, tx, userID, redeemCode); err != nil {
+		return nil, err
+	}
+
 	// 【关键】先标记兑换码为已使用，确保并发安全
 	// 利用数据库乐观锁（WHERE status = 'unused'）保证原子性
 	if err := s.redeemRepo.Use(txCtx, redeemCode.ID, userID); err != nil {
 		if errors.Is(err, ErrRedeemCodeNotFound) || errors.Is(err, ErrRedeemCodeUsed) {
 			return nil, ErrRedeemCodeUsed
+		}
+		if isPaidTrialRedeemCode(redeemCode) && dbent.IsConstraintError(err) {
+			return nil, paidTrialRedeemLimitReachedError("redeem_code_constraint", *redeemCode.GroupID, redeemCode.ID)
 		}
 		return nil, fmt.Errorf("mark code as used: %w", err)
 	}
@@ -423,6 +435,78 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	}
 
 	return redeemCode, nil
+}
+
+func (s *RedeemService) checkPaidTrialRedeemLimit(ctx context.Context, tx *dbent.Tx, userID int64, code *RedeemCode) error {
+	if !isPaidTrialRedeemCode(code) {
+		return nil
+	}
+
+	groupID := *code.GroupID
+	usedCodeExists, err := tx.RedeemCode.Query().
+		Where(
+			redeemcode.TypeEQ(RedeemTypeSubscription),
+			redeemcode.GroupIDEQ(groupID),
+			redeemcode.StatusEQ(StatusUsed),
+			redeemcode.UsedByEQ(userID),
+			redeemcode.IDNEQ(code.ID),
+		).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check paid trial redeem history: %w", err)
+	}
+	if usedCodeExists {
+		return paidTrialRedeemLimitReachedError("redeem_code", groupID, code.ID)
+	}
+
+	subExists, err := tx.UserSubscription.Query().
+		Where(
+			usersubscription.UserIDEQ(userID),
+			usersubscription.GroupIDEQ(groupID),
+			usersubscription.DeletedAtIsNil(),
+		).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check paid trial subscription history: %w", err)
+	}
+	if subExists {
+		return paidTrialRedeemLimitReachedError("subscription", groupID, code.ID)
+	}
+
+	orderExists, err := tx.PaymentOrder.Query().
+		Where(
+			paymentorder.UserIDEQ(userID),
+			paymentorder.OrderTypeEQ(payment.OrderTypeSubscription),
+			paymentorder.PlanIDEQ(paidTrialOncePlanID),
+			paymentorder.StatusIn(paidTrialOnceBlockingStatuses...),
+		).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check paid trial order history: %w", err)
+	}
+	if orderExists {
+		return paidTrialRedeemLimitReachedError("payment_order", groupID, code.ID)
+	}
+
+	return nil
+}
+
+func isPaidTrialRedeemCode(code *RedeemCode) bool {
+	return code != nil &&
+		code.Type == RedeemTypeSubscription &&
+		code.GroupID != nil &&
+		*code.GroupID == paidTrialRedeemGroupID &&
+		code.ValidityDays >= 0
+}
+
+func paidTrialRedeemLimitReachedError(source string, groupID, codeID int64) error {
+	return infraerrors.Conflict("PLAN_PURCHASE_LIMIT_REACHED", "this plan can only be purchased once per user").
+		WithMetadata(map[string]string{
+			"plan_name":      paidTrialOncePlanName,
+			"group_id":       strconv.FormatInt(groupID, 10),
+			"redeem_code_id": strconv.FormatInt(codeID, 10),
+			"source":         source,
+		})
 }
 
 // invalidateRedeemCaches 失效兑换相关的缓存
