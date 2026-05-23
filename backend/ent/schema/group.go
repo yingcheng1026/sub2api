@@ -75,7 +75,7 @@ func (Group) Fields() []ent.Field {
 
 		// 图片生成计费配置（antigravity 和 gemini 平台使用）
 		field.Bool("allow_image_generation").
-			Default(false).
+			Default(true).
 			Comment("是否允许该分组使用图片生成能力"),
 		field.Bool("image_rate_independent").
 			Default(false).
