@@ -118,6 +118,56 @@ prune_builder_cache() {
         echo "Warning: failed to prune Docker build cache." >&2
 }
 
+assert_account_test_modal_initial_load_guard() {
+    local modal="${REPO_ROOT}/frontend/src/components/admin/account/AccountTestModal.vue"
+    local spec="${REPO_ROOT}/frontend/src/components/admin/account/__tests__/AccountTestModal.spec.ts"
+
+    if ! grep -q "immediate: true" "${modal}"; then
+        echo "AccountTestModal initial-open model load guard failed: missing immediate watcher option." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "props.account?.id" "${modal}"; then
+        echo "AccountTestModal model load guard failed: watcher must include account id changes." >&2
+        return 1
+    fi
+
+    if ! grep -q "getAvailableModels).toHaveBeenCalledWith(42)" "${spec}"; then
+        echo "AccountTestModal initial-open model load guard failed: missing regression assertion." >&2
+        return 1
+    fi
+
+    if ! grep -q "getAvailableModels).toHaveBeenNthCalledWith(2, 84)" "${spec}"; then
+        echo "AccountTestModal account-switch model load guard failed: missing regression assertion." >&2
+        return 1
+    fi
+}
+
+assert_account_stats_modal_initial_load_guard() {
+    local modal="${REPO_ROOT}/frontend/src/components/admin/account/AccountStatsModal.vue"
+    local spec="${REPO_ROOT}/frontend/src/components/admin/account/__tests__/AccountStatsModal.spec.ts"
+
+    if ! grep -q "immediate: true" "${modal}"; then
+        echo "AccountStatsModal initial-open stats load guard failed: missing immediate watcher option." >&2
+        return 1
+    fi
+
+    if ! grep -q "await loadStats()" "${modal}"; then
+        echo "AccountStatsModal initial-open stats load guard failed: watcher must call loadStats." >&2
+        return 1
+    fi
+
+    if ! grep -q "getStats).toHaveBeenCalledWith(86, 30)" "${spec}"; then
+        echo "AccountStatsModal initial-open stats load guard failed: missing regression assertion." >&2
+        return 1
+    fi
+
+    if ! grep -q "await wrapper.setProps({ show: true })" "${spec}"; then
+        echo "AccountStatsModal reopen stats load guard failed: missing reopen regression assertion." >&2
+        return 1
+    fi
+}
+
 main() {
     local image="${SUB2API_IMAGE:-${IMAGE:-}}"
     local repository
@@ -135,6 +185,9 @@ main() {
     else
         read -r repository tag < <(parse_image_ref "${image}")
     fi
+
+    assert_account_test_modal_initial_load_guard
+    assert_account_stats_modal_initial_load_guard
 
     SUB2API_BUILD_IMAGE_SH=1 docker build -t "${image}" \
         --build-arg GOPROXY=https://goproxy.cn,direct \

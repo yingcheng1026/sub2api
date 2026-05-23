@@ -86,6 +86,29 @@ function mountModal() {
   })
 }
 
+function mountOpenModal() {
+  return mount(AccountTestModal, {
+    props: {
+      show: true,
+      account: {
+        id: 42,
+        name: 'Gemini Image Test',
+        platform: 'gemini',
+        type: 'apikey',
+        status: 'active'
+      }
+    } as any,
+    global: {
+      stubs: {
+        BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' },
+        Select: { template: '<div class="select-stub"></div>' },
+        TextArea: true,
+        Icon: true
+      }
+    }
+  })
+}
+
 describe('AccountTestModal', () => {
   beforeEach(() => {
     getAvailableModels.mockResolvedValue([
@@ -114,6 +137,34 @@ describe('AccountTestModal', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('组件创建时如果已经打开，会立即加载测试模型', async () => {
+    mountOpenModal()
+    await flushPromises()
+
+    expect(getAvailableModels).toHaveBeenCalledTimes(1)
+    expect(getAvailableModels).toHaveBeenCalledWith(42)
+  })
+
+  it('弹窗保持打开时切换账号，会按新账号重新加载测试模型', async () => {
+    const wrapper = mountOpenModal()
+    await flushPromises()
+
+    await wrapper.setProps({
+      account: {
+        id: 84,
+        name: 'Second Test Account',
+        platform: 'anthropic',
+        type: 'oauth',
+        status: 'active'
+      }
+    })
+    await flushPromises()
+
+    expect(getAvailableModels).toHaveBeenCalledTimes(2)
+    expect(getAvailableModels).toHaveBeenNthCalledWith(1, 42)
+    expect(getAvailableModels).toHaveBeenNthCalledWith(2, 84)
   })
 
   it('gemini 图片模型测试会携带提示词并渲染图片预览', async () => {
