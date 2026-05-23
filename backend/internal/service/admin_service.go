@@ -615,7 +615,6 @@ func (s *adminServiceImpl) loadUserGroupRatesOneByOne(ctx context.Context, users
 	}
 }
 
-
 func (s *adminServiceImpl) GetUser(ctx context.Context, id int64) (*User, error) {
 	user, err := s.userRepo.GetByID(ctx, id)
 	if err != nil {
