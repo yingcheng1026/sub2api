@@ -63,6 +63,7 @@ type migrationChecksumCompatibilityRule struct {
 // migrationChecksumCompatibilityRules 仅用于兼容历史上误修改过的迁移文件 checksum。
 // 规则必须同时匹配「迁移名 + 数据库 checksum + 当前文件 checksum」且两者都落在该迁移的已知版本集合内才会放行，
 // 避免放宽全局校验，也允许将误改的历史 migration 回滚为已发布版本而不要求人工修 checksum。
+// 含数据写入的 migration 不允许走该白名单；checksum mismatch 必须人工 review 数据状态并另写补偿迁移。
 var migrationChecksumCompatibilityRules = map[string]migrationChecksumCompatibilityRule{
 	"054_drop_legacy_cache_columns.sql":                       newMigrationChecksumCompatibilityRule("82de761156e03876653e7a6a4eee883cd927847036f779b0b9f34c42a8af7a7d", "182c193f3359946cf094090cd9e57d5c3fd9abaffbc1e8fc378646b8a6fa12b4"),
 	"061_add_usage_log_request_type.sql":                      newMigrationChecksumCompatibilityRule("66207e7aa5dd0429c2e2c0fabdaf79783ff157fa0af2e81adff2ee03790ec65c", "08a248652cbab7cfde147fc6ef8cda464f2477674e20b718312faa252e0481c0", "222b4a09c797c22e5922b6b172327c824f5463aaa8760e4f621bc5c22e2be0f3"),
@@ -173,8 +174,17 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 		if rowErr == nil {
 			// 迁移已应用，验证校验和是否匹配
 			if existing != checksum {
+				if migrationContainsDataMutation(content) {
+					return fmt.Errorf(
+						"migration %s checksum mismatch (db=%s file=%s)\n"+
+							"This migration contains data-changing SQL (UPDATE/INSERT/DELETE/MERGE/COPY), so checksum compatibility is disabled and manual review is required.\n"+
+							"Review the applied production state, then either create a new remediation migration or explicitly document why no data backfill is needed.\n"+
+							"Do not silently whitelist checksum mismatches for data migrations.",
+						name, existing, checksum,
+					)
+				}
 				// 兼容特定历史误改场景（仅白名单规则），其余仍保持严格不可变约束。
-				if isMigrationChecksumCompatible(name, existing, checksum) {
+				if isMigrationChecksumCompatible(name, existing, checksum, content) {
 					continue
 				}
 				// 校验和不匹配意味着迁移文件在应用后被修改，这是危险的。
@@ -428,7 +438,10 @@ func newMigrationChecksumCompatibilityRule(fileChecksum string, acceptedDBChecks
 	}
 }
 
-func isMigrationChecksumCompatible(name, dbChecksum, fileChecksum string) bool {
+func isMigrationChecksumCompatible(name, dbChecksum, fileChecksum, content string) bool {
+	if migrationContainsDataMutation(content) {
+		return false
+	}
 	rule, ok := migrationChecksumCompatibilityRules[name]
 	if !ok {
 		return false
@@ -439,6 +452,41 @@ func isMigrationChecksumCompatible(name, dbChecksum, fileChecksum string) bool {
 	}
 	_, fileOK := rule.acceptedChecksums[fileChecksum]
 	return fileOK
+}
+
+func migrationContainsDataMutation(content string) bool {
+	normalized := strings.ToUpper(stripSQLLineComment(content))
+	for _, keyword := range []string{"UPDATE", "INSERT", "DELETE", "MERGE", "COPY"} {
+		if containsSQLKeyword(normalized, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSQLKeyword(content, keyword string) bool {
+	searchStart := 0
+	for {
+		idx := strings.Index(content[searchStart:], keyword)
+		if idx < 0 {
+			return false
+		}
+		idx += searchStart
+		beforeOK := idx == 0 || !isSQLIdentifierByte(content[idx-1])
+		after := idx + len(keyword)
+		afterOK := after >= len(content) || !isSQLIdentifierByte(content[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		searchStart = after
+	}
+}
+
+func isSQLIdentifierByte(b byte) bool {
+	return b == '_' || b == '$' ||
+		(b >= '0' && b <= '9') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= 'a' && b <= 'z')
 }
 
 func validateMigrationExecutionMode(name, content string) (bool, error) {

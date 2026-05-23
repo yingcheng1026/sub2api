@@ -69,7 +69,7 @@ func TestLatestMigrationBaseline(t *testing.T) {
 }
 
 func TestIsMigrationChecksumCompatible_AdditionalCases(t *testing.T) {
-	require.False(t, isMigrationChecksumCompatible("unknown.sql", "db", "file"))
+	require.False(t, isMigrationChecksumCompatible("unknown.sql", "db", "file", "CREATE TABLE t(id int);"))
 
 	var (
 		name string
@@ -82,8 +82,8 @@ func TestIsMigrationChecksumCompatible_AdditionalCases(t *testing.T) {
 	}
 	require.NotEmpty(t, name)
 
-	require.False(t, isMigrationChecksumCompatible(name, "db-not-accepted", "file-not-match"))
-	require.False(t, isMigrationChecksumCompatible(name, "db-not-accepted", rule.fileChecksum))
+	require.False(t, isMigrationChecksumCompatible(name, "db-not-accepted", "file-not-match", "CREATE TABLE t(id int);"))
+	require.False(t, isMigrationChecksumCompatible(name, "db-not-accepted", rule.fileChecksum, "CREATE TABLE t(id int);"))
 
 	var accepted string
 	for checksum := range rule.acceptedDBChecksum {
@@ -91,7 +91,19 @@ func TestIsMigrationChecksumCompatible_AdditionalCases(t *testing.T) {
 		break
 	}
 	require.NotEmpty(t, accepted)
-	require.True(t, isMigrationChecksumCompatible(name, accepted, rule.fileChecksum))
+	require.True(t, isMigrationChecksumCompatible(name, accepted, rule.fileChecksum, "CREATE TABLE t(id int);"))
+	require.False(t, isMigrationChecksumCompatible(name, accepted, rule.fileChecksum, "UPDATE groups SET allow_image_generation = true;"))
+}
+
+func TestMigrationContainsDataMutation(t *testing.T) {
+	require.False(t, migrationContainsDataMutation("CREATE TABLE t(id int);"))
+	require.False(t, migrationContainsDataMutation("-- UPDATE t SET id = 1\nCREATE TABLE t(id int);"))
+	require.True(t, migrationContainsDataMutation("UPDATE groups SET allow_image_generation = true;"))
+	require.True(t, migrationContainsDataMutation("INSERT INTO settings (key, value) VALUES ('k', 'v');"))
+	require.True(t, migrationContainsDataMutation("DELETE FROM payment_audit_logs WHERE id = 1;"))
+	require.True(t, migrationContainsDataMutation("MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET value = source.value;"))
+	require.True(t, migrationContainsDataMutation("COPY users FROM STDIN;"))
+	require.False(t, migrationContainsDataMutation("CREATE TABLE insert_history(id int);"))
 }
 
 func TestMigrationChecksumCompatibilityRules_CoverEditedUpgradeCompatibilityMigrations(t *testing.T) {
@@ -256,6 +268,30 @@ func TestApplyMigrationsFS_ChecksumMismatchRejected(t *testing.T) {
 	err = applyMigrationsFS(context.Background(), db, fsys)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "checksum mismatch")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestApplyMigrationsFS_ChecksumMismatchForDataMigrationRequiresManualReview(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	prepareMigrationsBootstrapExpectations(mock)
+	mock.ExpectQuery("SELECT checksum FROM schema_migrations WHERE filename = \\$1").
+		WithArgs("054_drop_legacy_cache_columns.sql").
+		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow("182c193f3359946cf094090cd9e57d5c3fd9abaffbc1e8fc378646b8a6fa12b4"))
+	mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
+		WithArgs(migrationsAdvisoryLockID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	fsys := fstest.MapFS{
+		"054_drop_legacy_cache_columns.sql": &fstest.MapFile{Data: []byte("UPDATE groups SET allow_image_generation = true;")},
+	}
+	err = applyMigrationsFS(context.Background(), db, fsys)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checksum mismatch")
+	require.Contains(t, err.Error(), "data-changing SQL")
+	require.Contains(t, err.Error(), "manual review")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
