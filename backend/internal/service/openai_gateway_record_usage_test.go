@@ -245,7 +245,7 @@ func TestOpenAIGatewayServiceRecordUsage_ZeroUsageStillWritesUsageLog(t *testing
 	require.Zero(t, billingRepo.lastCmd.AccountQuotaCost)
 }
 
-func TestOpenAIGatewayServiceRecordUsage_UsesUserSpecificGroupRate(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_UsesGroupRateOverUserSpecificRate(t *testing.T) {
 	groupID := int64(11)
 	groupRate := 1.4
 	userRate := 1.8
@@ -277,13 +277,13 @@ func TestOpenAIGatewayServiceRecordUsage_UsesUserSpecificGroupRate(t *testing.T)
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, 1, rateRepo.calls)
+	require.Equal(t, 0, rateRepo.calls)
 	require.NotNil(t, usageRepo.lastLog)
-	require.Equal(t, userRate, usageRepo.lastLog.RateMultiplier)
+	require.Equal(t, groupRate, usageRepo.lastLog.RateMultiplier)
 	require.Equal(t, 12, usageRepo.lastLog.InputTokens)
 	require.Equal(t, 3, usageRepo.lastLog.CacheReadTokens)
 
-	expected := expectedOpenAICost(t, svc, "gpt-5.1", usage, userRate)
+	expected := expectedOpenAICost(t, svc, "gpt-5.1", usage, groupRate)
 	require.InDelta(t, expected.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
 	require.InDelta(t, expected.ActualCost, userRepo.lastAmount, 1e-12)
 	require.Equal(t, 1, userRepo.deductCalls)
@@ -407,7 +407,7 @@ func TestOpenAIGatewayServiceRecordUsage_FallsBackToGroupDefaultRateOnResolverEr
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, 1, rateRepo.calls)
+	require.Equal(t, 0, rateRepo.calls)
 	require.NotNil(t, usageRepo.lastLog)
 	require.Equal(t, groupRate, usageRepo.lastLog.RateMultiplier)
 
@@ -1496,7 +1496,7 @@ func TestOpenAIGatewayServiceRecordUsage_ImageSharedMultiplierPreservesExistingB
 	require.Equal(t, string(BillingModeImage), *usageRepo.lastLog.BillingMode)
 }
 
-func TestOpenAIGatewayServiceRecordUsage_ImageSharedMultiplierUsesUserGroupOverride(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_ImageSharedMultiplierUsesGroupRateOverUserOverride(t *testing.T) {
 	imagePrice := 0.5
 	userRate := 0.2
 	groupID := int64(125)
@@ -1535,8 +1535,8 @@ func TestOpenAIGatewayServiceRecordUsage_ImageSharedMultiplierUsesUserGroupOverr
 	require.NoError(t, err)
 	require.NotNil(t, usageRepo.lastLog)
 	require.InDelta(t, 0.5, usageRepo.lastLog.TotalCost, 1e-12)
-	require.InDelta(t, 0.1, usageRepo.lastLog.ActualCost, 1e-12)
-	require.InDelta(t, 0.2, usageRepo.lastLog.RateMultiplier, 1e-12)
+	require.InDelta(t, 0.075, usageRepo.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, 0.15, usageRepo.lastLog.RateMultiplier, 1e-12)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_ImageIndependentMultiplierUsesImageRate(t *testing.T) {

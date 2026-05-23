@@ -210,14 +210,18 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				}
 			}
 			// 2. 设置 expires_at 为当前时间，强制下次请求刷新 token
-			if account.Credentials == nil {
-				account.Credentials = make(map[string]any)
-			}
-			account.Credentials["expires_at"] = time.Now().Format(time.RFC3339)
-			if err := persistAccountCredentials(ctx, s.accountRepo, account, account.Credentials); err != nil {
+			now := time.Now()
+			credentialsExpired, staleSnapshot, err := s.markOAuth401CredentialsExpired(ctx, account, now)
+			if err != nil {
 				slog.Warn("oauth_401_force_refresh_update_failed", "account_id", account.ID, "error", err)
-			} else {
+			} else if staleSnapshot {
+				slog.Info("oauth_401_stale_credentials_ignored", "account_id", account.ID, "platform", account.Platform)
+				shouldDisable = true
+				break
+			} else if credentialsExpired {
 				slog.Info("oauth_401_force_refresh_set", "account_id", account.ID, "platform", account.Platform)
+			} else {
+				slog.Warn("oauth_401_force_refresh_skipped", "account_id", account.ID, "reason", "account_not_found")
 			}
 			// 3. 临时不可调度，替代 SetError（保持 status=active 让刷新服务能拾取）
 			msg := "Authentication failed (401): invalid or expired credentials"
@@ -228,7 +232,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			if cooldownMinutes <= 0 {
 				cooldownMinutes = 10
 			}
-			until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
+			until := now.Add(time.Duration(cooldownMinutes) * time.Minute)
 			if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, msg); err != nil {
 				slog.Warn("oauth_401_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
 			}
@@ -293,6 +297,56 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	}
 
 	return shouldDisable
+}
+
+func (s *RateLimitService) markOAuth401CredentialsExpired(ctx context.Context, account *Account, expiresAt time.Time) (bool, bool, error) {
+	if account == nil {
+		return false, false, nil
+	}
+
+	freshAccount, err := s.accountRepo.GetByID(ctx, account.ID)
+	if err != nil {
+		return false, false, err
+	}
+	if freshAccount == nil {
+		return false, false, nil
+	}
+	if oauth401CredentialsChanged(account.Credentials, freshAccount.Credentials) {
+		return false, true, nil
+	}
+
+	credentials := cloneCredentials(freshAccount.Credentials)
+	credentials["expires_at"] = expiresAt.Format(time.RFC3339)
+	if err := persistAccountCredentials(ctx, s.accountRepo, freshAccount, credentials); err != nil {
+		return false, false, err
+	}
+	return true, false, nil
+}
+
+func oauth401CredentialsChanged(seen, current map[string]any) bool {
+	for _, key := range []string{"access_token", "refresh_token", "_token_version", "token_version"} {
+		seenValue, seenOK := oauth401ComparableCredentialValue(seen, key)
+		currentValue, currentOK := oauth401ComparableCredentialValue(current, key)
+		if seenOK && currentOK && seenValue != currentValue {
+			return true
+		}
+	}
+	return false
+}
+
+func oauth401ComparableCredentialValue(credentials map[string]any, key string) (string, bool) {
+	if len(credentials) == 0 {
+		return "", false
+	}
+	value, ok := credentials[key]
+	if !ok || value == nil {
+		return "", false
+	}
+	text := fmt.Sprint(value)
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	return text, true
 }
 
 // PreCheckUsage proactively checks local quota before dispatching a request.

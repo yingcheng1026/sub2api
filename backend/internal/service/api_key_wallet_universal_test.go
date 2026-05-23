@@ -61,6 +61,13 @@ func (s walletGroupKeyGroupRepoStub) GetByID(_ context.Context, id int64) (*Grou
 	return nil, nil
 }
 
+func (s walletGroupKeyGroupRepoStub) GetAccountCount(_ context.Context, id int64) (int64, int64, error) {
+	if _, ok := s.groups[id]; ok {
+		return 1, 1, nil
+	}
+	return 0, 0, nil
+}
+
 func newWalletGroupKeyTestService(repo APIKeyRepository, groupRepo GroupRepository) *APIKeyService {
 	return NewAPIKeyService(repo, walletGroupKeyUserRepoStub{}, groupRepo, nil, nil, nil, &config.Config{})
 }
@@ -270,7 +277,7 @@ func TestAPIKeyServiceGetWalletModelRoutesUsesConfiguredRoutesAndGroups(t *testi
 	require.Equal(t, int64(3), routes[0].GroupID)
 	require.Equal(t, "claude-sonnet", routes[0].GroupName)
 	require.Equal(t, 1.5, routes[0].RateMultiplier)
-	require.Equal(t, 1.25, routes[0].EffectiveRateMultiplier)
+	require.Equal(t, 1.5, routes[0].EffectiveRateMultiplier)
 	require.Equal(t, "gpt-*", routes[1].Pattern)
 	require.Equal(t, int64(2), routes[1].GroupID)
 	require.Equal(t, 1.0, routes[1].EffectiveRateMultiplier)

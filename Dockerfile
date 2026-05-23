@@ -29,16 +29,17 @@ WORKDIR /app/frontend
 # 等 frontend/package.json 加上 pnpm.onlyBuiltDependencies 白名单后再升级。
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
-# Install dependencies first (better caching)
+# Copy frontend source and build.
+# Keep install/build/cleanup in one layer so low-disk production hosts do not
+# have to commit a large node_modules-only layer.
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-
-# Copy frontend source and build
 COPY frontend/ ./
 # FRONTEND_NODE_OPTIONS 可调: 默认 3072 适合本地 build (Mac / 大内存机);
 # VPS build 时降到 --max-old-space-size=1024 或 768 避免 OOM。
 ARG FRONTEND_NODE_OPTIONS="--max-old-space-size=3072"
-RUN NODE_OPTIONS="${FRONTEND_NODE_OPTIONS}" pnpm run build
+RUN pnpm install --frozen-lockfile && \
+    NODE_OPTIONS="${FRONTEND_NODE_OPTIONS}" pnpm run build && \
+    rm -rf node_modules /root/.cache /root/.local/share/pnpm
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder

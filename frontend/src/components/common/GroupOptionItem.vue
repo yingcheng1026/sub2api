@@ -30,10 +30,6 @@
           <span class="mr-1 line-through opacity-50">{{ formatRate(rateMultiplier) }}x</span>
           <span class="font-bold">{{ formatRate(lockedRateMultiplier) }}x</span>
         </template>
-        <template v-else-if="hasCustomRate">
-          <span class="mr-1 line-through opacity-50">{{ formatRate(rateMultiplier) }}x</span>
-          <span class="font-bold">{{ formatRate(userRateMultiplier) }}x</span>
-        </template>
         <template v-else>
           {{ formatRate(rateMultiplier) }}x 倍率
         </template>
@@ -84,17 +80,6 @@ const hasLockedRate = computed(() => {
     props.lockedRateMultiplier !== undefined &&
     props.rateMultiplier !== undefined &&
     props.lockedRateMultiplier !== props.rateMultiplier
-  )
-})
-
-// Whether user has a custom rate different from default
-const hasCustomRate = computed(() => {
-  return (
-    !hasLockedRate.value &&
-    props.userRateMultiplier !== null &&
-    props.userRateMultiplier !== undefined &&
-    props.rateMultiplier !== undefined &&
-    props.userRateMultiplier !== props.rateMultiplier
   )
 })
 

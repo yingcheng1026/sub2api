@@ -130,7 +130,20 @@ func TestRateLimitService_HandleUpstreamError_OAuth401SetsTempUnschedulable(t *t
 // TestRateLimitService_HandleUpstreamError_OAuth401InvalidatorError
 // OpenAI OAuth 401 缓存失效出错时仍走 temp_unschedulable
 func TestRateLimitService_HandleUpstreamError_OAuth401InvalidatorError(t *testing.T) {
-	repo := &rateLimitAccountRepoStub{}
+	repo := &rateLimitAccountRepoStub{
+		mockAccountRepoForGemini: mockAccountRepoForGemini{
+			accountsByID: map[int64]*Account{
+				101: {
+					ID:       101,
+					Platform: PlatformOpenAI,
+					Type:     AccountTypeOAuth,
+					Credentials: map[string]any{
+						"access_token": "token",
+					},
+				},
+			},
+		},
+	}
 	invalidator := &tokenCacheInvalidatorRecorder{err: errors.New("boom")}
 	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	service.SetTokenCacheInvalidator(invalidator)
@@ -168,7 +181,20 @@ func TestRateLimitService_HandleUpstreamError_NonOAuth401(t *testing.T) {
 }
 
 func TestRateLimitService_HandleUpstreamError_OAuth401UsesCredentialsUpdater(t *testing.T) {
-	repo := &rateLimitAccountRepoStub{}
+	repo := &rateLimitAccountRepoStub{
+		mockAccountRepoForGemini: mockAccountRepoForGemini{
+			accountsByID: map[int64]*Account{
+				103: {
+					ID:       103,
+					Platform: PlatformOpenAI,
+					Type:     AccountTypeOAuth,
+					Credentials: map[string]any{
+						"access_token": "token",
+					},
+				},
+			},
+		},
+	}
 	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	account := &Account{
 		ID:       103,
@@ -184,4 +210,84 @@ func TestRateLimitService_HandleUpstreamError_OAuth401UsesCredentialsUpdater(t *
 	require.True(t, shouldDisable)
 	require.Equal(t, 1, repo.updateCredentialsCalls)
 	require.NotEmpty(t, repo.lastCredentials["expires_at"])
+}
+
+func TestRateLimitService_HandleUpstreamError_OAuth401DoesNotOverwriteFreshCredentials(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{
+		mockAccountRepoForGemini: mockAccountRepoForGemini{
+			accountsByID: map[int64]*Account{
+				104: {
+					ID:       104,
+					Platform: PlatformAnthropic,
+					Type:     AccountTypeOAuth,
+					Credentials: map[string]any{
+						"access_token":    "fresh-access",
+						"refresh_token":   "fresh-refresh",
+						"_token_version":  int64(200),
+						"provider_marker": "keep-me",
+					},
+				},
+			},
+		},
+	}
+	invalidator := &tokenCacheInvalidatorRecorder{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	service.SetTokenCacheInvalidator(invalidator)
+	account := &Account{
+		ID:       104,
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":   "stale-access",
+			"refresh_token":  "stale-refresh",
+			"_token_version": int64(100),
+		},
+	}
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("Invalid authentication credentials"))
+
+	require.True(t, shouldDisable)
+	require.Len(t, invalidator.accounts, 1)
+	require.Equal(t, 0, repo.updateCredentialsCalls, "stale 401 must not overwrite newer DB credentials")
+	require.Equal(t, 0, repo.tempCalls, "stale 401 must not temp-unschedule an already refreshed account")
+	require.Equal(t, 0, repo.setErrorCalls)
+}
+
+func TestRateLimitService_HandleUpstreamError_OAuth401PreservesDBCredentialFields(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{
+		mockAccountRepoForGemini: mockAccountRepoForGemini{
+			accountsByID: map[int64]*Account{
+				105: {
+					ID:       105,
+					Platform: PlatformAnthropic,
+					Type:     AccountTypeOAuth,
+					Credentials: map[string]any{
+						"access_token":    "same-access",
+						"refresh_token":   "same-refresh",
+						"provider_marker": "keep-me",
+					},
+				},
+			},
+		},
+	}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       105,
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":  "same-access",
+			"refresh_token": "same-refresh",
+		},
+	}
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("Invalid authentication credentials"))
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 1, repo.updateCredentialsCalls)
+	require.Equal(t, "same-refresh", repo.lastCredentials["refresh_token"])
+	require.Equal(t, "keep-me", repo.lastCredentials["provider_marker"])
+	require.NotEmpty(t, repo.lastCredentials["expires_at"])
+	require.Equal(t, 1, repo.tempCalls)
+	require.Equal(t, 0, repo.setErrorCalls)
 }

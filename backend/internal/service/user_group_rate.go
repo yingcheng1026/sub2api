@@ -1,9 +1,18 @@
 package service
 
-import "context"
+import (
+	"context"
 
-// UserGroupRateEntry 分组下用户专属倍率/RPM 条目。
-// RateMultiplier 与 RPMOverride 均为指针以支持"未设置"语义（NULL）。
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+)
+
+var ErrUserGroupRateMultiplierDisabled = infraerrors.BadRequest(
+	"USER_GROUP_RATE_MULTIPLIER_DISABLED",
+	"user-specific group rate multipliers are disabled; update the group rate multiplier instead",
+)
+
+// UserGroupRateEntry 是历史 rate_multiplier 与当前 RPM override 的兼容条目。
+// 计费倍率已禁用用户级覆盖；RateMultiplier 只允许为空或用于旧数据清理。
 type UserGroupRateEntry struct {
 	UserID         int64    `json:"user_id"`
 	UserName       string   `json:"user_name"`
@@ -14,7 +23,7 @@ type UserGroupRateEntry struct {
 	RPMOverride    *int     `json:"rpm_override,omitempty"`
 }
 
-// GroupRateMultiplierInput 批量设置分组倍率的输入条目
+// GroupRateMultiplierInput 是历史批量倍率入口；非空写入会被服务层和 DB 拒绝。
 type GroupRateMultiplierInput struct {
 	UserID         int64   `json:"user_id"`
 	RateMultiplier float64 `json:"rate_multiplier"`
@@ -27,8 +36,8 @@ type GroupRPMOverrideInput struct {
 	RPMOverride *int  `json:"rpm_override"`
 }
 
-// UserGroupRateRepository 用户专属分组倍率/RPM 仓储接口。
-// 允许管理员为特定用户设置分组的专属计费倍率与 RPM 上限，覆盖分组默认值。
+// UserGroupRateRepository 保留历史 rate_multiplier 清理能力与当前 RPM override。
+// 管理员不能再写入用户专属计费倍率；计费倍率必须来自 groups.rate_multiplier。
 type UserGroupRateRepository interface {
 	// GetByUserID 获取用户所有专属分组 rate_multiplier（仅返回非 NULL 的条目）
 	GetByUserID(ctx context.Context, userID int64) (map[int64]float64, error)

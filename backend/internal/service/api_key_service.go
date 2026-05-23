@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/dgraph-io/ristretto"
@@ -27,6 +28,7 @@ var (
 	ErrAPIKeyInvalidChars = infraerrors.BadRequest("API_KEY_INVALID_CHARS", "api key can only contain letters, numbers, underscores, and hyphens")
 	ErrAPIKeyRateLimited  = infraerrors.TooManyRequests("API_KEY_RATE_LIMITED", "too many failed attempts, please try again later")
 	ErrInvalidIPPattern   = infraerrors.BadRequest("INVALID_IP_PATTERN", "invalid IP or CIDR pattern")
+	ErrGroupNoAccounts    = infraerrors.Forbidden("GROUP_NO_AVAILABLE_ACCOUNTS", "group has no available accounts")
 	// ErrAPIKeyExpired        = infraerrors.Forbidden("API_KEY_EXPIRED", "api key has expired")
 	ErrAPIKeyExpired = infraerrors.Forbidden("API_KEY_EXPIRED", "api key 已过期")
 	// ErrAPIKeyQuotaExhausted = infraerrors.TooManyRequests("API_KEY_QUOTA_EXHAUSTED", "api key quota exhausted")
@@ -361,6 +363,47 @@ func (s *APIKeyService) canUserBindGroup(ctx context.Context, user *User, group 
 	return user.CanBindGroup(group.ID, group.IsExclusive)
 }
 
+func (s *APIKeyService) ensureGroupHasAvailableAccounts(ctx context.Context, group *Group) error {
+	if group == nil || group.ID <= 0 || s.groupRepo == nil {
+		return nil
+	}
+	_, active, err := s.groupRepo.GetAccountCount(ctx, group.ID)
+	if err != nil {
+		return fmt.Errorf("get group account count: %w", err)
+	}
+	if active <= 0 {
+		return ErrGroupNoAccounts
+	}
+	return nil
+}
+
+func int64PtrEqual(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func cloneAPIKeyGroupIDPtr(v *int64) *int64 {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+func logAPIKeyGroupChange(userID int64, apiKeyID int64, oldGroupID, newGroupID *int64) {
+	if int64PtrEqual(oldGroupID, newGroupID) {
+		return
+	}
+	logger.WriteSinkEvent("info", "audit.api_key_group_change", "api key group changed", map[string]any{
+		"user_id":      userID,
+		"api_key_id":   apiKeyID,
+		"old_group_id": oldGroupID,
+		"new_group_id": newGroupID,
+	})
+}
+
 // Create 创建API Key
 func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIKeyRequest) (*APIKey, error) {
 	// 验证用户存在
@@ -393,6 +436,9 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 		// 检查用户是否可以绑定该分组
 		if !s.canUserBindGroup(ctx, user, group) {
 			return nil, ErrGroupNotAllowed
+		}
+		if err := s.ensureGroupHasAvailableAccounts(ctx, group); err != nil {
+			return nil, err
 		}
 	}
 
@@ -731,6 +777,7 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 	if apiKey.UserID != userID {
 		return nil, ErrInsufficientPerms
 	}
+	oldGroupID := cloneAPIKeyGroupIDPtr(apiKey.GroupID)
 
 	// 验证 IP 白名单格式
 	if len(req.IPWhitelist) > 0 {
@@ -765,6 +812,9 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 
 		if !s.canUserBindGroup(ctx, user, group) {
 			return nil, ErrGroupNotAllowed
+		}
+		if err := s.ensureGroupHasAvailableAccounts(ctx, group); err != nil {
+			return nil, err
 		}
 
 		apiKey.GroupID = req.GroupID
@@ -837,6 +887,7 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 
 	s.InvalidateAuthCacheByKey(ctx, apiKey.Key)
 	s.compileAPIKeyIPRules(apiKey)
+	logAPIKeyGroupChange(userID, apiKey.ID, oldGroupID, apiKey.GroupID)
 
 	// Invalidate Redis rate limit cache so reset takes effect immediately
 	if resetRateLimit && s.rateLimitCacheInvalid != nil {
@@ -979,6 +1030,9 @@ func (s *APIKeyService) GetAvailableGroups(ctx context.Context, userID int64) ([
 	// 过滤出用户有权限的分组
 	availableGroups := make([]Group, 0)
 	for _, group := range allGroups {
+		if !group.IsSubscriptionType() && group.AccountCountsLoaded && group.ActiveAccountCount <= 0 {
+			continue
+		}
 		if s.canUserBindGroupInternal(user, &group, subscribedGroupIDs) {
 			availableGroups = append(availableGroups, group)
 		}
@@ -1005,17 +1059,13 @@ func (s *APIKeyService) SearchAPIKeys(ctx context.Context, userID int64, keyword
 	return keys, nil
 }
 
-// GetUserGroupRates 获取用户的专属分组倍率配置
-// 返回 map[groupID]rateMultiplier
+// GetUserGroupRates returns legacy per-user multipliers for old clients.
+// HandsFreeClub now treats groups.rate_multiplier as the only billing/display
+// source, so per-user rate multipliers must not affect customer-facing rates.
 func (s *APIKeyService) GetUserGroupRates(ctx context.Context, userID int64) (map[int64]float64, error) {
-	if s.userGroupRateRepo == nil {
-		return nil, nil
-	}
-	rates, err := s.userGroupRateRepo.GetByUserID(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("get user group rates: %w", err)
-	}
-	return rates, nil
+	_ = ctx
+	_ = userID
+	return map[int64]float64{}, nil
 }
 
 // CheckAPIKeyQuotaAndExpiry checks if the API key is valid for use (not expired, quota not exhausted)

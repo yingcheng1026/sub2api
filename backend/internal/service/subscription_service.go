@@ -11,6 +11,8 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	dbapikey "github.com/Wei-Shaw/sub2api/ent/apikey"
+	dbgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -25,6 +27,8 @@ var MaxExpiresAt = time.Date(2099, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // MaxValidityDays is the maximum allowed validity days for subscriptions (100 years)
 const MaxValidityDays = 36500
+
+const trialBonusGroupName = "paid-trial-bonus"
 
 var (
 	ErrSubscriptionNotFound       = infraerrors.NotFound("SUBSCRIPTION_NOT_FOUND", "subscription not found")
@@ -43,12 +47,13 @@ var (
 
 // SubscriptionService 订阅服务
 type SubscriptionService struct {
-	groupRepo           GroupRepository
-	userSubRepo         UserSubscriptionRepository
-	billingCacheService *BillingCacheService
-	entClient           *dbent.Client
-	walletKeyService    WalletGroupKeyService
-	walletTopupService  WalletTopupService
+	groupRepo            GroupRepository
+	userSubRepo          UserSubscriptionRepository
+	billingCacheService  *BillingCacheService
+	entClient            *dbent.Client
+	walletKeyService     WalletGroupKeyService
+	walletTopupService   WalletTopupService
+	authCacheInvalidator APIKeyAuthCacheInvalidator
 
 	// L1 缓存：加速中间件热路径的订阅查询
 	subCacheL1     *ristretto.Cache
@@ -100,6 +105,10 @@ func (s *SubscriptionService) SetWalletGroupKeyService(keyService WalletGroupKey
 // 直接返回 ErrSubscriptionAssignConflict（B2.4 之前的旧行为）。
 func (s *SubscriptionService) SetWalletTopupService(topup WalletTopupService) {
 	s.walletTopupService = topup
+}
+
+func (s *SubscriptionService) SetAPIKeyAuthCacheInvalidator(invalidator APIKeyAuthCacheInvalidator) {
+	s.authCacheInvalidator = invalidator
 }
 
 func (s *SubscriptionService) initMaintenanceQueue(cfg *config.Config) {
@@ -320,6 +329,7 @@ func (s *SubscriptionService) AssignOrExtendSubscription(ctx context.Context, in
 				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
 			}()
 		}
+		s.promoteTrialBonusKeysAfterAssign(ctx, input.UserID, group)
 
 		// 返回更新后的订阅
 		sub, err := s.userSubRepo.GetByID(ctx, existingSub.ID)
@@ -342,8 +352,92 @@ func (s *SubscriptionService) AssignOrExtendSubscription(ctx context.Context, in
 			_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
 		}()
 	}
+	s.promoteTrialBonusKeysAfterAssign(ctx, input.UserID, group)
 
 	return sub, false, nil // false 表示是新建
+}
+
+func (s *SubscriptionService) promoteTrialBonusKeysAfterAssign(ctx context.Context, userID int64, targetGroup *Group) {
+	if err := s.promoteTrialBonusKeysToSubscriptionGroup(ctx, userID, targetGroup); err != nil {
+		log.Printf("Warning: failed to promote trial-bonus api keys after subscription assign: user_id=%d group_id=%d err=%v", userID, targetGroupID(targetGroup), err)
+	}
+}
+
+func targetGroupID(group *Group) int64 {
+	if group == nil {
+		return 0
+	}
+	return group.ID
+}
+
+func (s *SubscriptionService) promoteTrialBonusKeysToSubscriptionGroup(ctx context.Context, userID int64, targetGroup *Group) error {
+	if s.entClient == nil || targetGroup == nil || userID <= 0 {
+		return nil
+	}
+	if !targetGroup.IsSubscriptionType() || targetGroup.Platform != PlatformOpenAI || targetGroup.Name == trialBonusGroupName {
+		return nil
+	}
+
+	client := s.entClient
+	if tx := dbent.TxFromContext(ctx); tx != nil {
+		client = tx.Client()
+	}
+	if client == nil {
+		return nil
+	}
+
+	trialGroup, err := client.Group.Query().
+		Where(dbgroup.NameEQ(trialBonusGroupName), dbgroup.DeletedAtIsNil()).
+		Only(ctx)
+	if dbent.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find trial bonus group: %w", err)
+	}
+	if trialGroup.ID == targetGroup.ID {
+		return nil
+	}
+
+	keys, err := client.APIKey.Query().
+		Where(
+			dbapikey.UserIDEQ(userID),
+			dbapikey.GroupIDEQ(trialGroup.ID),
+			dbapikey.StatusEQ(StatusActive),
+			dbapikey.DeletedAtIsNil(),
+		).
+		All(ctx)
+	if err != nil {
+		return fmt.Errorf("list trial bonus api keys: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	ids := make([]int64, 0, len(keys))
+	for _, key := range keys {
+		ids = append(ids, key.ID)
+	}
+
+	if _, err := client.APIKey.Update().
+		Where(
+			dbapikey.IDIn(ids...),
+			dbapikey.UserIDEQ(userID),
+			dbapikey.GroupIDEQ(trialGroup.ID),
+			dbapikey.StatusEQ(StatusActive),
+			dbapikey.DeletedAtIsNil(),
+		).
+		SetGroupID(targetGroup.ID).
+		Save(ctx); err != nil {
+		return fmt.Errorf("promote trial bonus api keys: %w", err)
+	}
+
+	if s.authCacheInvalidator != nil {
+		for _, key := range keys {
+			s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, key.Key)
+		}
+	}
+	return nil
 }
 
 // createSubscription 创建新订阅（内部方法）

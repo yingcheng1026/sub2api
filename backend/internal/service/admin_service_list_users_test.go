@@ -121,7 +121,7 @@ func (s *userGroupRateRepoStubForListUsers) DeleteByUserID(_ context.Context, us
 	panic("unexpected DeleteByUserID call")
 }
 
-func TestAdminService_ListUsers_BatchRateFallbackToSingle(t *testing.T) {
+func TestAdminService_ListUsers_DoesNotLoadLegacyGroupRates(t *testing.T) {
 	userRepo := &userRepoStubForListUsers{
 		users: []User{
 			{ID: 101, Username: "u1"},
@@ -144,10 +144,10 @@ func TestAdminService_ListUsers_BatchRateFallbackToSingle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), total)
 	require.Len(t, users, 2)
-	require.Equal(t, 1, rateRepo.batchCalls)
-	require.ElementsMatch(t, []int64{101, 202}, rateRepo.singleCall)
-	require.Equal(t, 1.1, users[0].GroupRates[11])
-	require.Equal(t, 2.2, users[1].GroupRates[22])
+	require.Equal(t, 0, rateRepo.batchCalls)
+	require.Empty(t, rateRepo.singleCall)
+	require.Empty(t, users[0].GroupRates)
+	require.Empty(t, users[1].GroupRates)
 }
 
 func TestAdminService_ListUsers_PassesSortParams(t *testing.T) {
