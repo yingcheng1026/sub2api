@@ -39,27 +39,35 @@
 
       <!-- Group quota info (compact) -->
       <div class="mb-3 grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg bg-gray-50 px-3 py-2 text-xs dark:bg-dark-700/50">
-        <div class="flex items-center justify-between">
+        <div v-if="isWalletPlan" class="flex items-center justify-between">
+          <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.monthlyQuota') }}</span>
+          <span class="font-medium text-gray-700 dark:text-gray-300">{{ walletQuotaDisplay }}</span>
+        </div>
+        <div v-if="isWalletPlan" class="flex items-center justify-between">
+          <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.walletMode') }}</span>
+          <span class="font-medium text-gray-700 dark:text-gray-300">{{ t('payment.planCard.sharedWallet') }}</span>
+        </div>
+        <div v-if="!isWalletPlan" class="flex items-center justify-between">
           <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.rate') }}</span>
           <span class="font-medium text-gray-700 dark:text-gray-300">{{ rateDisplay }}</span>
         </div>
-        <div v-if="plan.daily_limit_usd != null" class="flex items-center justify-between">
+        <div v-if="!isWalletPlan && plan.daily_limit_usd != null" class="flex items-center justify-between">
           <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.dailyLimit') }}</span>
           <span class="font-medium text-gray-700 dark:text-gray-300">${{ plan.daily_limit_usd }}</span>
         </div>
-        <div v-if="plan.weekly_limit_usd != null" class="flex items-center justify-between">
+        <div v-if="!isWalletPlan && plan.weekly_limit_usd != null" class="flex items-center justify-between">
           <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.weeklyLimit') }}</span>
           <span class="font-medium text-gray-700 dark:text-gray-300">${{ plan.weekly_limit_usd }}</span>
         </div>
-        <div v-if="plan.monthly_limit_usd != null" class="flex items-center justify-between">
+        <div v-if="!isWalletPlan && plan.monthly_limit_usd != null" class="flex items-center justify-between">
           <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.monthlyLimit') }}</span>
           <span class="font-medium text-gray-700 dark:text-gray-300">${{ plan.monthly_limit_usd }}</span>
         </div>
-        <div v-if="plan.daily_limit_usd == null && plan.weekly_limit_usd == null && plan.monthly_limit_usd == null" class="flex items-center justify-between">
+        <div v-if="!isWalletPlan && plan.daily_limit_usd == null && plan.weekly_limit_usd == null && plan.monthly_limit_usd == null" class="flex items-center justify-between">
           <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.quota') }}</span>
           <span class="font-medium text-gray-700 dark:text-gray-300">{{ t('payment.planCard.unlimited') }}</span>
         </div>
-        <div v-if="modelScopeLabels.length > 0" class="col-span-2 flex items-center justify-between">
+        <div v-if="!isWalletPlan && modelScopeLabels.length > 0" class="col-span-2 flex items-center justify-between">
           <span class="text-gray-400 dark:text-dark-500">{{ t('payment.planCard.models') }}</span>
           <div class="flex flex-wrap justify-end gap-1">
             <span v-for="scope in modelScopeLabels" :key="scope"
@@ -115,6 +123,7 @@ const emit = defineEmits<{ select: [plan: SubscriptionPlan] }>()
 const { t } = useI18n()
 
 const platform = computed(() => props.plan.group_platform || '')
+const isWalletPlan = computed(() => props.plan.wallet_quota_usd != null && props.plan.wallet_quota_usd > 0)
 const isRenewal = computed(() =>
   props.activeSubscriptions?.some(s => s.group_id === props.plan.group_id && s.status === 'active') ?? false
 )
@@ -138,6 +147,11 @@ const discountText = computed(() => {
 const rateDisplay = computed(() => {
   const rate = props.plan.rate_multiplier ?? 1
   return `×${Number(rate.toPrecision(10))}`
+})
+
+const walletQuotaDisplay = computed(() => {
+  const quota = props.plan.wallet_quota_usd ?? 0
+  return `$${Number(quota).toLocaleString()}`
 })
 
 const MODEL_SCOPE_LABELS: Record<string, string> = {

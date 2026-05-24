@@ -185,7 +185,7 @@ func (h *PaymentHandler) ListPlans(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, plans)
+	response.Success(c, service.NewSubscriptionPlanResponses(plans))
 }
 
 // CreatePlan creates a new subscription plan.
@@ -201,7 +201,7 @@ func (h *PaymentHandler) CreatePlan(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Created(c, plan)
+	response.Created(c, service.NewSubscriptionPlanResponse(plan))
 }
 
 // UpdatePlan updates an existing subscription plan.
@@ -221,7 +221,7 @@ func (h *PaymentHandler) UpdatePlan(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, plan)
+	response.Success(c, service.NewSubscriptionPlanResponse(plan))
 }
 
 // DeletePlan deletes a subscription plan.

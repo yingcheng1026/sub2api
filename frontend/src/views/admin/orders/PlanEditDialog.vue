@@ -6,7 +6,7 @@
           <label class="input-label">{{ t('payment.admin.planName') }} <span class="text-red-500">*</span></label>
           <input v-model="planForm.name" type="text" class="input" required />
         </div>
-        <div>
+        <div v-if="!isWalletPlan">
           <label class="input-label">{{ t('payment.admin.group') }} <span class="text-red-500">*</span></label>
           <Select v-model="planForm.group_id" :options="groupOptions" :placeholder="t('payment.admin.selectGroup')" class="w-full">
             <template #selected="{ option }">
@@ -18,6 +18,11 @@
               <Icon v-if="selected" name="check" size="sm" class="text-primary-500" :stroke-width="2" />
             </template>
           </Select>
+        </div>
+        <div v-else>
+          <label class="input-label">{{ t('payment.admin.walletQuotaUsd') }} <span class="text-red-500">*</span></label>
+          <input v-model.number="planForm.wallet_quota_usd" type="number" step="0.01" min="0.01" class="input" />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.walletQuotaHint') }}</p>
         </div>
       </div>
 
@@ -43,6 +48,11 @@
         <div><label class="input-label">{{ t('payment.admin.price') }} <span class="text-red-500">*</span></label><input v-model.number="planForm.price" type="number" step="0.01" min="0.01" class="input" required /></div>
       </div>
       <div class="grid grid-cols-2 gap-4">
+        <div v-if="!isWalletPlan">
+          <label class="input-label">{{ t('payment.admin.walletQuotaUsd') }}</label>
+          <input v-model.number="planForm.wallet_quota_usd" type="number" step="0.01" min="0" class="input" :placeholder="t('payment.admin.walletQuotaPlaceholder')" />
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.walletQuotaHint') }}</p>
+        </div>
         <div><label class="input-label">{{ t('payment.admin.originalPrice') }}</label><input v-model.number="planForm.original_price" type="number" step="0.01" min="0" class="input" /></div>
         <div><label class="input-label">{{ t('payment.admin.sortOrder') }}</label><input v-model.number="planForm.sort_order" type="number" min="0" class="input" /></div>
       </div>
@@ -54,6 +64,28 @@
         <label class="input-label">{{ t('payment.admin.features') }}</label>
         <textarea v-model="planFeaturesText" rows="3" class="input" :placeholder="t('payment.admin.featuresPlaceholder')"></textarea>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.featuresHint') }}</p>
+      </div>
+      <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-dark-600 dark:bg-dark-800">
+        <div class="mb-2 flex items-center justify-between gap-3">
+          <div>
+            <label class="input-label mb-0">{{ t('payment.admin.coveredGroups') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.coveredGroupsHint') }}</p>
+          </div>
+          <span class="shrink-0 rounded-full bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-200">{{ t('payment.admin.exclusiveManualHint') }}</span>
+        </div>
+        <div v-if="coverageGroupOptions.length" class="grid max-h-56 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+          <label
+            v-for="group in coverageGroupOptions"
+            :key="group.id"
+            class="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 bg-white p-2 transition-colors hover:border-primary-300 dark:border-dark-600 dark:bg-dark-900"
+          >
+            <input v-model="planForm.plan_group_ids" type="checkbox" :value="group.id" class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+            <GroupBadge :name="group.name" :platform="group.platform" :rate-multiplier="group.rate_multiplier" :subscription-type="group.subscription_type" />
+            <span v-if="group.is_exclusive" class="ml-auto rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-200">{{ t('payment.admin.exclusive') }}</span>
+            <span v-else-if="group.status !== 'active'" class="ml-auto rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-dark-700 dark:text-gray-400">{{ group.status }}</span>
+          </label>
+        </div>
+        <p v-else class="text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.coveredGroupsEmpty') }}</p>
       </div>
       <div class="flex items-center gap-3">
         <label class="text-sm text-gray-700 dark:text-gray-300">{{ t('payment.admin.forSale') }}</label>
@@ -121,6 +153,8 @@ const planForm = reactive({
   sort_order: 0,
   for_sale: true,
   plan_type: 'subscription' as 'subscription' | 'credits',
+  wallet_quota_usd: null as number | null,
+  plan_group_ids: [] as number[],
 })
 const planFeaturesText = ref('')
 
@@ -151,6 +185,17 @@ const groupOptions = computed(() =>
     })),
 )
 
+const coverageGroupOptions = computed(() =>
+  props.groups
+    .filter(g => g.subscription_type === 'standard')
+    .map(g => ({
+      ...g,
+      label: `${g.name} — ${g.platform} (${g.rate_multiplier}x)`,
+    })),
+)
+
+const isWalletPlan = computed(() => Number(planForm.wallet_quota_usd || 0) > 0)
+
 const selectedGroupInfo = computed(() => {
   if (!planForm.group_id) return null
   return props.groups.find(g => g.id === planForm.group_id) || null
@@ -171,10 +216,12 @@ watch(() => props.show, (visible) => {
       sort_order: props.plan.sort_order || 0,
       for_sale: props.plan.for_sale,
       plan_type: props.plan.plan_type || 'subscription',
+      wallet_quota_usd: props.plan.wallet_quota_usd ?? null,
+      plan_group_ids: [...(props.plan.plan_group_ids || [])],
     })
     planFeaturesText.value = (props.plan.features || []).join('\n')
   } else {
-    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true, plan_type: 'subscription' })
+    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true, plan_type: 'subscription', wallet_quota_usd: null, plan_group_ids: [] })
     planFeaturesText.value = ''
   }
 })
@@ -185,9 +232,12 @@ function buildPlanPayload() {
   // 额度卡永久有效，后端 expires_at = MaxExpiresAt（2099）；validity_days 字段仍写一个
   // 远大于普通月卡的占位（36500 ≈ 100 年），让后端 NOT NULL CHECK 通过。
   const isCredits = planForm.plan_type === 'credits'
+  const walletQuota = Number(planForm.wallet_quota_usd || 0)
   return {
     name: planForm.name,
-    group_id: planForm.group_id,
+    group_id: walletQuota > 0 ? null : planForm.group_id,
+    wallet_quota_usd: walletQuota > 0 ? walletQuota : undefined,
+    plan_group_ids: planForm.plan_group_ids,
     description: planForm.description,
     price: planForm.price,
     original_price: planForm.original_price || 0,
@@ -201,8 +251,16 @@ function buildPlanPayload() {
 }
 
 async function handleSavePlan() {
-  if (!planForm.group_id) {
+  if (!isWalletPlan.value && !planForm.group_id) {
     appStore.showError(t('payment.admin.groupRequired'))
+    return
+  }
+  if (isWalletPlan.value && Number(planForm.wallet_quota_usd || 0) <= 0) {
+    appStore.showError(t('payment.admin.walletQuotaRequired'))
+    return
+  }
+  if (isWalletPlan.value && planForm.plan_type === 'subscription' && !planForm.plan_group_ids.length) {
+    appStore.showError(t('payment.admin.coveredGroupsRequired'))
     return
   }
   if (!planForm.price || planForm.price <= 0) {
