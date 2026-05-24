@@ -984,6 +984,7 @@ func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		s.applyKiroAccountTestErrorPolicy(ctx, account, resp.StatusCode, body)
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Kiro sidecar returned %d: %s", resp.StatusCode, string(body)))
 	}
 

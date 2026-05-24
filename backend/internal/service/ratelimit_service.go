@@ -159,6 +159,10 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		upstreamMsg = truncateForLog([]byte(upstreamMsg), 512)
 	}
 
+	if s.applyKiroSidecarErrorPolicy(ctx, account, statusCode, responseBody) {
+		return true
+	}
+
 	switch statusCode {
 	case 400:
 		// "organization has been disabled" → 永久禁用

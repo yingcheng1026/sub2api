@@ -463,6 +463,9 @@ func (h *GatewayHandler) forwardKiroSidecar(c *gin.Context, account *service.Acc
 	if kiroShouldFailoverStatus(resp.StatusCode) {
 		body, _ := readKiroSidecarBody(resp.Body)
 		service.SetOpsUpstreamError(c, resp.StatusCode, service.ExtractUpstreamErrorMessage(body), "")
+		if h.gatewayService != nil {
+			h.gatewayService.HandleKiroSidecarUpstreamError(c.Request.Context(), account, resp.StatusCode, resp.Header, body)
+		}
 		return nil, &service.UpstreamFailoverError{
 			StatusCode:      resp.StatusCode,
 			ResponseBody:    body,

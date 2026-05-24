@@ -6,6 +6,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+resolve_build_dockerfile() {
+    local dockerfile="${SUB2API_DOCKERFILE:-${REPO_ROOT}/Dockerfile}"
+
+    if [[ "${dockerfile}" != /* ]]; then
+        dockerfile="${REPO_ROOT}/${dockerfile}"
+    fi
+
+    if [[ ! -f "${dockerfile}" ]]; then
+        echo "Dockerfile not found: ${dockerfile}" >&2
+        return 1
+    fi
+
+    printf '%s\n' "${dockerfile}"
+}
+
 parse_image_ref() {
     local image="$1"
     local last_part="${image##*/}"
@@ -184,8 +199,39 @@ assert_group_available_account_count_guard() {
     fi
 }
 
+assert_kiro_sidecar_error_policy_guard() {
+    local policy="${REPO_ROOT}/backend/internal/service/kiro_sidecar_error_policy.go"
+    local handler="${REPO_ROOT}/backend/internal/handler/kiro_gateway_handler.go"
+    local spec="${REPO_ROOT}/backend/internal/service/ratelimit_service_401_test.go"
+
+    if ! grep -Fq "Kiro API credential rejected" "${policy}"; then
+        echo "Kiro sidecar error policy guard failed: missing credential rejection marker." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "Kiro temporary upstream limit" "${policy}"; then
+        echo "Kiro sidecar error policy guard failed: missing temporary limit marker." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "HandleKiroSidecarUpstreamError" "${handler}"; then
+        echo "Kiro sidecar error policy guard failed: sidecar failover path must apply account health policy." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "TestRateLimitService_HandleUpstreamError_KiroWrappedAuth401SetsError" "${spec}"; then
+        echo "Kiro sidecar error policy guard failed: missing wrapped auth 401 regression test." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "TestRateLimitService_HandleUpstreamError_KiroWrapped429TempUnschedules" "${spec}"; then
+        echo "Kiro sidecar error policy guard failed: missing wrapped 429 regression test." >&2
+        return 1
+    fi
+}
+
 assert_hfc_prod_fixset_marker() {
-    local dockerfile="${REPO_ROOT}/Dockerfile"
+    local dockerfile="$1"
 
     for marker in \
         "/app/.hfc-prod-fixset-20260524" \
@@ -204,6 +250,7 @@ main() {
     local image="${SUB2API_IMAGE:-${IMAGE:-}}"
     local repository
     local tag
+    local dockerfile
 
     if [[ $# -gt 0 && "$1" != -* ]]; then
         image="$1"
@@ -218,16 +265,19 @@ main() {
         read -r repository tag < <(parse_image_ref "${image}")
     fi
 
+    dockerfile="$(resolve_build_dockerfile)"
+
     assert_account_test_modal_initial_load_guard
     assert_account_stats_modal_initial_load_guard
     assert_group_available_account_count_guard
-    assert_hfc_prod_fixset_marker
+    assert_kiro_sidecar_error_policy_guard
+    assert_hfc_prod_fixset_marker "${dockerfile}"
 
     SUB2API_BUILD_IMAGE_SH=1 docker build -t "${image}" \
         --build-arg GOPROXY=https://goproxy.cn,direct \
         --build-arg GOSUMDB=sum.golang.google.cn \
         "$@" \
-        -f "${REPO_ROOT}/Dockerfile" \
+        -f "${dockerfile}" \
         "${REPO_ROOT}"
 
     cleanup_old_feature_images "${repository}" "${tag}"

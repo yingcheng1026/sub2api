@@ -180,6 +180,61 @@ func TestRateLimitService_HandleUpstreamError_NonOAuth401(t *testing.T) {
 	require.Empty(t, invalidator.accounts)
 }
 
+func TestRateLimitService_HandleUpstreamError_KiroWrappedAuth401SetsError(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       103,
+		Platform: PlatformKiro,
+		Type:     AccountTypeAPIKey,
+	}
+	body := []byte(`{"error":"kiro auth HTTP 401: {\"message\":\"Bad credentials\"}"}`)
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, http.StatusBadGateway, http.Header{}, body)
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 1, repo.setErrorCalls)
+	require.Equal(t, 0, repo.tempCalls)
+	require.Contains(t, repo.lastErrorMsg, "Kiro API credential rejected")
+	require.Contains(t, repo.lastErrorMsg, "upstream HTTP 401")
+	require.Contains(t, repo.lastErrorMsg, "Bad credentials")
+}
+
+func TestRateLimitService_HandleUpstreamError_KiroWrapped429TempUnschedules(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       85,
+		Platform: PlatformKiro,
+		Type:     AccountTypeAPIKey,
+	}
+	body := []byte(`{"error":"Kiro AmazonQ HTTP 429 suspicious activity temporary limits"}`)
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, http.StatusBadGateway, http.Header{}, body)
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 0, repo.setErrorCalls)
+	require.Equal(t, 1, repo.tempCalls)
+	require.Contains(t, repo.lastTempReason, "Kiro temporary upstream limit")
+	require.Contains(t, repo.lastTempReason, "upstream HTTP 429")
+}
+
+func TestRateLimitService_HandleUpstreamError_KiroGeneric502DoesNotDisable(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       152,
+		Platform: PlatformKiro,
+		Type:     AccountTypeAPIKey,
+	}
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, http.StatusBadGateway, http.Header{}, []byte(`{"error":"temporary upstream failed"}`))
+
+	require.False(t, shouldDisable)
+	require.Equal(t, 0, repo.setErrorCalls)
+	require.Equal(t, 0, repo.tempCalls)
+}
+
 func TestRateLimitService_HandleUpstreamError_OAuth401UsesCredentialsUpdater(t *testing.T) {
 	repo := &rateLimitAccountRepoStub{
 		mockAccountRepoForGemini: mockAccountRepoForGemini{
