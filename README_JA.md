@@ -456,10 +456,10 @@ default:
 `config.yaml` では追加のセキュリティ関連オプションも利用できます:
 
 - `cors.allowed_origins` - CORS 許可リスト
-- `security.url_allowlist` - 上流/価格/CRS ホストの許可リスト
-- `security.url_allowlist.enabled` - URL バリデーションの無効化（注意して使用）
+- `security.url_allowlist` - 価格/CRS ホストの許可リスト。上流アカウントの `base_url` にはホスト許可リストを適用しません
+- `security.url_allowlist.enabled` - 価格/CRS ホストバリデーションの無効化（注意して使用）
 - `security.url_allowlist.allow_insecure_http` - バリデーション無効時に HTTP URL を許可
-- `security.url_allowlist.allow_private_hosts` - プライベート/ローカル IP アドレスを許可
+- `security.url_allowlist.allow_private_hosts` - 価格/CRS URL バリデーションでプライベート/ローカル IP アドレスを許可
 - `security.response_headers.enabled` - 設定可能なレスポンスヘッダーフィルタリングを有効化（無効時はデフォルトの許可リストを使用）
 - `security.csp` - Content-Security-Policy ヘッダーの制御
 - `billing.circuit_breaker` - 課金エラー時にフェイルクローズ
@@ -468,7 +468,7 @@ default:
 
 **⚠️ セキュリティ警告: HTTP URL 設定**
 
-`security.url_allowlist.enabled=false` の場合、システムはデフォルトで最小限の URL バリデーションを行い、**HTTP URL を拒否**して HTTPS のみを許可します。HTTP URL を許可するには（開発環境や内部テスト用など）、以下を明示的に設定する必要があります:
+上流アカウントの `base_url` はホスト許可リストではなく最小限の URL バリデーションのみを行います。HTTP URL は `security.url_allowlist.allow_insecure_http` で制御します。信頼できない公開環境では `false` のままにし、開発環境や信頼済みの内部上流でのみ `true` にしてください:
 
 ```yaml
 security:

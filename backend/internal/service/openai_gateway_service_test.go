@@ -1707,7 +1707,7 @@ func TestOpenAIValidateUpstreamBaseURLDisabledAllowsHTTP(t *testing.T) {
 	}
 }
 
-func TestOpenAIValidateUpstreamBaseURLEnabledEnforcesAllowlist(t *testing.T) {
+func TestOpenAIValidateUpstreamBaseURLEnabledDoesNotEnforceHostAllowlist(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			URLAllowlist: config.URLAllowlistConfig{
@@ -1721,8 +1721,8 @@ func TestOpenAIValidateUpstreamBaseURLEnabledEnforcesAllowlist(t *testing.T) {
 	if _, err := svc.validateUpstreamBaseURL("https://example.com"); err != nil {
 		t.Fatalf("expected allowlisted host to pass, got %v", err)
 	}
-	if _, err := svc.validateUpstreamBaseURL("https://evil.com"); err == nil {
-		t.Fatalf("expected non-allowlisted host to fail")
+	if _, err := svc.validateUpstreamBaseURL("https://evil.com"); err != nil {
+		t.Fatalf("expected custom upstream host to pass without host allowlist, got %v", err)
 	}
 }
 

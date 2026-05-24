@@ -457,10 +457,10 @@ default:
 Additional security-related options are available in `config.yaml`:
 
 - `cors.allowed_origins` for CORS allowlist
-- `security.url_allowlist` for upstream/pricing/CRS host allowlists
-- `security.url_allowlist.enabled` to disable URL validation (use with caution)
+- `security.url_allowlist` for pricing/CRS host allowlists; upstream account `base_url` values are not host-allowlisted
+- `security.url_allowlist.enabled` to disable pricing/CRS host validation (use with caution)
 - `security.url_allowlist.allow_insecure_http` to allow HTTP URLs when validation is disabled
-- `security.url_allowlist.allow_private_hosts` to allow private/local IP addresses
+- `security.url_allowlist.allow_private_hosts` to allow private/local IP addresses in pricing/CRS URL validation
 - `security.response_headers.enabled` to enable configurable response header filtering (disabled uses default allowlist)
 - `security.csp` to control Content-Security-Policy headers
 - `billing.circuit_breaker` to fail closed on billing errors
@@ -469,12 +469,12 @@ Additional security-related options are available in `config.yaml`:
 
 **⚠️ Security Warning: HTTP URL Configuration**
 
-When `security.url_allowlist.enabled=false`, the system performs minimal URL validation by default, **rejecting HTTP URLs** and only allowing HTTPS. To allow HTTP URLs (e.g., for development or internal testing), you must explicitly set:
+Upstream account `base_url` values use minimal URL validation instead of a host allowlist. HTTP URLs are controlled by `security.url_allowlist.allow_insecure_http`; keep it `false` for untrusted public deployments, and set it to `true` only for development or trusted internal upstreams:
 
 ```yaml
 security:
   url_allowlist:
-    enabled: false                # Disable allowlist checks
+    enabled: false                # Disable pricing/CRS allowlist checks
     allow_insecure_http: true     # Allow HTTP URLs (⚠️ INSECURE)
 ```
 
