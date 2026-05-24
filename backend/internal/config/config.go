@@ -578,7 +578,9 @@ type SecurityConfig struct {
 }
 
 type URLAllowlistConfig struct {
-	Enabled           bool     `mapstructure:"enabled"`
+	Enabled bool `mapstructure:"enabled"`
+	// UpstreamHosts is retained for backward-compatible config parsing.
+	// Upstream account base_url values are no longer host-allowlisted.
 	UpstreamHosts     []string `mapstructure:"upstream_hosts"`
 	PricingHosts      []string `mapstructure:"pricing_hosts"`
 	CRSHosts          []string `mapstructure:"crs_hosts"`
@@ -1421,7 +1423,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 
 	if !cfg.Security.URLAllowlist.Enabled {
-		slog.Warn("security.url_allowlist.enabled=false; allowlist/SSRF checks disabled (minimal format validation only).")
+		slog.Warn("security.url_allowlist.enabled=false; pricing/CRS allowlist checks disabled. Upstream account base_url uses minimal format validation.")
 	}
 	if !cfg.Security.ResponseHeaders.Enabled {
 		slog.Warn("security.response_headers.enabled=false; configurable header filtering disabled (default allowlist only).")

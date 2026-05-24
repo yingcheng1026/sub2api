@@ -489,10 +489,10 @@ gateway:
 `config.yaml` 还支持以下安全相关配置：
 
 - `cors.allowed_origins` 配置 CORS 白名单
-- `security.url_allowlist` 配置上游/价格数据/CRS 主机白名单
-- `security.url_allowlist.enabled` 可关闭 URL 校验（慎用）
+- `security.url_allowlist` 配置价格数据/CRS 主机白名单；上游账号 `base_url` 不再做主机白名单限制
+- `security.url_allowlist.enabled` 可关闭价格数据/CRS 主机校验（慎用）
 - `security.url_allowlist.allow_insecure_http` 关闭校验时允许 HTTP URL
-- `security.url_allowlist.allow_private_hosts` 允许私有/本地 IP 地址
+- `security.url_allowlist.allow_private_hosts` 在价格数据/CRS URL 校验中允许私有/本地 IP 地址
 - `security.response_headers.enabled` 可启用可配置响应头过滤（关闭时使用默认白名单）
 - `security.csp` 配置 Content-Security-Policy
 - `billing.circuit_breaker` 计费异常时 fail-closed
@@ -509,12 +509,12 @@ gateway:
 
 **⚠️ 安全警告：HTTP URL 配置**
 
-当 `security.url_allowlist.enabled=false` 时，系统默认执行最小 URL 校验，**拒绝 HTTP URL**，仅允许 HTTPS。要允许 HTTP URL（例如用于开发或内网测试），必须显式设置：
+上游账号 `base_url` 只做最小 URL 校验，不再走主机白名单。HTTP URL 由 `security.url_allowlist.allow_insecure_http` 控制；公开不可信部署建议保持 `false`，只有开发环境或可信内网上游才设为 `true`：
 
 ```yaml
 security:
   url_allowlist:
-    enabled: false                # 禁用白名单检查
+    enabled: false                # 禁用价格数据/CRS 白名单检查
     allow_insecure_http: true     # 允许 HTTP URL（⚠️ 不安全）
 ```
 

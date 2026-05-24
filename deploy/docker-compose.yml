@@ -127,13 +127,13 @@ services:
       # =======================================================================
       # Security Configuration (URL Allowlist)
       # =======================================================================
-      # Enable URL allowlist validation (false to skip allowlist checks)
+      # Enable pricing/CRS URL allowlist validation (upstream base_url is not host-allowlisted)
       - SECURITY_URL_ALLOWLIST_ENABLED=${SECURITY_URL_ALLOWLIST_ENABLED:-false}
       # Allow insecure HTTP URLs when allowlist is disabled (default: false, requires https)
       - SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=${SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP:-false}
-      # Allow private IP addresses for upstream/pricing/CRS (for internal deployments)
+      # Allow private IP addresses for pricing/CRS URL validation (for internal deployments)
       - SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=${SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS:-false}
-      # Upstream hosts whitelist (comma-separated, only used when enabled=true)
+      # Legacy upstream hosts whitelist (retained for config compatibility; not enforced for account base_url)
       - SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS=${SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS:-}
 
       # =======================================================================
