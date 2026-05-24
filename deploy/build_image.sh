@@ -191,7 +191,8 @@ assert_hfc_prod_fixset_marker() {
         "/app/.hfc-prod-fixset-20260524" \
         "monthly-cover-empty-guard=402ce708" \
         "account-stats-modal-guard=6cc80e62" \
-        "group-availability-count=20260524"; do
+        "group-availability-count=20260524" \
+        "monthly-covered-exclusive-bind=20260524"; do
         if ! grep -Fq "${marker}" "${dockerfile}"; then
             echo "Production fixset marker guard failed: missing ${marker} in Dockerfile." >&2
             return 1

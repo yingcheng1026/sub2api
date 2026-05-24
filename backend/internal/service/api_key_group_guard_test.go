@@ -63,6 +63,19 @@ func (r *apiKeyGroupGuardGroupRepo) GetAccountCount(context.Context, int64) (int
 	return r.total, r.active, nil
 }
 
+type apiKeyGroupGuardCoveringSubRepo struct {
+	userSubRepoNoop
+	coveredGroupID int64
+}
+
+func (r apiKeyGroupGuardCoveringSubRepo) GetActiveByPlanCoveringGroup(_ context.Context, userID, groupID int64) (*UserSubscription, error) {
+	if groupID != r.coveredGroupID {
+		return nil, ErrSubscriptionNotFound
+	}
+	primaryGroupID := int64(16)
+	return &UserSubscription{ID: 104, UserID: userID, GroupID: &primaryGroupID}, nil
+}
+
 type apiKeyGroupGuardSink struct {
 	events []*logger.LogEvent
 }
@@ -122,6 +135,34 @@ func TestAPIKeyServiceCreateRejectsGroupWithoutAvailableAccounts(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no available accounts")
 	require.Nil(t, repo.created)
+}
+
+func TestAPIKeyServiceUpdateAllowsMonthlyCoveredExclusiveStandardGroup(t *testing.T) {
+	oldGroupID := int64(3)
+	targetGroupID := int64(2)
+	repo := &apiKeyGroupGuardRepo{
+		key: &APIKey{ID: 250, UserID: 94, Key: "sk-test", GroupID: &oldGroupID, Status: StatusActive},
+	}
+	svc := NewAPIKeyService(
+		repo,
+		apiKeyGroupGuardUserRepo{user: &User{ID: 94, Role: RoleUser}},
+		&apiKeyGroupGuardGroupRepo{
+			group:  &Group{ID: targetGroupID, Status: StatusActive, SubscriptionType: SubscriptionTypeStandard, IsExclusive: true},
+			total:  2,
+			active: 2,
+		},
+		apiKeyGroupGuardCoveringSubRepo{coveredGroupID: targetGroupID},
+		nil,
+		nil,
+		&config.Config{},
+	)
+
+	got, err := svc.Update(context.Background(), 250, 94, UpdateAPIKeyRequest{GroupID: &targetGroupID})
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, repo.updated)
+	require.Equal(t, targetGroupID, *repo.updated.GroupID)
 }
 
 func TestAPIKeyServiceUpdateAuditsSuccessfulGroupChange(t *testing.T) {
