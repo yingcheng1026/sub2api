@@ -169,6 +169,36 @@ assert_account_stats_modal_initial_load_guard() {
     fi
 }
 
+assert_group_available_account_count_guard() {
+    local repo="${REPO_ROOT}/backend/internal/repository/group_repo.go"
+    local spec="${REPO_ROOT}/backend/internal/repository/group_repo_integration_test.go"
+
+    if ! grep -Fq "a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until <= NOW()" "${repo}"; then
+        echo "Group account availability guard failed: active account count must exclude temporarily unavailable accounts." >&2
+        return 1
+    fi
+
+    if ! grep -q "TestGetAccountCount_ActiveExcludesTemporarilyUnavailableAccounts" "${spec}"; then
+        echo "Group account availability guard failed: missing regression test." >&2
+        return 1
+    fi
+}
+
+assert_hfc_prod_fixset_marker() {
+    local dockerfile="${REPO_ROOT}/Dockerfile"
+
+    for marker in \
+        "/app/.hfc-prod-fixset-20260524" \
+        "monthly-cover-empty-guard=402ce708" \
+        "account-stats-modal-guard=6cc80e62" \
+        "group-availability-count=20260524"; do
+        if ! grep -Fq "${marker}" "${dockerfile}"; then
+            echo "Production fixset marker guard failed: missing ${marker} in Dockerfile." >&2
+            return 1
+        fi
+    done
+}
+
 main() {
     local image="${SUB2API_IMAGE:-${IMAGE:-}}"
     local repository
@@ -189,6 +219,8 @@ main() {
 
     assert_account_test_modal_initial_load_guard
     assert_account_stats_modal_initial_load_guard
+    assert_group_available_account_count_guard
+    assert_hfc_prod_fixset_marker
 
     SUB2API_BUILD_IMAGE_SH=1 docker build -t "${image}" \
         --build-arg GOPROXY=https://goproxy.cn,direct \

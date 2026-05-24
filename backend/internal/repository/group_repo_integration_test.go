@@ -635,6 +635,48 @@ func (s *GroupRepoSuite) TestGetAccountCount() {
 	s.Require().Equal(int64(2), count)
 }
 
+func (s *GroupRepoSuite) TestGetAccountCount_ActiveExcludesTemporarilyUnavailableAccounts() {
+	group := &service.Group{
+		Name:             "g-count-unavailable",
+		Platform:         service.PlatformOpenAI,
+		RateMultiplier:   1.0,
+		IsExclusive:      false,
+		Status:           service.StatusActive,
+		SubscriptionType: service.SubscriptionTypeStandard,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, group))
+
+	insertAccount := func(name string, updates string) int64 {
+		var id int64
+		s.Require().NoError(scanSingleRow(
+			s.ctx,
+			s.tx,
+			"INSERT INTO accounts (name, platform, type) VALUES ($1, $2, $3) RETURNING id",
+			[]any{name, service.PlatformOpenAI, service.AccountTypeOAuth},
+			&id,
+		))
+		if updates != "" {
+			_, err := s.tx.ExecContext(s.ctx, "UPDATE accounts SET "+updates+" WHERE id = $1", id)
+			s.Require().NoError(err)
+		}
+		_, err := s.tx.ExecContext(s.ctx, "INSERT INTO account_groups (account_id, group_id, priority, created_at) VALUES ($1, $2, $3, NOW())", id, group.ID, id)
+		s.Require().NoError(err)
+		return id
+	}
+
+	insertAccount("available", "")
+	insertAccount("rate-limited", "rate_limit_reset_at = NOW() + INTERVAL '1 hour'")
+	insertAccount("overloaded", "overload_until = NOW() + INTERVAL '1 hour'")
+	insertAccount("temporarily-paused", "temp_unschedulable_until = NOW() + INTERVAL '1 hour'")
+	insertAccount("not-schedulable", "schedulable = false")
+	insertAccount("error", "status = 'error'")
+
+	total, active, err := s.repo.GetAccountCount(s.ctx, group.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(int64(6), total)
+	s.Require().Equal(int64(1), active)
+}
+
 func (s *GroupRepoSuite) TestGetAccountCount_Empty() {
 	group := &service.Group{
 		Name:             "g-empty",

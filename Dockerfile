@@ -136,8 +136,14 @@ WORKDIR /app
 COPY --from=backend-builder --chown=sub2api:sub2api /app/sub2api /app/sub2api
 COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources
 
-# Create data directory
-RUN mkdir -p /app/data && chown sub2api:sub2api /app/data
+# Create data directory and stamp the production fix set required by compose health checks.
+RUN mkdir -p /app/data && \
+    printf '%s\n' \
+        'monthly-cover-empty-guard=402ce708' \
+        'account-stats-modal-guard=6cc80e62' \
+        'group-availability-count=20260524' \
+        > /app/.hfc-prod-fixset-20260524 && \
+    chown sub2api:sub2api /app/data /app/.hfc-prod-fixset-20260524
 
 # Copy entrypoint script (fixes volume permissions then drops to sub2api)
 COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
@@ -148,7 +154,11 @@ EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/health || exit 1
+    CMD test -f /app/.hfc-prod-fixset-20260524 \
+        && grep -q 'monthly-cover-empty-guard=402ce708' /app/.hfc-prod-fixset-20260524 \
+        && grep -q 'account-stats-modal-guard=6cc80e62' /app/.hfc-prod-fixset-20260524 \
+        && grep -q 'group-availability-count=20260524' /app/.hfc-prod-fixset-20260524 \
+        && wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/health || exit 1
 
 # Run the application (entrypoint fixes /app/data ownership then execs as sub2api)
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
