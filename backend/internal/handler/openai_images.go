@@ -80,12 +80,19 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		zap.Bool("multipart", parsed.Multipart),
 		zap.String("capability", string(parsed.RequiredCapability)),
 	)
+	safetyIdentifier := service.BuildOpenAIImageSafetyIdentifier(subject.UserID, apiKey.ID, apiKey.GroupID)
+
+	if safetyErr := service.ValidateOpenAIImagesSafetyRequest(parsed); safetyErr != nil {
+		h.recordImageSafetyPolicyBlock(c, apiKey, subject, parsed, safetyIdentifier, safetyErr.PolicyRule, safetyErr.Message, safetyErr.StatusCode)
+		h.errorResponse(c, safetyErr.StatusCode, safetyErr.Type, safetyErr.Message)
+		return
+	}
 
 	if !service.GroupAllowsImageGeneration(apiKey.Group) {
 		h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
 	}
-	if decision := h.checkContentModeration(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIImages, parsed.Model, parsed.ModerationBody()); decision != nil && decision.Blocked {
+	if decision := h.checkImageContentModeration(c, reqLog, apiKey, subject, parsed.Model, parsed.ModerationBody(), safetyIdentifier); decision != nil && decision.Blocked {
 		h.errorResponse(c, contentModerationStatus(decision), contentModerationErrorCode(decision), decision.Message)
 		return
 	}
@@ -193,7 +200,16 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
 		forwardStart := time.Now()
-		result, err := h.gatewayService.ForwardImages(c.Request.Context(), c, account, body, parsed, channelMapping.MappedModel)
+		result, err := h.gatewayService.ForwardImages(
+			c.Request.Context(),
+			c,
+			account,
+			body,
+			parsed,
+			channelMapping.MappedModel,
+			service.WithOpenAIImagesSafetyIdentifier(safetyIdentifier),
+			service.WithOpenAIImagesOutputAuditor(h.openAIImageOutputAuditor(c, apiKey, subject, parsed, safetyIdentifier)),
+		)
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
@@ -208,7 +224,28 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
-			if result != nil && result.ImageCount > 0 {
+			var outputAuditErr *service.OpenAIImageOutputAuditError
+			if errors.As(err, &outputAuditErr) {
+				decision := outputAuditErr.Decision
+				if decision == nil {
+					decision = &service.ContentModerationDecision{
+						Blocked:    true,
+						Message:    "Image safety review is temporarily unavailable",
+						StatusCode: http.StatusServiceUnavailable,
+						Action:     service.ContentModerationActionError,
+					}
+				}
+				if !c.Writer.Written() {
+					h.errorResponse(c, contentModerationStatus(decision), contentModerationErrorCode(decision), decision.Message)
+				}
+				reqLog.Warn("openai.images.output_audit_blocked",
+					zap.Int64("account_id", account.ID),
+					zap.Int("image_count", resultImageCount(result)),
+					zap.String("policy_rule", decision.PolicyRule),
+					zap.String("action", decision.Action),
+					zap.Error(err),
+				)
+			} else if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.images.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
 					zap.Int("image_count", result.ImageCount),
@@ -325,4 +362,57 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 
 func isMultipartImagesContentType(contentType string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/form-data")
+}
+
+func (h *OpenAIGatewayHandler) recordImageSafetyPolicyBlock(c *gin.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, parsed *service.OpenAIImagesRequest, safetyIdentifier string, policyRule string, message string, statusCode int) {
+	if h == nil || h.contentModerationService == nil || c == nil || parsed == nil {
+		return
+	}
+	input := buildContentModerationInput(c, apiKey, subject, service.ContentModerationProtocolOpenAIImages, parsed.Model, parsed.ModerationBody())
+	input.Stage = service.ContentModerationStageInput
+	input.PolicyRule = strings.TrimSpace(policyRule)
+	input.SafetyIdentifier = strings.TrimSpace(safetyIdentifier)
+	h.contentModerationService.RecordPolicyBlock(c.Request.Context(), input, message, statusCode)
+}
+
+func (h *OpenAIGatewayHandler) openAIImageOutputAuditor(c *gin.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, parsed *service.OpenAIImagesRequest, safetyIdentifier string) service.OpenAIImageOutputAuditor {
+	return service.OpenAIImageOutputAuditorFunc(func(ctx context.Context, req service.OpenAIImageOutputAuditRequest) (*service.ContentModerationDecision, error) {
+		if h == nil || h.contentModerationService == nil {
+			return &service.ContentModerationDecision{
+				Allowed:    false,
+				Blocked:    true,
+				Message:    "Image safety review is temporarily unavailable",
+				StatusCode: http.StatusServiceUnavailable,
+				Action:     service.ContentModerationActionError,
+				PolicyRule: "moderation_service_unavailable",
+			}, nil
+		}
+		model := ""
+		if parsed != nil {
+			model = parsed.Model
+		}
+		input := buildContentModerationInput(c, apiKey, subject, service.ContentModerationProtocolOpenAIImages, model, req.ModerationBody)
+		input.Stage = service.ContentModerationStageOutput
+		input.FailClosed = true
+		input.PolicyRule = strings.TrimSpace(req.PolicyRule)
+		input.SafetyIdentifier = strings.TrimSpace(safetyIdentifier)
+		input.UpstreamRequestID = strings.TrimSpace(req.UpstreamRequestID)
+		input.OutputHashes = append([]string(nil), req.OutputHashes...)
+		if strings.TrimSpace(req.UnavailableReason) != "" {
+			input.FailClosedStatusCode = http.StatusServiceUnavailable
+			input.FailClosedMessage = "Image safety review is temporarily unavailable"
+			input.FailClosedError = req.UnavailableReason
+			if input.PolicyRule == "" {
+				input.PolicyRule = "output_audit_unavailable"
+			}
+		}
+		return h.contentModerationService.Check(ctx, input)
+	})
+}
+
+func resultImageCount(result *service.OpenAIForwardResult) int {
+	if result == nil {
+		return 0
+	}
+	return result.ImageCount
 }

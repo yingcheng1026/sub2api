@@ -47,3 +47,80 @@ func TestOpenAIGatewayHandlerImages_DisabledGroupRejectsBeforeScheduling(t *test
 	require.Equal(t, "permission_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
 	require.Contains(t, rec.Body.String(), service.ImageGenerationPermissionMessage())
 }
+
+func TestOpenAIGatewayHandlerImages_SafetyRequestGuardRejectsUnsafeParams(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		body       string
+		wantPolicy string
+		wantText   string
+	}{
+		{
+			name:       "stream",
+			body:       `{"model":"gpt-image-2","prompt":"draw","stream":true}`,
+			wantPolicy: "blocked_image_stream",
+			wantText:   "stream is disabled",
+		},
+		{
+			name:       "partial images",
+			body:       `{"model":"gpt-image-2","prompt":"draw","partial_images":1}`,
+			wantPolicy: "blocked_image_partial_images",
+			wantText:   "partial_images is disabled",
+		},
+		{
+			name:       "multi n",
+			body:       `{"model":"gpt-image-2","prompt":"draw","n":2}`,
+			wantPolicy: "blocked_image_multi_n",
+			wantText:   "n must be 1",
+		},
+		{
+			name:       "moderation low",
+			body:       `{"model":"gpt-image-2","prompt":"draw","moderation":"low"}`,
+			wantPolicy: "blocked_image_moderation_override",
+			wantText:   "moderation must be auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(tt.body)))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = req
+			groupID := int64(111)
+			c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+				ID:      222,
+				GroupID: &groupID,
+				Group: &service.Group{
+					ID:                   groupID,
+					AllowImageGeneration: true,
+				},
+				User: &service.User{ID: 333},
+			})
+			c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 333, Concurrency: 1})
+
+			repo := &contentModerationHandlerTestRepo{}
+			h := &OpenAIGatewayHandler{
+				gatewayService:           &service.OpenAIGatewayService{},
+				billingCacheService:      &service.BillingCacheService{},
+				apiKeyService:            &service.APIKeyService{},
+				contentModerationService: service.NewContentModerationService(nil, repo, nil, nil, nil, nil, nil),
+				concurrencyHelper:        &ConcurrencyHelper{concurrencyService: &service.ConcurrencyService{}},
+			}
+
+			h.Images(c)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Equal(t, "invalid_request_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+			require.Contains(t, rec.Body.String(), tt.wantText)
+			require.Len(t, repo.logs, 1)
+			require.Equal(t, tt.wantPolicy, repo.logs[0].PolicyRule)
+			require.True(t, repo.logs[0].Flagged)
+			require.Equal(t, service.ContentModerationActionBlock, repo.logs[0].Action)
+			require.NotEmpty(t, repo.logs[0].SafetyIdentifier)
+		})
+	}
+}

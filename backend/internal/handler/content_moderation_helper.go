@@ -27,6 +27,9 @@ func contentModerationStatus(decision *service.ContentModerationDecision) int {
 }
 
 func contentModerationErrorCode(decision *service.ContentModerationDecision) string {
+	if decision != nil && (decision.StatusCode >= http.StatusInternalServerError || decision.Action == service.ContentModerationActionError) {
+		return "api_error"
+	}
 	return "content_policy_violation"
 }
 
@@ -37,11 +40,37 @@ func (h *OpenAIGatewayHandler) checkContentModeration(c *gin.Context, reqLog *za
 	return runContentModeration(c, reqLog, h.contentModerationService, apiKey, subject, protocol, model, body)
 }
 
+func (h *OpenAIGatewayHandler) checkImageContentModeration(c *gin.Context, reqLog *zap.Logger, apiKey *service.APIKey, subject middleware2.AuthSubject, model string, body []byte, safetyIdentifier string) *service.ContentModerationDecision {
+	input := buildContentModerationInput(c, apiKey, subject, service.ContentModerationProtocolOpenAIImages, model, body)
+	input.Stage = service.ContentModerationStageInput
+	input.FailClosed = true
+	input.PolicyRule = "moderation_flagged_input"
+	input.SafetyIdentifier = strings.TrimSpace(safetyIdentifier)
+	if h == nil || h.contentModerationService == nil {
+		return &service.ContentModerationDecision{
+			Allowed:    false,
+			Blocked:    true,
+			Message:    "Image safety review is temporarily unavailable",
+			StatusCode: http.StatusServiceUnavailable,
+			Action:     service.ContentModerationActionError,
+			PolicyRule: "moderation_service_unavailable",
+		}
+	}
+	return runContentModerationInput(c, reqLog, h.contentModerationService, input, len(body))
+}
+
 func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.ContentModerationService, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) *service.ContentModerationDecision {
 	if svc == nil || c == nil || c.Request == nil {
 		return nil
 	}
 	input := buildContentModerationInput(c, apiKey, subject, protocol, model, body)
+	return runContentModerationInput(c, reqLog, svc, input, len(body))
+}
+
+func runContentModerationInput(c *gin.Context, reqLog *zap.Logger, svc *service.ContentModerationService, input service.ContentModerationCheckInput, bodyBytes int) *service.ContentModerationDecision {
+	if svc == nil || c == nil || c.Request == nil {
+		return nil
+	}
 	if reqLog != nil {
 		reqLog.Info("content_moderation.gateway_check_start",
 			zap.String("request_id", input.RequestID),
@@ -54,7 +83,10 @@ func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.Conte
 			zap.String("provider", input.Provider),
 			zap.String("protocol", input.Protocol),
 			zap.String("model", input.Model),
-			zap.Int("body_bytes", len(body)),
+			zap.String("stage", input.Stage),
+			zap.Bool("fail_closed", input.FailClosed),
+			zap.String("policy_rule", input.PolicyRule),
+			zap.Int("body_bytes", bodyBytes),
 		)
 	}
 	decision, err := svc.Check(c.Request.Context(), input)
@@ -71,6 +103,7 @@ func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.Conte
 			zap.Bool("blocked", decision.Blocked),
 			zap.Bool("flagged", decision.Flagged),
 			zap.String("action", decision.Action),
+			zap.String("policy_rule", decision.PolicyRule),
 			zap.Int("status_code", decision.StatusCode),
 			zap.String("highest_category", decision.HighestCategory),
 			zap.Float64("highest_score", decision.HighestScore),

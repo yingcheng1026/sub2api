@@ -43,6 +43,9 @@ const (
 	ContentModerationProtocolGemini            = "gemini"
 	ContentModerationProtocolOpenAIImages      = "openai_images"
 
+	ContentModerationStageInput  = "input"
+	ContentModerationStageOutput = "output"
+
 	defaultContentModerationBaseURL   = "https://api.openai.com"
 	defaultContentModerationModel     = "omni-moderation-latest"
 	defaultContentModerationTimeoutMS = 3000
@@ -58,6 +61,7 @@ const (
 	defaultContentModerationViolationWindowHours = 720
 	defaultContentModerationBlockHTTPStatus      = http.StatusForbidden
 	defaultContentModerationBlockMessage         = "内容审计命中风险规则，请调整输入后重试"
+	defaultContentModerationUnavailableMessage   = "Image safety review is temporarily unavailable"
 	defaultContentModerationRetryCount           = 2
 	maxContentModerationRetryCount               = 5
 	defaultContentModerationHitRetentionDays     = 180
@@ -243,18 +247,28 @@ type UpdateContentModerationConfigInput struct {
 }
 
 type ContentModerationCheckInput struct {
-	RequestID  string
-	UserID     int64
-	UserEmail  string
-	APIKeyID   int64
-	APIKeyName string
-	GroupID    *int64
-	GroupName  string
-	Endpoint   string
-	Provider   string
-	Model      string
-	Protocol   string
-	Body       []byte
+	RequestID            string
+	UserID               int64
+	UserEmail            string
+	APIKeyID             int64
+	APIKeyName           string
+	GroupID              *int64
+	GroupName            string
+	Endpoint             string
+	Provider             string
+	Model                string
+	Protocol             string
+	Body                 []byte
+	Stage                string
+	FailClosed           bool
+	FailClosedStatusCode int
+	FailClosedMessage    string
+	FailClosedError      string
+	PolicyRule           string
+	UpstreamRequestID    string
+	SafetyIdentifier     string
+	InputHash            string
+	OutputHashes         []string
 }
 
 type ContentModerationInput struct {
@@ -319,36 +333,45 @@ type ContentModerationDecision struct {
 	HighestScore    float64            `json:"highest_score"`
 	CategoryScores  map[string]float64 `json:"category_scores"`
 	Action          string             `json:"action"`
+	PolicyRule      string             `json:"policy_rule,omitempty"`
 }
 
 type ContentModerationLog struct {
-	ID                int64              `json:"id"`
-	RequestID         string             `json:"request_id"`
-	UserID            *int64             `json:"user_id,omitempty"`
-	UserEmail         string             `json:"user_email"`
-	APIKeyID          *int64             `json:"api_key_id,omitempty"`
-	APIKeyName        string             `json:"api_key_name"`
-	GroupID           *int64             `json:"group_id,omitempty"`
-	GroupName         string             `json:"group_name"`
-	Endpoint          string             `json:"endpoint"`
-	Provider          string             `json:"provider"`
-	Model             string             `json:"model"`
-	Mode              string             `json:"mode"`
-	Action            string             `json:"action"`
-	Flagged           bool               `json:"flagged"`
-	HighestCategory   string             `json:"highest_category"`
-	HighestScore      float64            `json:"highest_score"`
-	CategoryScores    map[string]float64 `json:"category_scores"`
-	ThresholdSnapshot map[string]float64 `json:"threshold_snapshot"`
-	InputExcerpt      string             `json:"input_excerpt"`
-	UpstreamLatencyMS *int               `json:"upstream_latency_ms,omitempty"`
-	Error             string             `json:"error"`
-	ViolationCount    int                `json:"violation_count"`
-	AutoBanned        bool               `json:"auto_banned"`
-	EmailSent         bool               `json:"email_sent"`
-	UserStatus        string             `json:"user_status"`
-	QueueDelayMS      *int               `json:"queue_delay_ms,omitempty"`
-	CreatedAt         time.Time          `json:"created_at"`
+	ID                        int64               `json:"id"`
+	RequestID                 string              `json:"request_id"`
+	UserID                    *int64              `json:"user_id,omitempty"`
+	UserEmail                 string              `json:"user_email"`
+	APIKeyID                  *int64              `json:"api_key_id,omitempty"`
+	APIKeyName                string              `json:"api_key_name"`
+	GroupID                   *int64              `json:"group_id,omitempty"`
+	GroupName                 string              `json:"group_name"`
+	Endpoint                  string              `json:"endpoint"`
+	Provider                  string              `json:"provider"`
+	Model                     string              `json:"model"`
+	Stage                     string              `json:"stage"`
+	Mode                      string              `json:"mode"`
+	Action                    string              `json:"action"`
+	Flagged                   bool                `json:"flagged"`
+	HighestCategory           string              `json:"highest_category"`
+	HighestScore              float64             `json:"highest_score"`
+	CategoryScores            map[string]float64  `json:"category_scores"`
+	CategoryFlags             map[string]bool     `json:"category_flags"`
+	CategoryAppliedInputTypes map[string][]string `json:"category_applied_input_types"`
+	ThresholdSnapshot         map[string]float64  `json:"threshold_snapshot"`
+	InputHash                 string              `json:"input_hash"`
+	OutputHashes              []string            `json:"output_hashes"`
+	PolicyRule                string              `json:"policy_rule"`
+	UpstreamRequestID         string              `json:"upstream_request_id"`
+	SafetyIdentifier          string              `json:"safety_identifier"`
+	InputExcerpt              string              `json:"input_excerpt"`
+	UpstreamLatencyMS         *int                `json:"upstream_latency_ms,omitempty"`
+	Error                     string              `json:"error"`
+	ViolationCount            int                 `json:"violation_count"`
+	AutoBanned                bool                `json:"auto_banned"`
+	EmailSent                 bool                `json:"email_sent"`
+	UserStatus                string              `json:"user_status"`
+	QueueDelayMS              *int                `json:"queue_delay_ms,omitempty"`
+	CreatedAt                 time.Time           `json:"created_at"`
 }
 
 type ContentModerationLogFilter struct {
@@ -676,6 +699,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"group_id", contentModerationLogGroupID(input.GroupID),
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol)
+		if input.FailClosed {
+			return buildContentModerationFailClosedDecision(input, nil, ContentModerationActionError, "moderation_service_unavailable", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, "content moderation service unavailable"), nil
+		}
 		return allow, nil
 	}
 	if !s.isRiskControlEnabled(ctx) {
@@ -685,6 +711,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"group_id", contentModerationLogGroupID(input.GroupID),
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol)
+		if input.FailClosed {
+			return s.recordFailClosedDecision(ctx, input, nil, ContentModerationActionError, "risk_control_disabled", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, "risk control is disabled")
+		}
 		return allow, nil
 	}
 	cfg, err := s.loadConfig(ctx)
@@ -696,6 +725,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol,
 			"error", err)
+		if input.FailClosed {
+			return s.recordFailClosedDecision(ctx, input, nil, ContentModerationActionError, "moderation_config_load_failed", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, err.Error())
+		}
 		return allow, nil
 	}
 	inScope := cfg.includesGroup(input.GroupID)
@@ -724,6 +756,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"group_id", contentModerationLogGroupID(input.GroupID),
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol)
+		if input.FailClosed {
+			return s.recordFailClosedDecision(ctx, input, cfg, ContentModerationActionError, "moderation_config_disabled", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, "content moderation config is disabled")
+		}
 		return allow, nil
 	}
 	if cfg.Mode == ContentModerationModeOff {
@@ -733,6 +768,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"group_id", contentModerationLogGroupID(input.GroupID),
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol)
+		if input.FailClosed {
+			return s.recordFailClosedDecision(ctx, input, cfg, ContentModerationActionError, "moderation_mode_off", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, "content moderation mode is off")
+		}
 		return allow, nil
 	}
 	if !inScope {
@@ -745,6 +783,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"protocol", input.Protocol,
 			"all_groups", cfg.AllGroups,
 			"configured_group_ids", cfg.GroupIDs)
+		if input.FailClosed {
+			return s.recordFailClosedDecision(ctx, input, cfg, ContentModerationActionError, "moderation_group_out_of_scope", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, "content moderation group is out of scope")
+		}
 		return allow, nil
 	}
 	content := ExtractContentModerationInput(input.Protocol, input.Body)
@@ -756,9 +797,26 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol,
 			"body_bytes", len(input.Body))
+		if input.FailClosed {
+			status := input.FailClosedStatusCode
+			message := input.FailClosedMessage
+			errText := input.FailClosedError
+			if status == 0 {
+				status = http.StatusForbidden
+			}
+			if strings.TrimSpace(message) == "" {
+				message = cfg.BlockMessage
+			}
+			if strings.TrimSpace(errText) == "" {
+				errText = "content moderation input is empty"
+			}
+			return s.recordFailClosedDecision(ctx, input, cfg, ContentModerationActionError, "moderation_empty_input", status, message, errText)
+		}
 		return allow, nil
 	}
 	content.Normalize()
+	hashText := content.Hash()
+	input.InputHash = hashText
 	slog.Info("content_moderation.input_extracted",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
@@ -767,7 +825,6 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		"protocol", input.Protocol,
 		"text_runes", len([]rune(content.Text)),
 		"image_count", len(content.Images))
-	hashText := content.Hash()
 	if cfg.PreHashCheckEnabled && s.hashCache != nil {
 		matched, err := s.hashCache.HasFlaggedInputHash(ctx, hashText)
 		if err != nil {
@@ -793,10 +850,11 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 				StatusCode: cfg.BlockStatus,
 				InputHash:  hashText,
 				Action:     ContentModerationActionHashBlock,
+				PolicyRule: contentModerationPolicyRule(input.PolicyRule, "moderation_hash_block"),
 			}, nil
 		}
 	}
-	if !cfg.shouldSample(hashText) {
+	if !input.FailClosed && !cfg.shouldSample(hashText) {
 		slog.Info("content_moderation.skip_sample_rate",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
@@ -813,9 +871,12 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"group_id", contentModerationLogGroupID(input.GroupID),
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol)
+		if input.FailClosed {
+			return s.recordFailClosedDecision(ctx, input, cfg, ContentModerationActionError, "moderation_no_audit_api_keys", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, "no moderation api key available")
+		}
 		return allow, nil
 	}
-	if cfg.Mode == ContentModerationModeObserve {
+	if !input.FailClosed && cfg.Mode == ContentModerationModeObserve {
 		slog.Info("content_moderation.enqueue_observe",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
@@ -828,6 +889,65 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	}
 
 	return s.checkSync(ctx, input, cfg, content, hashText, nil, true), nil
+}
+
+func (s *ContentModerationService) RecordPolicyBlock(ctx context.Context, input ContentModerationCheckInput, message string, statusCode int) *ContentModerationDecision {
+	cfg := defaultContentModerationConfig()
+	if s != nil && s.settingRepo != nil {
+		if loaded, err := s.loadConfig(ctx); err == nil && loaded != nil {
+			cfg = loaded
+		}
+	}
+	if statusCode == 0 {
+		statusCode = http.StatusForbidden
+	}
+	if strings.TrimSpace(message) == "" {
+		message = cfg.BlockMessage
+	}
+	content := ExtractContentModerationInput(input.Protocol, input.Body)
+	content.Normalize()
+	input.InputHash = content.Hash()
+	rule := contentModerationPolicyRule(input.PolicyRule, "local_policy_block")
+	if s != nil && s.repo != nil {
+		log := s.buildLog(input, cfg, ContentModerationActionBlock, true, "", 0, nil, content.ExcerptText(), nil, nil, "")
+		log.InputHash = input.InputHash
+		log.PolicyRule = rule
+		s.applyFlaggedSideEffects(ctx, cfg, log)
+		_ = s.repo.CreateLog(ctx, log)
+	}
+	return &ContentModerationDecision{
+		Allowed:    false,
+		Blocked:    true,
+		Flagged:    true,
+		Message:    message,
+		StatusCode: statusCode,
+		InputHash:  input.InputHash,
+		Action:     ContentModerationActionBlock,
+		PolicyRule: rule,
+	}
+}
+
+func (s *ContentModerationService) recordFailClosedDecision(ctx context.Context, input ContentModerationCheckInput, cfg *ContentModerationConfig, action string, fallbackRule string, statusCode int, message string, errText string) (*ContentModerationDecision, error) {
+	if cfg == nil {
+		cfg = defaultContentModerationConfig()
+	}
+	if input.FailClosedStatusCode > 0 {
+		statusCode = input.FailClosedStatusCode
+	}
+	if strings.TrimSpace(input.FailClosedMessage) != "" {
+		message = strings.TrimSpace(input.FailClosedMessage)
+	}
+	if strings.TrimSpace(input.FailClosedError) != "" {
+		errText = strings.TrimSpace(input.FailClosedError)
+	}
+	if strings.TrimSpace(input.FailClosedError) == "" && strings.TrimSpace(fallbackRule) != "" {
+		input.PolicyRule = fallbackRule
+	}
+	if s != nil && s.repo != nil {
+		log := s.buildLog(input, cfg, action, false, "", 0, nil, "", nil, nil, errText)
+		_ = s.repo.CreateLog(ctx, log)
+	}
+	return buildContentModerationFailClosedDecision(input, cfg, action, fallbackRule, statusCode, message, errText), nil
 }
 
 func (s *ContentModerationService) checkSync(ctx context.Context, input ContentModerationCheckInput, cfg *ContentModerationConfig, content ContentModerationInput, hashText string, queueDelay *int, allowBlock bool) *ContentModerationDecision {
@@ -850,17 +970,24 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		if queueDelay != nil {
 			s.asyncErrors.Add(1)
 		}
-		if cfg.RecordNonHits {
+		if cfg.RecordNonHits || input.FailClosed {
 			log := s.buildLog(input, cfg, ContentModerationActionError, false, "", 0, nil, content.ExcerptText(), &latency, queueDelay, err.Error())
+			log.InputHash = hashText
+			if input.FailClosed {
+				log.PolicyRule = "moderation_api_failed"
+			}
 			_ = s.repo.CreateLog(ctx, log)
+		}
+		if input.FailClosed {
+			return buildContentModerationFailClosedDecision(input, cfg, ContentModerationActionError, "moderation_api_failed", http.StatusServiceUnavailable, defaultContentModerationUnavailableMessage, err.Error())
 		}
 		return allow
 	}
 
-	flagged, highestCategory, highestScore := evaluateModerationScores(result.CategoryScores, cfg.Thresholds)
+	flagged, highestCategory, highestScore := evaluateModerationResult(result, cfg.Thresholds)
 	action := ContentModerationActionAllow
 	blocked := false
-	if allowBlock && flagged && cfg.Mode == ContentModerationModePreBlock {
+	if allowBlock && flagged && (cfg.Mode == ContentModerationModePreBlock || input.FailClosed) {
 		action = ContentModerationActionBlock
 		blocked = true
 	}
@@ -882,6 +1009,9 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 		"queue_delay_ms", queueDelay)
 	if flagged || cfg.RecordNonHits {
 		log := s.buildLog(input, cfg, action, flagged, highestCategory, highestScore, result.CategoryScores, content.ExcerptText(), &latency, queueDelay, "")
+		log.InputHash = hashText
+		log.CategoryFlags = cloneBoolMap(result.Categories)
+		log.CategoryAppliedInputTypes = cloneStringSliceMap(result.CategoryAppliedInputTypes)
 		if flagged && s.hashCache != nil {
 			if err := s.hashCache.RecordFlaggedInputHash(ctx, hashText); err != nil {
 				slog.Warn("content_moderation.record_hash_failed", "user_id", input.UserID, "endpoint", input.Endpoint, "error", err)
@@ -901,6 +1031,7 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 			HighestScore:    highestScore,
 			CategoryScores:  result.CategoryScores,
 			Action:          action,
+			PolicyRule:      contentModerationPolicyRule(input.PolicyRule, "moderation_flagged_"+contentModerationStage(input.Stage)),
 		}
 	}
 	return &ContentModerationDecision{
@@ -1334,6 +1465,7 @@ func (s *ContentModerationService) buildLog(input ContentModerationCheckInput, c
 		Endpoint:          input.Endpoint,
 		Provider:          input.Provider,
 		Model:             input.Model,
+		Stage:             contentModerationStage(input.Stage),
 		Mode:              cfg.Mode,
 		Action:            action,
 		Flagged:           flagged,
@@ -1341,6 +1473,11 @@ func (s *ContentModerationService) buildLog(input ContentModerationCheckInput, c
 		HighestScore:      highestScore,
 		CategoryScores:    cloneFloatMap(scores),
 		ThresholdSnapshot: cloneFloatMap(cfg.Thresholds),
+		InputHash:         normalizeContentModerationHash(input.InputHash),
+		OutputHashes:      cloneModerationStringSlice(input.OutputHashes),
+		PolicyRule:        contentModerationPolicyRule(input.PolicyRule, contentModerationDefaultPolicyRule(action, flagged, contentModerationStage(input.Stage))),
+		UpstreamRequestID: strings.TrimSpace(input.UpstreamRequestID),
+		SafetyIdentifier:  strings.TrimSpace(input.SafetyIdentifier),
 		InputExcerpt:      trimRunes(redactContentModerationSecrets(text), maxModerationExcerptRunes),
 		UpstreamLatencyMS: latency,
 		QueueDelayMS:      queueDelay,
@@ -1846,7 +1983,7 @@ func buildContentModerationTestAuditResult(result *moderationAPIResult, threshol
 		scores[category] = score
 	}
 	thresholdSnapshot := mergeContentModerationThresholds(ContentModerationDefaultThresholds(), thresholds)
-	flagged, highestCategory, highestScore := evaluateModerationScores(scores, thresholdSnapshot)
+	flagged, highestCategory, highestScore := evaluateModerationResult(result, thresholdSnapshot)
 	compositeScore := highestScore
 	return &ContentModerationTestAuditResult{
 		Flagged:         flagged,
@@ -1878,8 +2015,47 @@ type moderationAPIResponse struct {
 }
 
 type moderationAPIResult struct {
-	Flagged        bool               `json:"flagged"`
-	CategoryScores map[string]float64 `json:"category_scores"`
+	Flagged                   bool                `json:"flagged"`
+	Categories                map[string]bool     `json:"categories"`
+	CategoryScores            map[string]float64  `json:"category_scores"`
+	CategoryAppliedInputTypes map[string][]string `json:"category_applied_input_types"`
+}
+
+func evaluateModerationResult(result *moderationAPIResult, thresholds map[string]float64) (bool, string, float64) {
+	if result == nil {
+		return false, "", 0
+	}
+	flagged, highestCategory, highestScore := evaluateModerationScores(result.CategoryScores, thresholds)
+	for _, category := range contentModerationCategoryOrder {
+		if result.Categories[category] {
+			flagged = true
+			if score, ok := result.CategoryScores[category]; ok {
+				if score > highestScore || highestCategory == "" {
+					highestCategory = category
+					highestScore = score
+				}
+			} else if highestCategory == "" {
+				highestCategory = category
+				highestScore = 1
+			}
+		}
+	}
+	for category, categoryFlagged := range result.Categories {
+		if !categoryFlagged {
+			continue
+		}
+		flagged = true
+		if score, ok := result.CategoryScores[category]; ok {
+			if score > highestScore || highestCategory == "" {
+				highestCategory = category
+				highestScore = score
+			}
+		} else if highestCategory == "" {
+			highestCategory = category
+			highestScore = 1
+		}
+	}
+	return flagged, highestCategory, highestScore
 }
 
 func evaluateModerationScores(scores map[string]float64, thresholds map[string]float64) (bool, string, float64) {
@@ -1903,6 +2079,67 @@ func evaluateModerationScores(scores map[string]float64, thresholds map[string]f
 		}
 	}
 	return flagged, highestCategory, highestScore
+}
+
+func buildContentModerationFailClosedDecision(input ContentModerationCheckInput, cfg *ContentModerationConfig, action string, fallbackRule string, statusCode int, message string, errText string) *ContentModerationDecision {
+	if cfg == nil {
+		cfg = defaultContentModerationConfig()
+	}
+	if statusCode == 0 {
+		statusCode = http.StatusServiceUnavailable
+	}
+	if strings.TrimSpace(message) == "" {
+		if statusCode >= 500 {
+			message = defaultContentModerationUnavailableMessage
+		} else {
+			message = cfg.BlockMessage
+		}
+	}
+	rule := input.PolicyRule
+	if strings.TrimSpace(input.FailClosedError) == "" && strings.TrimSpace(fallbackRule) != "" {
+		rule = fallbackRule
+	}
+	return &ContentModerationDecision{
+		Allowed:    false,
+		Blocked:    true,
+		Flagged:    false,
+		Message:    strings.TrimSpace(message),
+		StatusCode: statusCode,
+		InputHash:  normalizeContentModerationHash(input.InputHash),
+		Action:     action,
+		PolicyRule: contentModerationPolicyRule(rule, fallbackRule),
+	}
+}
+
+func contentModerationStage(stage string) string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case ContentModerationStageOutput:
+		return ContentModerationStageOutput
+	default:
+		return ContentModerationStageInput
+	}
+}
+
+func contentModerationPolicyRule(rule string, fallback string) string {
+	rule = strings.TrimSpace(rule)
+	if rule != "" {
+		return rule
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func contentModerationDefaultPolicyRule(action string, flagged bool, stage string) string {
+	stage = contentModerationStage(stage)
+	switch {
+	case action == ContentModerationActionError:
+		return "moderation_error_" + stage
+	case action == ContentModerationActionHashBlock:
+		return "moderation_hash_block"
+	case flagged:
+		return "moderation_flagged_" + stage
+	default:
+		return ""
+	}
 }
 
 func mergeContentModerationThresholds(base map[string]float64, override map[string]float64) map[string]float64 {
@@ -2014,6 +2251,37 @@ func cloneFloatMap(in map[string]float64) map[string]float64 {
 	for k, v := range in {
 		out[k] = v
 	}
+	return out
+}
+
+func cloneBoolMap(in map[string]bool) map[string]bool {
+	if in == nil {
+		return map[string]bool{}
+	}
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneStringSliceMap(in map[string][]string) map[string][]string {
+	if in == nil {
+		return map[string][]string{}
+	}
+	out := make(map[string][]string, len(in))
+	for k, values := range in {
+		out[k] = cloneModerationStringSlice(values)
+	}
+	return out
+}
+
+func cloneModerationStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return []string{}
+	}
+	out := make([]string, len(in))
+	copy(out, in)
 	return out
 }
 

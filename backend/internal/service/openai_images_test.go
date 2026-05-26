@@ -332,6 +332,54 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_RejectsNonImageModel(t *te
 	require.ErrorContains(t, err, `images endpoint requires an image model, got "gpt-5.4"`)
 }
 
+func TestValidateOpenAIImagesSafetyRequest_RejectsP0UnsafeOptions(t *testing.T) {
+	partialImages := 1
+	tests := []struct {
+		name       string
+		req        *OpenAIImagesRequest
+		wantRule   string
+		wantStatus int
+	}{
+		{
+			name:       "stream",
+			req:        &OpenAIImagesRequest{Stream: true, N: 1},
+			wantRule:   "blocked_image_stream",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "partial images",
+			req:        &OpenAIImagesRequest{PartialImages: &partialImages, N: 1},
+			wantRule:   "blocked_image_partial_images",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "multi n",
+			req:        &OpenAIImagesRequest{N: 2},
+			wantRule:   "blocked_image_multi_n",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "moderation low",
+			req:        &OpenAIImagesRequest{N: 1, Moderation: "low"},
+			wantRule:   "blocked_image_moderation_override",
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateOpenAIImagesSafetyRequest(tt.req)
+			require.NotNil(t, err)
+			require.Equal(t, tt.wantRule, err.PolicyRule)
+			require.Equal(t, tt.wantStatus, err.StatusCode)
+			require.Equal(t, "invalid_request_error", err.Type)
+		})
+	}
+
+	require.Nil(t, ValidateOpenAIImagesSafetyRequest(&OpenAIImagesRequest{N: 1, Moderation: "auto"}))
+	require.Nil(t, ValidateOpenAIImagesSafetyRequest(&OpenAIImagesRequest{N: 1}))
+}
+
 func TestOpenAIGatewayServiceParseOpenAIImagesRequest_JSONEditURLs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{
@@ -371,7 +419,8 @@ func TestCollectOpenAIImagePointers_RecognizesDirectAssets(t *testing.T) {
 		"revised_prompt": "cat astronaut",
 		"parts": [
 			{"b64_json":"QUJD"},
-			{"download_url":"https://files.example.com/image.png?sig=1"},
+			{"download_url":"https://files.oaiusercontent.com/image.png?sig=1"},
+			{"download_url":"https://example.com/image.png?sig=1"},
 			{"asset_pointer":"file-service://file_123"}
 		]
 	}`))
@@ -383,9 +432,10 @@ func TestCollectOpenAIImagePointers_RecognizesDirectAssets(t *testing.T) {
 			sawBase64 = true
 			require.Equal(t, "cat astronaut", item.Prompt)
 		}
-		if item.DownloadURL == "https://files.example.com/image.png?sig=1" {
+		if item.DownloadURL == "https://files.oaiusercontent.com/image.png?sig=1" {
 			sawURL = true
 		}
+		require.NotEqual(t, "https://example.com/image.png?sig=1", item.DownloadURL)
 		if item.Pointer == "file-service://file_123" {
 			sawPointer = true
 		}
@@ -395,12 +445,36 @@ func TestCollectOpenAIImagePointers_RecognizesDirectAssets(t *testing.T) {
 	require.True(t, sawPointer)
 }
 
+func TestOpenAIImageDownloadURLTrustPolicy(t *testing.T) {
+	require.True(t, isLikelyOpenAIImageDownloadURL("https://files.oaiusercontent.com/image.png?sig=1"))
+	require.True(t, isLikelyOpenAIImageDownloadURL("https://oaidalleapiprodscus.blob.core.windows.net/private/image.webp?sig=1"))
+	require.True(t, isTrustedOpenAIImageDownloadURL("data:image/png;base64,QUJD"))
+	require.False(t, isLikelyOpenAIImageDownloadURL("https://example.com/image.png?sig=1"))
+	require.False(t, isTrustedOpenAIImageDownloadURL("http://files.oaiusercontent.com/image.png?sig=1"))
+}
+
 func TestResolveOpenAIImageBytes_PrefersInlineBase64(t *testing.T) {
 	data, err := resolveOpenAIImageBytes(context.Background(), nil, nil, "", openAIImagePointerInfo{
 		B64JSON: "data:image/png;base64,QUJD",
 	})
 	require.NoError(t, err)
 	require.Equal(t, []byte("ABC"), data)
+}
+
+func TestBuildOpenAIImageOutputAuditRequest_JSONB64(t *testing.T) {
+	req, err := (&OpenAIGatewayService{}).buildOpenAIImageOutputAuditRequest(
+		context.Background(),
+		[]byte(`{"created":1710000007,"data":[{"b64_json":"aGVsbG8=","revised_prompt":"draw"}]}`),
+		http.Header{"X-Request-Id": []string{"req_img_audit"}},
+		"req_img_audit",
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, "req_img_audit", req.UpstreamRequestID)
+	require.Equal(t, "moderation_flagged_output", req.PolicyRule)
+	require.Len(t, req.OutputHashes, 1)
+	require.Equal(t, "draw", gjson.GetBytes(req.ModerationBody, "prompt").String())
+	require.True(t, strings.HasPrefix(gjson.GetBytes(req.ModerationBody, "images.0.image_url").String(), "data:image/png;base64,"))
 }
 
 func TestAccountSupportsOpenAIImageCapability_OAuthSupportsNative(t *testing.T) {
@@ -511,7 +585,16 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUsesResponsesAPI(t *testing.T) {
 		},
 	}
 
-	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
+	var auditCalled bool
+	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "",
+		WithOpenAIImagesSafetyIdentifier("hfc_test_safety_id"),
+		WithOpenAIImagesOutputAuditor(OpenAIImageOutputAuditorFunc(func(ctx context.Context, req OpenAIImageOutputAuditRequest) (*ContentModerationDecision, error) {
+			auditCalled = true
+			require.NotEmpty(t, req.ModerationBody)
+			require.Len(t, req.OutputHashes, 1)
+			return &ContentModerationDecision{Allowed: true, Action: ContentModerationActionAllow}, nil
+		})),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "gpt-image-2", result.Model)
@@ -534,6 +617,8 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUsesResponsesAPI(t *testing.T) {
 	require.Equal(t, "image_generation", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
 	require.Equal(t, "generate", gjson.GetBytes(upstream.lastBody, "tools.0.action").String())
 	require.Equal(t, "gpt-image-2", gjson.GetBytes(upstream.lastBody, "tools.0.model").String())
+	require.Equal(t, "auto", gjson.GetBytes(upstream.lastBody, "tools.0.moderation").String())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "safety_identifier").Exists())
 	require.Equal(t, "1024x1024", gjson.GetBytes(upstream.lastBody, "tools.0.size").String())
 	require.Equal(t, "high", gjson.GetBytes(upstream.lastBody, "tools.0.quality").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "tools.0.n").Exists())
@@ -543,6 +628,70 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUsesResponsesAPI(t *testing.T) {
 	require.Equal(t, "gpt-image-2", gjson.Get(rec.Body.String(), "model").String())
 	require.Equal(t, "aGVsbG8=", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
 	require.Equal(t, "draw a cat", gjson.Get(rec.Body.String(), "data.0.revised_prompt").String())
+	require.True(t, auditCalled)
+}
+
+func TestOpenAIGatewayServiceForwardImages_OAuthOutputAuditBlocksBeforeWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","size":"1024x1024"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	svc := &OpenAIGatewayService{}
+	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+	require.NoError(t, err)
+
+	svc.httpUpstream = &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream"},
+				"X-Request-Id": []string{"req_img_oauth_audit_block"},
+			},
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"type\":\"response.completed\",\"response\":{\"created_at\":1710000000,\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"output_tokens_details\":{\"image_tokens\":2}},\"tool_usage\":{\"image_gen\":{\"images\":1}},\"output\":[{\"type\":\"image_generation_call\",\"result\":\"YmxvY2tlZA==\",\"revised_prompt\":\"draw a cat\",\"output_format\":\"png\"}]}}\n\n" +
+					"data: [DONE]\n\n",
+			)),
+		},
+	}
+
+	account := &Account{
+		ID:       1,
+		Name:     "openai-oauth",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "token-123",
+		},
+	}
+
+	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "",
+		WithOpenAIImagesOutputAuditor(OpenAIImageOutputAuditorFunc(func(ctx context.Context, req OpenAIImageOutputAuditRequest) (*ContentModerationDecision, error) {
+			require.Equal(t, "req_img_oauth_audit_block", req.UpstreamRequestID)
+			require.Equal(t, "moderation_flagged_output", req.PolicyRule)
+			require.Len(t, req.OutputHashes, 1)
+			return &ContentModerationDecision{
+				Allowed:    false,
+				Blocked:    true,
+				Message:    defaultContentModerationBlockMessage,
+				StatusCode: http.StatusForbidden,
+				Action:     ContentModerationActionBlock,
+				PolicyRule: req.PolicyRule,
+			}, nil
+		})),
+	)
+
+	require.Error(t, err)
+	var auditErr *OpenAIImageOutputAuditError
+	require.ErrorAs(t, err, &auditErr)
+	require.NotNil(t, result)
+	require.Equal(t, 1, result.ImageCount)
+	require.Equal(t, 3, result.Usage.InputTokens)
+	require.Empty(t, rec.Body.String())
 }
 
 func TestOpenAIGatewayServiceForwardImages_APIKeyGenerationUsesConfiguredV1BaseURL(t *testing.T) {
@@ -582,7 +731,16 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyGenerationUsesConfiguredV1BaseU
 		},
 	}
 
-	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
+	var auditCalled bool
+	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "",
+		WithOpenAIImagesSafetyIdentifier("hfc_test_safety_id"),
+		WithOpenAIImagesOutputAuditor(OpenAIImageOutputAuditorFunc(func(ctx context.Context, req OpenAIImageOutputAuditRequest) (*ContentModerationDecision, error) {
+			auditCalled = true
+			require.NotEmpty(t, req.ModerationBody)
+			require.Len(t, req.OutputHashes, 1)
+			return &ContentModerationDecision{Allowed: true, Action: ContentModerationActionAllow}, nil
+		})),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 1, result.ImageCount)
@@ -596,8 +754,72 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyGenerationUsesConfiguredV1BaseU
 	require.Equal(t, "Bearer test-api-key", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Content-Type"))
 	require.Equal(t, "gpt-image-2", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Equal(t, "auto", gjson.GetBytes(upstream.lastBody, "moderation").String())
+	require.Equal(t, "hfc_test_safety_id", gjson.GetBytes(upstream.lastBody, "safety_identifier").String())
+	require.True(t, auditCalled)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "aGVsbG8=", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
+}
+
+func TestOpenAIGatewayServiceForwardImages_APIKeyOutputAuditBlocksBeforeWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","response_format":"b64_json"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{},
+		httpUpstream: &httpUpstreamRecorder{
+			resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"application/json"},
+					"X-Request-Id": []string{"req_img_audit_block"},
+				},
+				Body: io.NopCloser(strings.NewReader(`{"created":1710000007,"usage":{"input_tokens":1,"output_tokens":2},"data":[{"b64_json":"YmxvY2tlZA==","revised_prompt":"draw a cat"}]}`)),
+			},
+		},
+	}
+	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+	require.NoError(t, err)
+
+	account := &Account{
+		ID:       6,
+		Name:     "openai-apikey",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key": "test-api-key",
+		},
+	}
+
+	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "",
+		WithOpenAIImagesOutputAuditor(OpenAIImageOutputAuditorFunc(func(ctx context.Context, req OpenAIImageOutputAuditRequest) (*ContentModerationDecision, error) {
+			require.Equal(t, "req_img_audit_block", req.UpstreamRequestID)
+			require.Equal(t, "moderation_flagged_output", req.PolicyRule)
+			require.Len(t, req.OutputHashes, 1)
+			return &ContentModerationDecision{
+				Allowed:    false,
+				Blocked:    true,
+				Message:    defaultContentModerationBlockMessage,
+				StatusCode: http.StatusForbidden,
+				Action:     ContentModerationActionBlock,
+				PolicyRule: req.PolicyRule,
+			}, nil
+		})),
+	)
+
+	require.Error(t, err)
+	var auditErr *OpenAIImageOutputAuditError
+	require.ErrorAs(t, err, &auditErr)
+	require.NotNil(t, result)
+	require.Equal(t, 1, result.ImageCount)
+	require.Equal(t, 1, result.Usage.InputTokens)
+	require.Empty(t, rec.Body.String())
 }
 
 func TestOpenAIGatewayServiceForwardImages_APIKeyStreamJSONResponseBillsImage(t *testing.T) {
@@ -800,7 +1022,9 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyEditUsesConfiguredV1BaseURL(t *
 		},
 	}
 
-	result, err := svc.ForwardImages(context.Background(), c, account, body.Bytes(), parsed, "")
+	result, err := svc.ForwardImages(context.Background(), c, account, body.Bytes(), parsed, "",
+		WithOpenAIImagesSafetyIdentifier("hfc_edit_safety_id"),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 1, result.ImageCount)
@@ -813,6 +1037,10 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyEditUsesConfiguredV1BaseURL(t *
 	require.Contains(t, upstream.lastReq.Header.Get("Content-Type"), "multipart/form-data")
 	require.Contains(t, string(upstream.lastBody), `name="model"`)
 	require.Contains(t, string(upstream.lastBody), "gpt-image-2")
+	require.Contains(t, string(upstream.lastBody), `name="moderation"`)
+	require.Contains(t, string(upstream.lastBody), "auto")
+	require.Contains(t, string(upstream.lastBody), `name="safety_identifier"`)
+	require.Contains(t, string(upstream.lastBody), "hfc_edit_safety_id")
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "ZWRpdGVk", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
 }

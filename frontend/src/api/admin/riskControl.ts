@@ -136,13 +136,21 @@ export interface ContentModerationLog {
   endpoint: string
   provider: string
   model: string
+  stage: 'input' | 'output'
   mode: string
   action: string
   flagged: boolean
   highest_category: string
   highest_score: number
   category_scores: Record<string, number>
+  category_flags: Record<string, boolean>
+  category_applied_input_types: Record<string, string[]>
   threshold_snapshot: Record<string, number>
+  input_hash: string
+  output_hashes: string[]
+  policy_rule: string
+  upstream_request_id: string
+  safety_identifier: string
   input_excerpt: string
   upstream_latency_ms: number | null
   error: string

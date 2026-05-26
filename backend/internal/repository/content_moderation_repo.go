@@ -28,9 +28,21 @@ func (r *contentModerationRepository) CreateLog(ctx context.Context, log *servic
 	if err != nil {
 		return fmt.Errorf("marshal moderation category scores: %w", err)
 	}
+	categoryFlags, err := json.Marshal(log.CategoryFlags)
+	if err != nil {
+		return fmt.Errorf("marshal moderation category flags: %w", err)
+	}
+	categoryAppliedInputTypes, err := json.Marshal(log.CategoryAppliedInputTypes)
+	if err != nil {
+		return fmt.Errorf("marshal moderation category applied input types: %w", err)
+	}
 	thresholdSnapshot, err := json.Marshal(log.ThresholdSnapshot)
 	if err != nil {
 		return fmt.Errorf("marshal moderation thresholds: %w", err)
+	}
+	outputHashes, err := json.Marshal(log.OutputHashes)
+	if err != nil {
+		return fmt.Errorf("marshal moderation output hashes: %w", err)
 	}
 	var userID any
 	if log.UserID != nil {
@@ -51,18 +63,22 @@ func (r *contentModerationRepository) CreateLog(ctx context.Context, log *servic
 	err = r.db.QueryRowContext(ctx, `
 INSERT INTO content_moderation_logs (
     request_id, user_id, user_email, api_key_id, api_key_name, group_id, group_name,
-    endpoint, provider, model, mode, action, flagged, highest_category, highest_score,
-    category_scores, threshold_snapshot, input_excerpt, upstream_latency_ms, error,
-    violation_count, auto_banned, email_sent, queue_delay_ms
+    endpoint, provider, model, stage, mode, action, flagged, highest_category, highest_score,
+    category_scores, category_flags, category_applied_input_types, threshold_snapshot,
+    input_hash, output_hashes, policy_rule, upstream_request_id, safety_identifier,
+    input_excerpt, upstream_latency_ms, error, violation_count, auto_banned, email_sent, queue_delay_ms
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7,
-    $8, $9, $10, $11, $12, $13, $14, $15,
-    $16::jsonb, $17::jsonb, $18, $19, $20,
-    $21, $22, $23, $24
+    $8, $9, $10, $11, $12, $13, $14, $15, $16,
+    $17::jsonb, $18::jsonb, $19::jsonb, $20::jsonb,
+    $21, $22::jsonb, $23, $24, $25,
+    $26, $27, $28, $29, $30, $31, $32
 ) RETURNING id, created_at`,
 		log.RequestID, userID, log.UserEmail, apiKeyID, log.APIKeyName, groupID, log.GroupName,
-		log.Endpoint, log.Provider, log.Model, log.Mode, log.Action, log.Flagged, log.HighestCategory, log.HighestScore,
-		string(categoryScores), string(thresholdSnapshot), log.InputExcerpt, latency, log.Error,
+		log.Endpoint, log.Provider, log.Model, log.Stage, log.Mode, log.Action, log.Flagged, log.HighestCategory, log.HighestScore,
+		string(categoryScores), string(categoryFlags), string(categoryAppliedInputTypes), string(thresholdSnapshot),
+		log.InputHash, string(outputHashes), log.PolicyRule, log.UpstreamRequestID, log.SafetyIdentifier,
+		log.InputExcerpt, latency, log.Error,
 		log.ViolationCount, log.AutoBanned, log.EmailSent, nullableIntPtr(log.QueueDelayMS),
 	).Scan(&log.ID, &log.CreatedAt)
 	if err != nil {
@@ -95,8 +111,11 @@ func (r *contentModerationRepository) ListLogs(ctx context.Context, filter servi
 	rows, err := r.db.QueryContext(ctx, `
 SELECT
     l.id, l.request_id, l.user_id, l.user_email, l.api_key_id, l.api_key_name, l.group_id, l.group_name,
-    l.endpoint, l.provider, l.model, l.mode, l.action, l.flagged, l.highest_category, l.highest_score,
-    l.category_scores, l.threshold_snapshot, l.input_excerpt, l.upstream_latency_ms, l.error,
+    l.endpoint, l.provider, l.model, COALESCE(l.stage, 'input'), l.mode, l.action, l.flagged, l.highest_category, l.highest_score,
+    l.category_scores, COALESCE(l.category_flags, '{}'::jsonb), COALESCE(l.category_applied_input_types, '{}'::jsonb),
+    l.threshold_snapshot, COALESCE(l.input_hash, ''), COALESCE(l.output_hashes, '[]'::jsonb),
+    COALESCE(l.policy_rule, ''), COALESCE(l.upstream_request_id, ''), COALESCE(l.safety_identifier, ''),
+    l.input_excerpt, l.upstream_latency_ms, l.error,
     l.violation_count, l.auto_banned, l.email_sent, COALESCE(u.status, ''), l.queue_delay_ms, l.created_at
 FROM content_moderation_logs l
 LEFT JOIN users u ON u.id = l.user_id `+whereSQL+`
@@ -113,7 +132,7 @@ LIMIT $`+fmt.Sprint(len(queryArgs)-1)+` OFFSET $`+fmt.Sprint(len(queryArgs)),
 	for rows.Next() {
 		var item service.ContentModerationLog
 		var userID, apiKeyID, groupID, latency, queueDelay sql.NullInt64
-		var scoresRaw, thresholdsRaw []byte
+		var scoresRaw, flagsRaw, appliedInputTypesRaw, thresholdsRaw, outputHashesRaw []byte
 		if err := rows.Scan(
 			&item.ID,
 			&item.RequestID,
@@ -126,13 +145,21 @@ LIMIT $`+fmt.Sprint(len(queryArgs)-1)+` OFFSET $`+fmt.Sprint(len(queryArgs)),
 			&item.Endpoint,
 			&item.Provider,
 			&item.Model,
+			&item.Stage,
 			&item.Mode,
 			&item.Action,
 			&item.Flagged,
 			&item.HighestCategory,
 			&item.HighestScore,
 			&scoresRaw,
+			&flagsRaw,
+			&appliedInputTypesRaw,
 			&thresholdsRaw,
+			&item.InputHash,
+			&outputHashesRaw,
+			&item.PolicyRule,
+			&item.UpstreamRequestID,
+			&item.SafetyIdentifier,
 			&item.InputExcerpt,
 			&latency,
 			&item.Error,
@@ -167,8 +194,14 @@ LIMIT $`+fmt.Sprint(len(queryArgs)-1)+` OFFSET $`+fmt.Sprint(len(queryArgs)),
 		}
 		item.CategoryScores = map[string]float64{}
 		_ = json.Unmarshal(scoresRaw, &item.CategoryScores)
+		item.CategoryFlags = map[string]bool{}
+		_ = json.Unmarshal(flagsRaw, &item.CategoryFlags)
+		item.CategoryAppliedInputTypes = map[string][]string{}
+		_ = json.Unmarshal(appliedInputTypesRaw, &item.CategoryAppliedInputTypes)
 		item.ThresholdSnapshot = map[string]float64{}
 		_ = json.Unmarshal(thresholdsRaw, &item.ThresholdSnapshot)
+		item.OutputHashes = []string{}
+		_ = json.Unmarshal(outputHashesRaw, &item.OutputHashes)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
