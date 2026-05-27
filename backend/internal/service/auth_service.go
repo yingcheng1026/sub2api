@@ -267,6 +267,7 @@ func (s *AuthService) RegisterWithVerificationAndRisk(ctx context.Context, email
 		logger.LegacyPrintf("service.auth", "[Auth] Database error creating user: %v", err)
 		return "", nil, ErrServiceUnavailable
 	}
+	s.notifySignupRiskTelegramAlert(user, signupRisk)
 	s.postAuthUserBootstrap(ctx, user, "email", true)
 	s.assignSubscriptions(ctx, user.ID, grantPlan.Subscriptions, "auto assigned by signup defaults")
 	if s.affiliateService != nil {
@@ -308,6 +309,50 @@ func (s *AuthService) RegisterWithVerificationAndRisk(ctx context.Context, email
 	}
 
 	return token, user, nil
+}
+
+func (s *AuthService) notifySignupRiskTelegramAlert(user *User, risk signupRiskSnapshot) {
+	if s == nil || user == nil || risk.TrialBonusEligible || risk.TrialBonusRiskScore <= 0 || s.settingService == nil || s.settingService.settingRepo == nil {
+		return
+	}
+	evidence := []string{
+		"hold_reason=" + risk.TrialBonusHoldReason,
+	}
+	if risk.SignupIPPrefix != "" {
+		evidence = append(evidence, "signup_ip_prefix="+risk.SignupIPPrefix)
+	}
+	if risk.SignupDeviceFingerprintHash != "" {
+		evidence = append(evidence, "device_fingerprint_hash="+truncateMiddle(risk.SignupDeviceFingerprintHash, 8, 8))
+	}
+	if risk.SignupUserAgentHash != "" {
+		evidence = append(evidence, "user_agent_hash="+truncateMiddle(risk.SignupUserAgentHash, 8, 8))
+	}
+	DispatchHFCAbuseRiskTelegramAlert(s.settingService.settingRepo, HFCAbuseRiskTelegramAlert{
+		Source:                "signup_risk",
+		Severity:              signupRiskTelegramSeverity(risk.TrialBonusRiskScore),
+		Summary:               "注册风控命中，已保留正常注册，仅暂停 trial bonus 资格",
+		UserID:                user.ID,
+		UserEmail:             user.Email,
+		RiskScore:             risk.TrialBonusRiskScore,
+		SignupIPPrefix:        risk.SignupIPPrefix,
+		DeviceFingerprintHash: risk.SignupDeviceFingerprintHash,
+		Evidence:              evidence,
+		Action:                "registration allowed; trial bonus held; manual review if abuse continues",
+		OccurredAt:            time.Now(),
+	})
+}
+
+func signupRiskTelegramSeverity(score int) string {
+	if score >= 120 {
+		return HFCAbuseRiskSeverityCritical
+	}
+	if score >= 80 {
+		return HFCAbuseRiskSeverityHigh
+	}
+	if score >= 50 {
+		return HFCAbuseRiskSeverityMedium
+	}
+	return HFCAbuseRiskSeverityLow
 }
 
 func (s *AuthService) evaluateSignupRisk(ctx context.Context, input RegistrationRiskInput) signupRiskSnapshot {

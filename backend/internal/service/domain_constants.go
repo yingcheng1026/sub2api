@@ -119,6 +119,10 @@ const (
 	SettingKeyAffiliateRebatePerInviteeCap     = "affiliate_rebate_per_invitee_cap"    // 单人返利上限（0=无上限）
 	SettingKeyRiskControlEnabled               = "risk_control_enabled"                // 是否启用风控中心入口与审计链路
 	SettingKeyContentModerationConfig          = "content_moderation_config"           // 内容审计配置（JSON）
+	SettingKeyHFCTelegramRiskAlertEnabled      = "hfc_telegram_risk_alert_enabled"     // 是否启用 HFC 风控 Telegram 告警
+	SettingKeyHFCTelegramBotToken              = "hfc_telegram_bot_token"              // Telegram Bot token（也可用环境变量）
+	SettingKeyHFCTelegramChatID                = "hfc_telegram_chat_id"                // Telegram 告警目标 chat id
+	SettingKeyHFCTelegramMinSeverity           = "hfc_telegram_min_severity"           // 最低告警等级：low/medium/high/critical
 	SettingKeyLoginAgreementEnabled            = "login_agreement_enabled"             // 登录前是否要求同意条款
 	SettingKeyLoginAgreementMode               = "login_agreement_mode"                // 条款确认展示模式：modal / checkbox
 	SettingKeyLoginAgreementUpdatedAt          = "login_agreement_updated_at"          // 条款更新日期（展示用）

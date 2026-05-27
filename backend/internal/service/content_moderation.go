@@ -1518,6 +1518,10 @@ func (s *ContentModerationService) applyFlaggedSideEffects(ctx context.Context, 
 		log.AutoBanned = true
 	}
 
+	if autoBanJustApplied {
+		s.notifyContentModerationAutoBanTelegramAlert(cfg, log, count)
+	}
+
 	if s.emailService == nil || strings.TrimSpace(log.UserEmail) == "" {
 		return
 	}
@@ -1537,6 +1541,47 @@ func (s *ContentModerationService) applyFlaggedSideEffects(ctx context.Context, 
 		}
 	}
 	log.EmailSent = emailSent
+}
+
+func (s *ContentModerationService) notifyContentModerationAutoBanTelegramAlert(cfg *ContentModerationConfig, log *ContentModerationLog, violationCount int) {
+	if s == nil || s.settingRepo == nil || cfg == nil || log == nil {
+		return
+	}
+	userID := int64(0)
+	if log.UserID != nil {
+		userID = *log.UserID
+	}
+	apiKeyID := int64(0)
+	if log.APIKeyID != nil {
+		apiKeyID = *log.APIKeyID
+	}
+	groupID := int64(0)
+	if log.GroupID != nil {
+		groupID = *log.GroupID
+	}
+	evidence := []string{
+		fmt.Sprintf("violation_count=%d", violationCount),
+		fmt.Sprintf("ban_threshold=%d", cfg.BanThreshold),
+		"highest_category=" + log.HighestCategory,
+		fmt.Sprintf("highest_score=%.4f", log.HighestScore),
+		"endpoint=" + log.Endpoint,
+		"model=" + log.Model,
+	}
+	DispatchHFCAbuseRiskTelegramAlert(s.settingRepo, HFCAbuseRiskTelegramAlert{
+		Source:     "content_moderation_auto_ban",
+		Severity:   HFCAbuseRiskSeverityCritical,
+		Summary:    "内容审计累计命中阈值并触发自动封禁",
+		UserID:     userID,
+		UserEmail:  log.UserEmail,
+		APIKeyID:   apiKeyID,
+		APIKeyName: log.APIKeyName,
+		GroupID:    groupID,
+		GroupName:  log.GroupName,
+		RiskScore:  violationCount,
+		Evidence:   evidence,
+		Action:     "account disabled by existing content moderation auto-ban; review evidence before further action",
+		OccurredAt: time.Now(),
+	})
 }
 
 func (s *ContentModerationService) sendViolationEmail(ctx context.Context, cfg *ContentModerationConfig, log *ContentModerationLog) error {

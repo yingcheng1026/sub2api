@@ -155,3 +155,15 @@ func TestMigration135AllowsGitHubAndGoogleAuthProviders(t *testing.T) {
 	require.Contains(t, sql, "'github'")
 	require.Contains(t, sql, "'google'")
 }
+
+func TestMigration167SeedsTelegramRiskAlertsDisabledByDefault(t *testing.T) {
+	content, err := FS.ReadFile("167_add_hfc_telegram_risk_alert_settings.sql")
+	require.NoError(t, err)
+
+	sql := string(content)
+	require.Contains(t, sql, "('hfc_telegram_risk_alert_enabled', 'false'")
+	require.Contains(t, sql, "('hfc_telegram_min_severity', 'high'")
+	require.Contains(t, sql, "ON CONFLICT (key) DO NOTHING")
+	require.NotContains(t, sql, "UPDATE settings")
+	require.NotContains(t, sql, "hfc_telegram_risk_alert_enabled', 'true'")
+}
