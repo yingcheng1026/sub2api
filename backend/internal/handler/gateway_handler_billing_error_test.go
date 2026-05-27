@@ -61,3 +61,11 @@ func TestBillingErrorDetails_WalletInsufficientMapsTo402(t *testing.T) {
 	require.NotEmpty(t, msg)
 	require.Equal(t, 0, retryAfter)
 }
+
+func TestBillingErrorDetails_TrialPaymentBindingRequiredMapsTo402(t *testing.T) {
+	status, code, msg, retryAfter := billingErrorDetails(service.ErrTrialPaymentBindingRequired)
+	require.Equal(t, http.StatusPaymentRequired, status)
+	require.Equal(t, "trial_payment_binding_required", code)
+	require.NotEmpty(t, msg)
+	require.Equal(t, 0, retryAfter)
+}

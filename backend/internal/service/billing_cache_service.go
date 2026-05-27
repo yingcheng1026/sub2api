@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,11 +20,21 @@ import (
 // 注：ErrInsufficientBalance在redeem_service.go中定义
 // 注：ErrDailyLimitExceeded/ErrWeeklyLimitExceeded/ErrMonthlyLimitExceeded在subscription_service.go中定义
 var (
-	ErrSubscriptionInvalid       = infraerrors.Forbidden("SUBSCRIPTION_INVALID", "subscription is invalid or expired")
-	ErrBillingServiceUnavailable = infraerrors.ServiceUnavailable("BILLING_SERVICE_ERROR", "Billing service temporarily unavailable. Please retry later.")
+	ErrSubscriptionInvalid         = infraerrors.Forbidden("SUBSCRIPTION_INVALID", "subscription is invalid or expired")
+	ErrBillingServiceUnavailable   = infraerrors.ServiceUnavailable("BILLING_SERVICE_ERROR", "Billing service temporarily unavailable. Please retry later.")
+	ErrTrialPaymentBindingRequired = infraerrors.New(
+		http.StatusPaymentRequired,
+		"TRIAL_PAYMENT_BINDING_REQUIRED",
+		"trial usage reached the free threshold; please bind a payment account or make a small recharge to continue",
+	)
 	// RPM 超限错误。gateway_handler 负责映射为 HTTP 429。
 	ErrGroupRPMExceeded = infraerrors.TooManyRequests("GROUP_RPM_EXCEEDED", "group requests-per-minute limit exceeded")
 	ErrUserRPMExceeded  = infraerrors.TooManyRequests("USER_RPM_EXCEEDED", "user requests-per-minute limit exceeded")
+)
+
+const (
+	trialBonusGroupID                    int64   = 17
+	trialBonusPaymentBindingThresholdUSD float64 = 3
 )
 
 // subscriptionCacheData 订阅缓存数据结构（内部使用）
@@ -683,7 +695,7 @@ func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user 
 			if err := s.checkWalletEligibility(subscription); err != nil {
 				return err
 			}
-		} else if err := s.checkSubscriptionEligibility(ctx, user.ID, effectiveGroup, subscription); err != nil {
+		} else if err := s.checkSubscriptionEligibility(ctx, user, effectiveGroup, subscription); err != nil {
 			return err
 		}
 	} else {
@@ -836,14 +848,14 @@ func (s *BillingCacheService) checkWalletEligibility(subscription *UserSubscript
 }
 
 // checkSubscriptionEligibility 检查订阅模式资格
-func (s *BillingCacheService) checkSubscriptionEligibility(ctx context.Context, userID int64, group *Group, subscription *UserSubscription) error {
+func (s *BillingCacheService) checkSubscriptionEligibility(ctx context.Context, user *User, group *Group, subscription *UserSubscription) error {
 	// 获取订阅缓存数据
-	subData, err := s.GetSubscriptionStatus(ctx, userID, group.ID)
+	subData, err := s.GetSubscriptionStatus(ctx, user.ID, group.ID)
 	if err != nil {
 		if s.circuitBreaker != nil {
 			s.circuitBreaker.OnFailure(err)
 		}
-		logger.LegacyPrintf("service.billing_cache", "ALERT: billing subscription check failed for user %d group %d: %v", userID, group.ID, err)
+		logger.LegacyPrintf("service.billing_cache", "ALERT: billing subscription check failed for user %d group %d: %v", user.ID, group.ID, err)
 		return ErrBillingServiceUnavailable.WithCause(err)
 	}
 	if s.circuitBreaker != nil {
@@ -860,6 +872,10 @@ func (s *BillingCacheService) checkSubscriptionEligibility(ctx context.Context, 
 		return ErrSubscriptionInvalid
 	}
 
+	if err := checkTrialBonusPaymentBinding(user, group, subData); err != nil {
+		return err
+	}
+
 	// 检查限额（使用传入的Group限额配置）
 	if group.HasDailyLimit() && subData.DailyUsage >= *group.DailyLimitUSD {
 		return ErrDailyLimitExceeded
@@ -874,6 +890,52 @@ func (s *BillingCacheService) checkSubscriptionEligibility(ctx context.Context, 
 	}
 
 	return nil
+}
+
+func checkTrialBonusPaymentBinding(user *User, group *Group, subData *subscriptionCacheData) error {
+	if user == nil || group == nil || subData == nil || !isTrialBonusGroup(group) {
+		return nil
+	}
+	if !strings.EqualFold(user.Role, RoleUser) {
+		return nil
+	}
+	if user.TotalRecharged > 0 {
+		return nil
+	}
+
+	used := maxSubscriptionUsageUSD(subData)
+	if used < trialBonusPaymentBindingThresholdUSD {
+		return nil
+	}
+	return ErrTrialPaymentBindingRequired.WithMetadata(map[string]string{
+		"threshold_usd": fmt.Sprintf("%.2f", trialBonusPaymentBindingThresholdUSD),
+		"used_usd":      fmt.Sprintf("%.4f", used),
+		"action":        "/purchase?trial_bind=1",
+	})
+}
+
+func isTrialBonusGroup(group *Group) bool {
+	if group == nil {
+		return false
+	}
+	if group.ID == trialBonusGroupID {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(group.Name), trialBonusGroupName)
+}
+
+func maxSubscriptionUsageUSD(subData *subscriptionCacheData) float64 {
+	if subData == nil {
+		return 0
+	}
+	used := subData.DailyUsage
+	if subData.WeeklyUsage > used {
+		used = subData.WeeklyUsage
+	}
+	if subData.MonthlyUsage > used {
+		used = subData.MonthlyUsage
+	}
+	return used
 }
 
 type billingCircuitBreakerState int

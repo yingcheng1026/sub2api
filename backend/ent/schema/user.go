@@ -112,6 +112,28 @@ func (User) Fields() []ent.Field {
 		// 用户级每分钟请求数上限（0 = 不限制）。仅当所在分组未设置 rpm_limit 时作为兜底生效。
 		field.Int("rpm_limit").
 			Default(0),
+
+		// Trial bonus signup risk fields are appended after existing generated
+		// fields to preserve Ent runtime field indexes until code generation is run.
+		field.String("signup_ip").
+			MaxLen(64).
+			Default(""),
+		field.String("signup_ip_prefix").
+			MaxLen(64).
+			Default(""),
+		field.String("signup_user_agent_hash").
+			MaxLen(64).
+			Default(""),
+		field.String("signup_device_fingerprint_hash").
+			MaxLen(64).
+			Default(""),
+		field.Bool("trial_bonus_eligible").
+			Default(true),
+		field.String("trial_bonus_hold_reason").
+			MaxLen(80).
+			Default(""),
+		field.Int("trial_bonus_risk_score").
+			Default(0),
 	}
 }
 

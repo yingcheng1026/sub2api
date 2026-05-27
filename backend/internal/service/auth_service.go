@@ -9,16 +9,20 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/authidentity"
+	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	dbuser "github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -86,6 +90,30 @@ type signupGrantPlan struct {
 	Subscriptions []DefaultSubscriptionSetting
 }
 
+type RegistrationRiskInput struct {
+	ClientIP          string
+	UserAgent         string
+	DeviceFingerprint string
+}
+
+type signupRiskSnapshot struct {
+	SignupIP                    string
+	SignupIPPrefix              string
+	SignupUserAgentHash         string
+	SignupDeviceFingerprintHash string
+	TrialBonusEligible          bool
+	TrialBonusHoldReason        string
+	TrialBonusRiskScore         int
+}
+
+const (
+	signupIPPrefix24hTrialLimit       = 3
+	signupDeviceFingerprintTrialLimit = 1
+	signupRiskWindow                  = 24 * time.Hour
+	maxSignupUserAgentSignalBytes     = 2048
+	maxSignupFingerprintSignalBytes   = 512
+)
+
 // NewAuthService 创建认证服务实例
 func NewAuthService(
 	entClient *dbent.Client,
@@ -131,6 +159,12 @@ func (s *AuthService) Register(ctx context.Context, email, password string) (str
 
 // RegisterWithVerification 用户注册（支持邮件验证、优惠码、邀请码和邀请返利码），返回token和用户。
 func (s *AuthService) RegisterWithVerification(ctx context.Context, email, password, verifyCode, promoCode, invitationCode, affiliateCode string) (string, *User, error) {
+	return s.RegisterWithVerificationAndRisk(ctx, email, password, verifyCode, promoCode, invitationCode, affiliateCode, RegistrationRiskInput{})
+}
+
+// RegisterWithVerificationAndRisk 用户注册，并记录注册时刻的风控信号。
+// 风控命中只会影响 trial bonus 发放资格，不会锁号或阻断正常注册。
+func (s *AuthService) RegisterWithVerificationAndRisk(ctx context.Context, email, password, verifyCode, promoCode, invitationCode, affiliateCode string, riskInput RegistrationRiskInput) (string, *User, error) {
 	// 检查是否开放注册（默认关闭：settingService 未配置时不允许注册）
 	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) {
 		return "", nil, ErrRegDisabled
@@ -204,16 +238,25 @@ func (s *AuthService) RegisterWithVerification(ctx context.Context, email, passw
 	if s.settingService != nil {
 		defaultRPMLimit = s.settingService.GetDefaultUserRPMLimit(ctx)
 	}
+	signupRisk := s.evaluateSignupRisk(ctx, riskInput)
 
 	// 创建用户
 	user := &User{
-		Email:        email,
-		PasswordHash: hashedPassword,
-		Role:         RoleUser,
-		Balance:      grantPlan.Balance,
-		Concurrency:  grantPlan.Concurrency,
-		RPMLimit:     defaultRPMLimit,
-		Status:       StatusActive,
+		Email:                       email,
+		PasswordHash:                hashedPassword,
+		Role:                        RoleUser,
+		Balance:                     grantPlan.Balance,
+		Concurrency:                 grantPlan.Concurrency,
+		RPMLimit:                    defaultRPMLimit,
+		Status:                      StatusActive,
+		SignupIP:                    signupRisk.SignupIP,
+		SignupIPPrefix:              signupRisk.SignupIPPrefix,
+		SignupUserAgentHash:         signupRisk.SignupUserAgentHash,
+		SignupDeviceFingerprintHash: signupRisk.SignupDeviceFingerprintHash,
+		SignupRiskRecorded:          true,
+		TrialBonusEligible:          signupRisk.TrialBonusEligible,
+		TrialBonusHoldReason:        signupRisk.TrialBonusHoldReason,
+		TrialBonusRiskScore:         signupRisk.TrialBonusRiskScore,
 	}
 
 	if err := s.userRepo.Create(ctx, user); err != nil {
@@ -265,6 +308,108 @@ func (s *AuthService) RegisterWithVerification(ctx context.Context, email, passw
 	}
 
 	return token, user, nil
+}
+
+func (s *AuthService) evaluateSignupRisk(ctx context.Context, input RegistrationRiskInput) signupRiskSnapshot {
+	snapshot := signupRiskSnapshot{TrialBonusEligible: true}
+
+	snapshot.SignupIP = normalizeSignupClientIP(input.ClientIP)
+	snapshot.SignupIPPrefix = signupIPPrefix(snapshot.SignupIP)
+	snapshot.SignupUserAgentHash = hashSignupSignal(input.UserAgent, maxSignupUserAgentSignalBytes)
+	snapshot.SignupDeviceFingerprintHash = hashSignupSignal(input.DeviceFingerprint, maxSignupFingerprintSignalBytes)
+
+	var holdReasons []string
+	if snapshot.SignupIPPrefix != "" {
+		count := s.countRecentSignupSignal(ctx, "signup_ip_prefix", snapshot.SignupIPPrefix)
+		if count >= signupIPPrefix24hTrialLimit {
+			holdReasons = append(holdReasons, "signup_ip_prefix_24h_cap")
+			snapshot.TrialBonusRiskScore += 50
+		}
+	}
+	if snapshot.SignupDeviceFingerprintHash != "" {
+		count := s.countRecentSignupSignal(ctx, "signup_device_fingerprint_hash", snapshot.SignupDeviceFingerprintHash)
+		if count >= signupDeviceFingerprintTrialLimit {
+			holdReasons = append(holdReasons, "duplicate_device_fingerprint")
+			snapshot.TrialBonusRiskScore += 80
+		}
+	}
+
+	if len(holdReasons) > 0 {
+		snapshot.TrialBonusEligible = false
+		snapshot.TrialBonusHoldReason = strings.Join(holdReasons, ",")
+	}
+	return snapshot
+}
+
+func (s *AuthService) countRecentSignupSignal(ctx context.Context, column, value string) int {
+	if s == nil || s.entClient == nil || strings.TrimSpace(value) == "" {
+		return 0
+	}
+	switch column {
+	case "signup_ip_prefix", "signup_device_fingerprint_hash":
+	default:
+		return 0
+	}
+
+	cutoff := time.Now().Add(-signupRiskWindow)
+	count, err := s.entClient.User.Query().
+		Where(
+			dbuser.DeletedAtIsNil(),
+			dbuser.RoleEQ(RoleUser),
+			dbuser.CreatedAtGTE(cutoff),
+			predicate.User(func(selector *entsql.Selector) {
+				selector.Where(entsql.P(func(b *entsql.Builder) {
+					b.Ident(selector.C(column)).
+						WriteString(" = ").
+						Arg(value)
+				}))
+			}),
+		).
+		Count(ctx)
+	if err != nil {
+		logger.LegacyPrintf("service.auth", "[Auth] Failed to count signup risk signal column=%s: %v", column, err)
+		return 0
+	}
+	return count
+}
+
+func normalizeSignupClientIP(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return ""
+	}
+	return addr.Unmap().String()
+}
+
+func signupIPPrefix(value string) string {
+	addr, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil {
+		return ""
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return netip.PrefixFrom(addr, 24).Masked().String()
+	}
+	if addr.Is6() {
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return ""
+}
+
+func hashSignupSignal(value string, maxBytes int) string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return ""
+	}
+	if maxBytes > 0 && len(normalized) > maxBytes {
+		normalized = normalized[:maxBytes]
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])
 }
 
 // SendVerifyCodeResult 发送验证码返回结果

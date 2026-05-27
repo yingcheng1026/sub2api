@@ -326,6 +326,7 @@ import {
   loadAffiliateReferralCode,
   resolveAffiliateReferralCode
 } from '@/utils/oauthAffiliate'
+import { collectSignupDeviceFingerprint } from '@/utils/signupFingerprint'
 import type { LoginAgreementDocument } from '@/types'
 
 const { t, locale } = useI18n()
@@ -856,6 +857,7 @@ async function handleRegister(): Promise<void> {
     if (affCode) {
       formData.aff_code = affCode
     }
+    const deviceFingerprint = await collectSignupDeviceFingerprint()
 
     // If email verification is enabled, redirect to verification page
     if (emailVerifyEnabled.value) {
@@ -868,6 +870,7 @@ async function handleRegister(): Promise<void> {
           turnstile_token: turnstileToken.value,
           promo_code: formData.promo_code || undefined,
           invitation_code: formData.invitation_code || undefined,
+          device_fingerprint: deviceFingerprint,
           ...(affCode ? { aff_code: affCode } : {})
         })
       )
@@ -884,6 +887,7 @@ async function handleRegister(): Promise<void> {
       turnstile_token: turnstileEnabled.value ? turnstileToken.value : undefined,
       promo_code: formData.promo_code || undefined,
       invitation_code: formData.invitation_code || undefined,
+      device_fingerprint: deviceFingerprint,
       ...(affCode ? { aff_code: affCode } : {})
     })
     clearAffiliateReferralCode()

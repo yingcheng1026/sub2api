@@ -123,6 +123,7 @@ export interface RegisterRequest {
   promo_code?: string
   invitation_code?: string
   aff_code?: string
+  device_fingerprint?: string
 }
 
 export interface AffiliateInvitee {

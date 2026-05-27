@@ -393,6 +393,53 @@ func TestAuthService_Register_Success(t *testing.T) {
 	require.True(t, user.CheckPassword("password"))
 }
 
+func TestAuthService_RegisterWithVerificationAndRisk_StoresSignupRiskSignals(t *testing.T) {
+	repo := &userRepoStub{nextID: 15}
+	service := newAuthService(repo, map[string]string{
+		SettingKeyRegistrationEnabled: "true",
+	}, nil)
+
+	_, user, err := service.RegisterWithVerificationAndRisk(
+		context.Background(),
+		"user@test.com",
+		"password",
+		"",
+		"",
+		"",
+		"",
+		RegistrationRiskInput{
+			ClientIP:          "203.0.113.42",
+			UserAgent:         "Mozilla/5.0 test",
+			DeviceFingerprint: "fingerprint-visitor-id",
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, user)
+	require.Len(t, repo.created, 1)
+
+	created := repo.created[0]
+	require.Equal(t, "203.0.113.42", created.SignupIP)
+	require.Equal(t, "203.0.113.0/24", created.SignupIPPrefix)
+	require.Len(t, created.SignupUserAgentHash, 64)
+	require.Len(t, created.SignupDeviceFingerprintHash, 64)
+	require.NotEqual(t, "fingerprint-visitor-id", created.SignupDeviceFingerprintHash)
+	require.True(t, created.SignupRiskRecorded)
+	require.True(t, created.TrialBonusEligible)
+	require.Empty(t, created.TrialBonusHoldReason)
+	require.Zero(t, created.TrialBonusRiskScore)
+}
+
+func TestSignupRiskHelpersNormalizeIPAndHashSignals(t *testing.T) {
+	require.Equal(t, "198.51.100.0/24", signupIPPrefix("198.51.100.25"))
+	require.Equal(t, "2001:db8:abcd:1200::/64", signupIPPrefix("2001:db8:abcd:1200::1234"))
+	require.Empty(t, signupIPPrefix("not-an-ip"))
+
+	hash := hashSignupSignal("  same-device  ", 512)
+	require.Len(t, hash, 64)
+	require.Equal(t, hash, hashSignupSignal("same-device", 512))
+	require.NotEqual(t, hash, hashSignupSignal("other-device", 512))
+}
+
 func TestAuthService_ValidateToken_ExpiredReturnsClaimsWithError(t *testing.T) {
 	repo := &userRepoStub{}
 	service := newAuthService(repo, nil, nil)
