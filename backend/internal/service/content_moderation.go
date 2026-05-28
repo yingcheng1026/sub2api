@@ -448,6 +448,7 @@ type ContentModerationService struct {
 	groupRepo                GroupRepository
 	userRepo                 UserRepository
 	authCacheInvalidator     APIKeyAuthCacheInvalidator
+	abuseRiskRecorder        HFCAbuseRiskRecorder
 	emailService             *EmailService
 	httpClient               *http.Client
 	asyncQueue               chan contentModerationTask
@@ -514,6 +515,13 @@ func NewContentModerationService(
 		go svc.cleanupWorker()
 	}
 	return svc
+}
+
+func (s *ContentModerationService) SetHFCAbuseRiskRecorder(recorder HFCAbuseRiskRecorder) {
+	if s == nil {
+		return
+	}
+	s.abuseRiskRecorder = recorder
 }
 
 func (s *ContentModerationService) GetConfig(ctx context.Context) (*ContentModerationConfigView, error) {
@@ -1017,8 +1025,11 @@ func (s *ContentModerationService) checkSync(ctx context.Context, input ContentM
 				slog.Warn("content_moderation.record_hash_failed", "user_id", input.UserID, "endpoint", input.Endpoint, "error", err)
 			}
 		}
-		s.applyFlaggedSideEffects(ctx, cfg, log)
+		autoBanJustApplied := s.applyFlaggedSideEffects(ctx, cfg, log)
 		_ = s.repo.CreateLog(ctx, log)
+		if autoBanJustApplied {
+			s.notifyContentModerationAutoBanTelegramAlert(cfg, log)
+		}
 	}
 	if blocked {
 		return &ContentModerationDecision{
@@ -1485,9 +1496,9 @@ func (s *ContentModerationService) buildLog(input ContentModerationCheckInput, c
 	}
 }
 
-func (s *ContentModerationService) applyFlaggedSideEffects(ctx context.Context, cfg *ContentModerationConfig, log *ContentModerationLog) {
+func (s *ContentModerationService) applyFlaggedSideEffects(ctx context.Context, cfg *ContentModerationConfig, log *ContentModerationLog) bool {
 	if s == nil || cfg == nil || log == nil || !log.Flagged || log.UserID == nil || *log.UserID <= 0 {
-		return
+		return false
 	}
 	count := 1
 	if s.repo != nil && cfg.ViolationWindowHours > 0 {
@@ -1502,13 +1513,13 @@ func (s *ContentModerationService) applyFlaggedSideEffects(ctx context.Context, 
 		user, err := s.userRepo.GetByID(ctx, *log.UserID)
 		if err != nil {
 			slog.Warn("content_moderation.ban_get_user_failed", "user_id", *log.UserID, "error", err)
-			return
+			return false
 		}
 		if user.Status != StatusDisabled {
 			user.Status = StatusDisabled
 			if err := s.userRepo.Update(ctx, user); err != nil {
 				slog.Warn("content_moderation.ban_update_user_failed", "user_id", *log.UserID, "error", err)
-				return
+				return false
 			}
 			if s.authCacheInvalidator != nil {
 				s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, *log.UserID)
@@ -1518,12 +1529,8 @@ func (s *ContentModerationService) applyFlaggedSideEffects(ctx context.Context, 
 		log.AutoBanned = true
 	}
 
-	if autoBanJustApplied {
-		s.notifyContentModerationAutoBanTelegramAlert(cfg, log, count)
-	}
-
 	if s.emailService == nil || strings.TrimSpace(log.UserEmail) == "" {
-		return
+		return autoBanJustApplied
 	}
 	emailSent := false
 	if cfg.EmailOnHit {
@@ -1541,9 +1548,10 @@ func (s *ContentModerationService) applyFlaggedSideEffects(ctx context.Context, 
 		}
 	}
 	log.EmailSent = emailSent
+	return autoBanJustApplied
 }
 
-func (s *ContentModerationService) notifyContentModerationAutoBanTelegramAlert(cfg *ContentModerationConfig, log *ContentModerationLog, violationCount int) {
+func (s *ContentModerationService) notifyContentModerationAutoBanTelegramAlert(cfg *ContentModerationConfig, log *ContentModerationLog) {
 	if s == nil || s.settingRepo == nil || cfg == nil || log == nil {
 		return
 	}
@@ -1560,14 +1568,14 @@ func (s *ContentModerationService) notifyContentModerationAutoBanTelegramAlert(c
 		groupID = *log.GroupID
 	}
 	evidence := []string{
-		fmt.Sprintf("violation_count=%d", violationCount),
+		fmt.Sprintf("violation_count=%d", log.ViolationCount),
 		fmt.Sprintf("ban_threshold=%d", cfg.BanThreshold),
 		"highest_category=" + log.HighestCategory,
 		fmt.Sprintf("highest_score=%.4f", log.HighestScore),
 		"endpoint=" + log.Endpoint,
 		"model=" + log.Model,
 	}
-	DispatchHFCAbuseRiskTelegramAlert(s.settingRepo, HFCAbuseRiskTelegramAlert{
+	alert := HFCAbuseRiskTelegramAlert{
 		Source:     "content_moderation_auto_ban",
 		Severity:   HFCAbuseRiskSeverityCritical,
 		Summary:    "内容审计累计命中阈值并触发自动封禁",
@@ -1577,11 +1585,55 @@ func (s *ContentModerationService) notifyContentModerationAutoBanTelegramAlert(c
 		APIKeyName: log.APIKeyName,
 		GroupID:    groupID,
 		GroupName:  log.GroupName,
-		RiskScore:  violationCount,
+		RiskScore:  log.ViolationCount,
 		Evidence:   evidence,
 		Action:     "account disabled by existing content moderation auto-ban; review evidence before further action",
 		OccurredAt: time.Now(),
-	})
+	}
+	if s.abuseRiskRecorder == nil {
+		DispatchHFCAbuseRiskTelegramAlert(s.settingRepo, alert)
+		return
+	}
+	recorder := s.abuseRiskRecorder
+	settingRepo := s.settingRepo
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var contentModerationLogID *int64
+		if log.ID > 0 {
+			contentModerationLogID = &log.ID
+		}
+		event, err := recorder.RecordEvent(ctx, &HFCAbuseRiskEvent{
+			Source:                 HFCAbuseRiskSourceContentModerationAutoBan,
+			Severity:               HFCAbuseRiskSeverityCritical,
+			Status:                 HFCAbuseRiskStatusOpen,
+			UserID:                 log.UserID,
+			UserEmail:              log.UserEmail,
+			APIKeyID:               log.APIKeyID,
+			APIKeyName:             log.APIKeyName,
+			GroupID:                log.GroupID,
+			GroupName:              log.GroupName,
+			RiskScore:              log.ViolationCount,
+			ContentModerationLogID: contentModerationLogID,
+			Summary:                alert.Summary,
+			Evidence: []HFCAbuseRiskEvidence{
+				hfcRiskEvidence("violation_count", "窗口累计命中", log.ViolationCount),
+				hfcRiskEvidence("ban_threshold", "自动封禁阈值", cfg.BanThreshold),
+				hfcRiskEvidence("highest_category", "最高分类", log.HighestCategory),
+				hfcRiskEvidence("highest_score", "最高分", fmt.Sprintf("%.4f", log.HighestScore)),
+				hfcRiskEvidence("endpoint", "端点", log.Endpoint),
+				hfcRiskEvidence("model", "模型", log.Model),
+			},
+		})
+		if err != nil {
+			logHFCAbuseRiskRecordFailure(HFCAbuseRiskSourceContentModerationAutoBan, userID, apiKeyID, err)
+		}
+		if event != nil && event.ID > 0 {
+			alert.EventID = event.ID
+		}
+		DispatchHFCAbuseRiskTelegramAlert(settingRepo, alert)
+	}()
 }
 
 func (s *ContentModerationService) sendViolationEmail(ctx context.Context, cfg *ContentModerationConfig, log *ContentModerationLog) error {

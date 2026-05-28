@@ -167,3 +167,19 @@ func TestMigration167SeedsTelegramRiskAlertsDisabledByDefault(t *testing.T) {
 	require.NotContains(t, sql, "UPDATE settings")
 	require.NotContains(t, sql, "hfc_telegram_risk_alert_enabled', 'true'")
 }
+
+func TestMigration168CreatesManualOnlyHFCAbuseRiskEvents(t *testing.T) {
+	content, err := FS.ReadFile("168_hfc_abuse_risk_events.sql")
+	require.NoError(t, err)
+
+	sql := string(content)
+	require.Contains(t, sql, "CREATE TABLE IF NOT EXISTS hfc_abuse_risk_events")
+	require.Contains(t, sql, "evidence                        JSONB NOT NULL DEFAULT '[]'::jsonb")
+	require.Contains(t, sql, "action_taken                    VARCHAR(64) NOT NULL DEFAULT ''")
+	require.Contains(t, sql, "signup_ip_prefix")
+	require.Contains(t, sql, "device_fingerprint_hash")
+	require.Contains(t, sql, "content_moderation_log_id")
+	require.Contains(t, sql, "CHECK (status IN ('open', 'reviewing', 'resolved', 'false_positive'))")
+	require.NotContains(t, sql, "UPDATE users")
+	require.NotContains(t, sql, "UPDATE api_keys")
+}

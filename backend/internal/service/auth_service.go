@@ -78,6 +78,7 @@ type AuthService struct {
 	promoService       *PromoService
 	affiliateService   *AffiliateService
 	defaultSubAssigner DefaultSubscriptionAssigner
+	abuseRiskRecorder  HFCAbuseRiskRecorder
 }
 
 type DefaultSubscriptionAssigner interface {
@@ -150,6 +151,13 @@ func (s *AuthService) EntClient() *dbent.Client {
 		return nil
 	}
 	return s.entClient
+}
+
+func (s *AuthService) SetHFCAbuseRiskRecorder(recorder HFCAbuseRiskRecorder) {
+	if s == nil {
+		return
+	}
+	s.abuseRiskRecorder = recorder
 }
 
 // Register 用户注册，返回token和用户
@@ -327,7 +335,7 @@ func (s *AuthService) notifySignupRiskTelegramAlert(user *User, risk signupRiskS
 	if risk.SignupUserAgentHash != "" {
 		evidence = append(evidence, "user_agent_hash="+truncateMiddle(risk.SignupUserAgentHash, 8, 8))
 	}
-	DispatchHFCAbuseRiskTelegramAlert(s.settingService.settingRepo, HFCAbuseRiskTelegramAlert{
+	alert := HFCAbuseRiskTelegramAlert{
 		Source:                "signup_risk",
 		Severity:              signupRiskTelegramSeverity(risk.TrialBonusRiskScore),
 		Summary:               "注册风控命中，已保留正常注册，仅暂停 trial bonus 资格",
@@ -339,7 +347,43 @@ func (s *AuthService) notifySignupRiskTelegramAlert(user *User, risk signupRiskS
 		Evidence:              evidence,
 		Action:                "registration allowed; trial bonus held; manual review if abuse continues",
 		OccurredAt:            time.Now(),
-	})
+	}
+	if s.abuseRiskRecorder == nil {
+		DispatchHFCAbuseRiskTelegramAlert(s.settingService.settingRepo, alert)
+		return
+	}
+	recorder := s.abuseRiskRecorder
+	settingRepo := s.settingService.settingRepo
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		event, err := recorder.RecordEvent(ctx, &HFCAbuseRiskEvent{
+			Source:                HFCAbuseRiskSourceSignupRisk,
+			Severity:              alert.Severity,
+			Status:                HFCAbuseRiskStatusOpen,
+			UserID:                &user.ID,
+			UserEmail:             user.Email,
+			RiskScore:             risk.TrialBonusRiskScore,
+			SignupIPPrefix:        risk.SignupIPPrefix,
+			DeviceFingerprintHash: risk.SignupDeviceFingerprintHash,
+			SignupUserAgentHash:   risk.SignupUserAgentHash,
+			Summary:               alert.Summary,
+			Evidence: []HFCAbuseRiskEvidence{
+				hfcRiskEvidence("hold_reason", "暂停 trial bonus 原因", risk.TrialBonusHoldReason),
+				hfcRiskEvidence("signup_ip_prefix", "注册 IP 段", risk.SignupIPPrefix),
+				hfcRiskEvidence("device_fingerprint_hash", "设备指纹 hash", truncateMiddle(risk.SignupDeviceFingerprintHash, 8, 8)),
+				hfcRiskEvidence("user_agent_hash", "User-Agent hash", truncateMiddle(risk.SignupUserAgentHash, 8, 8)),
+			},
+		})
+		if err != nil {
+			logHFCAbuseRiskRecordFailure(HFCAbuseRiskSourceSignupRisk, user.ID, 0, err)
+		}
+		if event != nil && event.ID > 0 {
+			alert.EventID = event.ID
+		}
+		DispatchHFCAbuseRiskTelegramAlert(settingRepo, alert)
+	}()
 }
 
 func signupRiskTelegramSeverity(score int) string {

@@ -44,6 +44,7 @@ type hfcTelegramRiskAlertConfig struct {
 }
 
 type HFCAbuseRiskTelegramAlert struct {
+	EventID               int64
 	Source                string
 	Severity              string
 	Summary               string
@@ -211,6 +212,9 @@ func buildHFCAbuseRiskTelegramMessage(alert HFCAbuseRiskTelegramAlert) string {
 		fmt.Sprintf("[HFC 风控告警] %s", severity),
 		"来源: " + sanitizeTelegramLine(firstNonEmpty(alert.Source, "hfc_abuse_risk")),
 		"摘要: " + sanitizeTelegramLine(alert.Summary),
+	}
+	if alert.EventID > 0 {
+		lines = append(lines, "事件: #"+strconv.FormatInt(alert.EventID, 10))
 	}
 	if alert.UserID > 0 || strings.TrimSpace(alert.UserEmail) != "" {
 		user := ""
