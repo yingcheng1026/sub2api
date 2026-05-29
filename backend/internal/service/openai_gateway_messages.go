@@ -580,11 +580,14 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 			}
 			resetTimeout()
 			if ev.err != nil {
-				if !errors.Is(ev.err, context.Canceled) && !errors.Is(ev.err, context.DeadlineExceeded) {
+				isContextErr := errors.Is(ev.err, context.Canceled) || errors.Is(ev.err, context.DeadlineExceeded)
+				isScannerLimitErr := errors.Is(ev.err, bufio.ErrTooLong)
+				if !isContextErr && !isScannerLimitErr {
 					logger.L().Warn(logPrefix+": read error",
 						zap.Error(ev.err),
 						zap.String("request_id", requestID),
 					)
+					return nil, usage, acc, newBufferedReadFailover(resp, logPrefix, ev.err)
 				}
 				return nil, usage, acc, ev.err
 			}

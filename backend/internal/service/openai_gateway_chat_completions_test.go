@@ -292,6 +292,37 @@ func TestForwardAsChatCompletions_BufferedTerminalWithoutUpstreamCloseReturns(t 
 	}
 }
 
+func TestForwardAsChatCompletions_BufferedReadErrorReturnsFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+			"X-Request-Id": []string{"rid_chat_http2_reset"},
+		},
+		Body: errReadCloser{err: errors.New("stream error: stream ID 49; INTERNAL_ERROR; received from peer")},
+	}
+
+	svc := &OpenAIGatewayService{}
+	result, err := svc.handleChatBufferedStreamingResponse(resp, c, "gpt-5.4", "gpt-5.4", "gpt-5.4", time.Now())
+
+	require.Nil(t, result)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.False(t, failoverErr.RetryableOnSameAccount)
+	require.Equal(t, "rid_chat_http2_reset", failoverErr.ResponseHeaders.Get("x-request-id"))
+	require.False(t, c.Writer.Written())
+	require.Empty(t, rec.Body.String())
+	require.Contains(t, string(failoverErr.ResponseBody), "stream error")
+}
+
 func TestForwardAsChatCompletions_DoneSentinelWithoutTerminalReturnsError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
