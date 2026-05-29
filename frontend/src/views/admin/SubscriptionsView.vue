@@ -208,11 +208,49 @@
               :rate-multiplier="row.group.rate_multiplier"
               :show-rate="false"
             />
+            <span
+              v-else-if="hasWalletBalance(row)"
+              class="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300"
+              :data-hfc-marker="ANTI_OVERWRITE_WALLET_MARKER"
+            >
+              <Icon name="creditCard" size="sm" />
+              {{ t('admin.subscriptions.walletMode') }}
+            </span>
             <span v-else class="text-sm text-gray-400 dark:text-dark-500">-</span>
           </template>
 
           <template #cell-usage="{ row }">
             <div class="min-w-[280px] space-y-2">
+              <!-- Wallet mode subscriptions have their own cap in wallet_balance_usd. -->
+              <div
+                v-if="hasWalletBalance(row)"
+                class="space-y-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-900/50 dark:bg-amber-950/30"
+                :data-hfc-marker="ANTI_OVERWRITE_WALLET_MARKER"
+                data-hfc-wallet-balance-field="wallet_balance_usd"
+                data-hfc-wallet-initial-field="wallet_initial_usd"
+              >
+                <div class="flex items-center gap-2">
+                  <span class="usage-label text-amber-700 dark:text-amber-300">
+                    {{ t('admin.subscriptions.walletRemaining') }}
+                  </span>
+                  <div class="h-1.5 flex-1 rounded-full bg-amber-100 dark:bg-amber-900/50">
+                    <div
+                      class="h-1.5 rounded-full bg-amber-500 transition-all"
+                      :style="{ width: `${Math.min(100, getWalletUsedPercent(row))}%` }"
+                    ></div>
+                  </div>
+                  <span class="usage-amount text-amber-800 dark:text-amber-200">
+                    ${{ getWalletRemainingUSD(row).toFixed(2) }}
+                    <span class="text-amber-500">/</span>
+                    ${{ getWalletInitialUSD(row).toFixed(2) }}
+                  </span>
+                </div>
+                <div class="text-xs text-amber-700/80 dark:text-amber-300/80">
+                  {{ t('admin.subscriptions.walletInitial') }}:
+                  ${{ getWalletInitialUSD(row).toFixed(2) }}
+                </div>
+              </div>
+
               <!-- Daily Usage -->
               <div v-if="row.group?.daily_limit_usd" class="usage-row">
                 <div class="flex items-center gap-2">
@@ -327,6 +365,7 @@
               <!-- No Limits - Unlimited badge -->
               <div
                 v-if="
+                  !hasWalletBalance(row) &&
                   !row.group?.daily_limit_usd &&
                   !row.group?.weekly_limit_usd &&
                   !row.group?.monthly_limit_usd
@@ -806,6 +845,13 @@ import Select from '@/components/common/Select.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
 import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
 import Icon from '@/components/icons/Icon.vue'
+import {
+  ANTI_OVERWRITE_WALLET_MARKER,
+  getWalletInitialUSD,
+  getWalletRemainingUSD,
+  getWalletUsedPercent,
+  hasWalletBalance
+} from '@/utils/subscriptionWallet'
 
 const { t } = useI18n()
 const appStore = useAppStore()
