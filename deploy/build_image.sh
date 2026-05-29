@@ -184,6 +184,26 @@ assert_group_available_account_count_guard() {
     fi
 }
 
+assert_monthly_covered_runtime_billing_guard() {
+    local middleware="${REPO_ROOT}/backend/internal/server/middleware/api_key_auth.go"
+    local service="${REPO_ROOT}/backend/internal/service/api_key_service.go"
+
+    if ! grep -Fq "GetActiveSubscriptionCoveringGroup" "${middleware}"; then
+        echo "Monthly covered billing guard failed: middleware must bill plan-covered standard groups through subscriptions." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "GROUP_NOT_IN_SUBSCRIPTION" "${middleware}"; then
+        echo "Monthly covered billing guard failed: middleware must reject uncovered subscription users instead of charging balance." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "GetActiveByPlanCoveringGroup(ctx, userID, groupID)" "${service}"; then
+        echo "Monthly covered API key guard failed: key binding must allow groups covered by the user's plan." >&2
+        return 1
+    fi
+}
+
 assert_hfc_prod_fixset_marker() {
     local dockerfile="${REPO_ROOT}/Dockerfile"
 
@@ -192,7 +212,8 @@ assert_hfc_prod_fixset_marker() {
         "monthly-cover-empty-guard=402ce708" \
         "account-stats-modal-guard=6cc80e62" \
         "group-availability-count=20260524" \
-        "monthly-covered-exclusive-bind=20260524"; do
+        "monthly-covered-exclusive-bind=20260524" \
+        "monthly-covered-runtime-billing=20260529"; do
         if ! grep -Fq "${marker}" "${dockerfile}"; then
             echo "Production fixset marker guard failed: missing ${marker} in Dockerfile." >&2
             return 1
@@ -221,6 +242,7 @@ main() {
     assert_account_test_modal_initial_load_guard
     assert_account_stats_modal_initial_load_guard
     assert_group_available_account_count_guard
+    assert_monthly_covered_runtime_billing_guard
     assert_hfc_prod_fixset_marker
 
     SUB2API_BUILD_IMAGE_SH=1 docker build -t "${image}" \

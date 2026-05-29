@@ -143,6 +143,7 @@ RUN mkdir -p /app/data && \
         'account-stats-modal-guard=6cc80e62' \
         'group-availability-count=20260524' \
         'monthly-covered-exclusive-bind=20260524' \
+        'monthly-covered-runtime-billing=20260529' \
         > /app/.hfc-prod-fixset-20260524 && \
     chown sub2api:sub2api /app/data /app/.hfc-prod-fixset-20260524
 
@@ -160,6 +161,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
         && grep -q 'account-stats-modal-guard=6cc80e62' /app/.hfc-prod-fixset-20260524 \
         && grep -q 'group-availability-count=20260524' /app/.hfc-prod-fixset-20260524 \
         && grep -q 'monthly-covered-exclusive-bind=20260524' /app/.hfc-prod-fixset-20260524 \
+        && grep -q 'monthly-covered-runtime-billing=20260529' /app/.hfc-prod-fixset-20260524 \
         && wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-8080}/health || exit 1
 
 # Run the application (entrypoint fixes /app/data ownership then execs as sub2api)
