@@ -34,6 +34,7 @@ var (
 
 const (
 	trialBonusGroupID                    int64   = 17
+	trialBonusGroupName                          = "paid-trial-bonus"
 	trialBonusPaymentBindingThresholdUSD float64 = 3
 )
 
