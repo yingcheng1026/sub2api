@@ -236,7 +236,7 @@ func TestGatewayServiceRecordUsage_PreservesRequestedAndUpstreamModels(t *testin
 	require.Equal(t, mappedModel, *usageRepo.lastLog.UpstreamModel)
 }
 
-func TestGatewayServiceRecordUsage_ClaudeSelectorRequestedSourceDoesNotOverrideMappedGPT(t *testing.T) {
+func TestGatewayServiceRecordUsage_ClaudeSelectorRequestedSourceStoresMappedGPTModel(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}
 	subRepo := &openAIRecordUsageSubRepoStub{}
@@ -274,7 +274,7 @@ func TestGatewayServiceRecordUsage_ClaudeSelectorRequestedSourceDoesNotOverrideM
 
 	require.NoError(t, err)
 	require.NotNil(t, usageRepo.lastLog)
-	require.Equal(t, "claude-haiku-4-5", usageRepo.lastLog.Model)
+	require.Equal(t, "gpt-5.4-mini", usageRepo.lastLog.Model)
 	require.Equal(t, "claude-haiku-4-5", usageRepo.lastLog.RequestedModel)
 	require.NotNil(t, usageRepo.lastLog.UpstreamModel)
 	require.Equal(t, "gpt-5.4-mini", *usageRepo.lastLog.UpstreamModel)

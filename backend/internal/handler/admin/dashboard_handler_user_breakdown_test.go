@@ -73,7 +73,7 @@ func TestGetUserBreakdown_ModelFilter(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "claude-opus-4-6", repo.capturedDim.Model)
-	require.Equal(t, usagestats.ModelSourceRequested, repo.capturedDim.ModelType)
+	require.Equal(t, usagestats.ModelSourceUpstream, repo.capturedDim.ModelType)
 	require.Equal(t, int64(0), repo.capturedDim.GroupID)
 }
 

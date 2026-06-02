@@ -627,7 +627,7 @@ func (h *DashboardHandler) GetUserBreakdown(c *gin.Context) {
 		}
 	}
 	dim.Model = c.Query("model")
-	rawModelSource := strings.TrimSpace(c.DefaultQuery("model_source", usagestats.ModelSourceRequested))
+	rawModelSource := strings.TrimSpace(c.DefaultQuery("model_source", usagestats.ModelSourceUpstream))
 	if !usagestats.IsValidModelSource(rawModelSource) {
 		response.BadRequest(c, "Invalid model_source, use requested/upstream/mapping")
 		return

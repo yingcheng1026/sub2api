@@ -98,11 +98,11 @@ type UsageLog struct {
 	AccountID int64
 	RequestID string
 	Model     string
-	// RequestedModel is the client-requested model name recorded for stable user/admin display.
+	// RequestedModel is the client-requested model name before channel/account mapping.
 	// Empty should be treated as Model for backward compatibility with historical rows.
 	RequestedModel string
 	// UpstreamModel is the actual model sent to the upstream provider after mapping.
-	// Nil means no mapping was applied (requested model was used as-is).
+	// Nil means it was not captured or the upstream model matched the requested model.
 	UpstreamModel *string
 	// ChannelID 渠道 ID
 	ChannelID *int64

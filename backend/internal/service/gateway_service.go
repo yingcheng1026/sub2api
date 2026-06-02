@@ -8436,6 +8436,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	if input.OriginalModel != "" {
 		requestedModel = input.OriginalModel
 	}
+	logModel := usageLogModelForMappedClaudeCompat(requestedModel, result.Model, input.ChannelMappedModel, result.UpstreamModel, billingModel)
 
 	// 计算费用
 	cost := s.calculateRecordUsageCost(ctx, result, apiKey, billingModel, multiplier, imageMultiplier, opts)
@@ -8452,7 +8453,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	// 创建使用日志
 	accountRateMultiplier := account.BillingRateMultiplier()
 	usageLog := s.buildRecordUsageLog(ctx, input, result, apiKey, user, account, subscription,
-		requestedModel, multiplier, imageMultiplier, accountRateMultiplier, billingType, cacheTTLOverridden, cost, opts)
+		requestedModel, logModel, multiplier, imageMultiplier, accountRateMultiplier, billingType, cacheTTLOverridden, cost, opts)
 
 	// 计算账号统计定价费用（使用最终上游模型匹配自定义规则）
 	if apiKey.GroupID != nil {
@@ -8637,6 +8638,7 @@ func (s *GatewayService) buildRecordUsageLog(
 	account *Account,
 	subscription *UserSubscription,
 	requestedModel string,
+	logModel string,
 	multiplier float64,
 	imageMultiplier float64,
 	accountRateMultiplier float64,
@@ -8652,9 +8654,9 @@ func (s *GatewayService) buildRecordUsageLog(
 		APIKeyID:              apiKey.ID,
 		AccountID:             account.ID,
 		RequestID:             requestID,
-		Model:                 result.Model,
+		Model:                 logModel,
 		RequestedModel:        requestedModel,
-		UpstreamModel:         optionalNonEqualStringPtr(result.UpstreamModel, result.Model),
+		UpstreamModel:         optionalNonEqualStringPtr(result.UpstreamModel, requestedModel),
 		ReasoningEffort:       result.ReasoningEffort,
 		InboundEndpoint:       optionalTrimmedStringPtr(input.InboundEndpoint),
 		UpstreamEndpoint:      optionalTrimmedStringPtr(input.UpstreamEndpoint),

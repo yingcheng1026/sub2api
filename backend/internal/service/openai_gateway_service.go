@@ -213,7 +213,7 @@ type OpenAIForwardResult struct {
 	RequestID  string
 	ResponseID string
 	Usage      OpenAIUsage
-	Model      string // 原始模型（用于响应和日志显示）
+	Model      string // Client-facing original model returned for protocol compatibility.
 	// BillingModel is the model used for cost calculation.
 	// When non-empty, CalculateCost uses this instead of Model.
 	// This is set by the Anthropic Messages conversion path where
@@ -5370,15 +5370,16 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if input.OriginalModel != "" {
 		requestedModel = input.OriginalModel
 	}
+	logModel := usageLogModelForMappedClaudeCompat(requestedModel, result.Model, result.BillingModel, input.ChannelMappedModel, result.UpstreamModel, billingModel)
 
 	usageLog := &UsageLog{
 		UserID:              user.ID,
 		APIKeyID:            apiKey.ID,
 		AccountID:           account.ID,
 		RequestID:           requestID,
-		Model:               result.Model,
+		Model:               logModel,
 		RequestedModel:      requestedModel,
-		UpstreamModel:       optionalNonEqualStringPtr(result.UpstreamModel, result.Model),
+		UpstreamModel:       optionalNonEqualStringPtr(result.UpstreamModel, requestedModel),
 		ServiceTier:         result.ServiceTier,
 		ReasoningEffort:     result.ReasoningEffort,
 		InboundEndpoint:     optionalTrimmedStringPtr(input.InboundEndpoint),

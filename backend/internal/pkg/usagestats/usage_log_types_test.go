@@ -33,8 +33,8 @@ func TestNormalizeModelSource(t *testing.T) {
 		{name: "requested", source: ModelSourceRequested, want: ModelSourceRequested},
 		{name: "upstream", source: ModelSourceUpstream, want: ModelSourceUpstream},
 		{name: "mapping", source: ModelSourceMapping, want: ModelSourceMapping},
-		{name: "invalid falls back", source: "foobar", want: ModelSourceRequested},
-		{name: "empty falls back", source: "", want: ModelSourceRequested},
+		{name: "invalid falls back", source: "foobar", want: ModelSourceUpstream},
+		{name: "empty falls back", source: "", want: ModelSourceUpstream},
 	}
 
 	for _, tc := range tests {

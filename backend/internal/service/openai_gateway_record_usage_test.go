@@ -1178,7 +1178,7 @@ func TestOpenAIGatewayServiceRecordUsage_BillsCompactOpenAIModelAlias(t *testing
 	require.InDelta(t, expectedCost.ActualCost, userRepo.lastAmount, 1e-12)
 }
 
-func TestOpenAIGatewayServiceRecordUsage_ClaudeSelectorRequestedSourceDoesNotOverrideMappedGPT(t *testing.T) {
+func TestOpenAIGatewayServiceRecordUsage_ClaudeSelectorRequestedSourceStoresMappedGPTModel(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	userRepo := &openAIRecordUsageUserRepoStub{}
 	subRepo := &openAIRecordUsageSubRepoStub{}
@@ -1217,8 +1217,10 @@ func TestOpenAIGatewayServiceRecordUsage_ClaudeSelectorRequestedSourceDoesNotOve
 
 	require.NoError(t, err)
 	require.NotNil(t, usageRepo.lastLog)
-	require.Equal(t, "claude-haiku-4-5", usageRepo.lastLog.Model)
+	require.Equal(t, "gpt-5.4-mini", usageRepo.lastLog.Model)
 	require.Equal(t, "claude-haiku-4-5", usageRepo.lastLog.RequestedModel)
+	require.NotNil(t, usageRepo.lastLog.UpstreamModel)
+	require.Equal(t, "gpt-5.4-mini", *usageRepo.lastLog.UpstreamModel)
 	require.InDelta(t, expectedGPTCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
 	require.NotEqual(t, claudeCost.ActualCost, usageRepo.lastLog.ActualCost)
 }
