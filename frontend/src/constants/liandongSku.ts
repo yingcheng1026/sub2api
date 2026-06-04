@@ -3,7 +3,7 @@
  *
  * Why hardcode 而不走 fetch endpoints.json:
  * - admin.handsfreeclub.com 跨子域 fetch 要 CORS,nginx 当前没配
- * - 7 个 URL 一年改不了几次,build 一次成本可控
+ * - 8 个 URL 一年改不了几次,build 一次成本可控
  */
 
 export interface LiandongMonthlyTier {
@@ -25,9 +25,10 @@ export interface LiandongCreditsTier {
   priceCny: number
 }
 
-/** 月卡 4 档 — 与 endpoints.json `pricing_links.tiers` 对齐 */
+/** 月卡 5 档 — 与 endpoints.json `pricing_links.tiers` 对齐 */
 export const LIANDONG_MONTHLY_TIERS: readonly LiandongMonthlyTier[] = [
   { quotaUsd: 100, priceCny: 29.9, name: '体验版', url: 'https://pay.ldxp.cn/item/z80wd7' },
+  { quotaUsd: 400, priceCny: 99, name: '轻量正式版', url: 'https://pay.ldxp.cn/item/neu4dr' },
   { quotaUsd: 1500, priceCny: 299, name: '标准版', url: 'https://pay.ldxp.cn/item/6zkn8r' },
   { quotaUsd: 3000, priceCny: 450, name: '进阶版', url: 'https://pay.ldxp.cn/item/zxarhv' },
   { quotaUsd: 15000, priceCny: 899, name: '旗舰版', url: 'https://pay.ldxp.cn/item/bdu9vx' }
