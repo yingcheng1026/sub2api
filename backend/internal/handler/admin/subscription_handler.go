@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
@@ -29,12 +30,14 @@ func toResponsePagination(p *pagination.PaginationResult) *response.PaginationRe
 // SubscriptionHandler handles admin subscription management
 type SubscriptionHandler struct {
 	subscriptionService *service.SubscriptionService
+	affiliateService    *service.AffiliateService
 }
 
 // NewSubscriptionHandler creates a new admin subscription handler
-func NewSubscriptionHandler(subscriptionService *service.SubscriptionService) *SubscriptionHandler {
+func NewSubscriptionHandler(subscriptionService *service.SubscriptionService, affiliateService *service.AffiliateService) *SubscriptionHandler {
 	return &SubscriptionHandler{
 		subscriptionService: subscriptionService,
+		affiliateService:    affiliateService,
 	}
 }
 
@@ -169,6 +172,16 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+
+	// Trigger affiliate rebate for the invitee's first admin-assigned subscription.
+	// Non-blocking: a rebate failure must never roll back a successful assignment.
+	if h.affiliateService != nil {
+		if baseAmount := adminAssignBaseAmount(subscription); baseAmount > 0 {
+			if _, rebateErr := h.affiliateService.AccrueInviteRebateForOrder(c.Request.Context(), subscription.UserID, baseAmount, nil); rebateErr != nil {
+				slog.Warn("admin assign: affiliate rebate failed", "userID", subscription.UserID, "subscriptionID", subscription.ID, "err", rebateErr)
+			}
+		}
 	}
 
 	response.Success(c, dto.UserSubscriptionFromServiceAdmin(subscription))
@@ -335,4 +348,21 @@ func getAdminIDFromContext(c *gin.Context) int64 {
 		return 0
 	}
 	return subject.UserID
+}
+
+// adminAssignBaseAmount returns the USD value of an admin-assigned subscription,
+// used as the base amount for affiliate rebate calculation.
+// Wallet subscriptions use the initial wallet balance; group subscriptions use
+// the group monthly quota. Returns 0 when the value cannot be determined.
+func adminAssignBaseAmount(sub *service.UserSubscription) float64 {
+	if sub == nil {
+		return 0
+	}
+	if sub.WalletInitialUSD != nil && *sub.WalletInitialUSD > 0 {
+		return *sub.WalletInitialUSD
+	}
+	if sub.Group != nil && sub.Group.MonthlyLimitUSD != nil && *sub.Group.MonthlyLimitUSD > 0 {
+		return *sub.Group.MonthlyLimitUSD
+	}
+	return 0
 }
