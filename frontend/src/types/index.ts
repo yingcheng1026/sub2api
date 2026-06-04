@@ -1531,6 +1531,8 @@ export interface SubscriptionProgress {
 
 export interface AssignSubscriptionRequest {
   user_id: number
+  /** Plan mode: backend resolves wallet quota and validity from subscription plan */
+  plan_id?: number
   group_id?: number
   validity_days?: number
   notes?: string

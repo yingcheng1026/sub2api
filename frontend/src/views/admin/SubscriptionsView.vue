@@ -537,9 +537,21 @@
           <div class="inline-flex rounded-lg border border-gray-300 dark:border-gray-600 overflow-hidden">
             <button
               type="button"
-              @click="assignForm.mode = 'group'"
+              @click="assignForm.mode = 'plan'"
               :class="[
                 'px-4 py-2 text-sm font-medium transition-colors',
+                assignForm.mode === 'plan'
+                  ? 'bg-primary-600 text-white'
+                  : 'bg-white text-gray-700 hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+              ]"
+            >
+              {{ t('admin.subscriptions.form.modePlan') }}
+            </button>
+            <button
+              type="button"
+              @click="assignForm.mode = 'group'"
+              :class="[
+                'px-4 py-2 text-sm font-medium transition-colors border-l border-gray-300 dark:border-gray-600',
                 assignForm.mode === 'group'
                   ? 'bg-primary-600 text-white'
                   : 'bg-white text-gray-700 hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
@@ -562,7 +574,54 @@
           </div>
           <p class="input-hint">{{ t('admin.subscriptions.form.modeHint') }}</p>
         </div>
-        <div v-if="assignForm.mode === 'group'">
+        <div v-if="assignForm.mode === 'plan'">
+          <label class="input-label">{{ t('admin.subscriptions.form.plan') }}</label>
+          <Select
+            v-model="assignForm.plan_id"
+            :options="subscriptionPlanOptions"
+            :placeholder="subscriptionPlansLoading ? t('common.loading') : t('admin.subscriptions.selectPlan')"
+            :disabled="subscriptionPlansLoading"
+            searchable
+          >
+            <template #selected="{ option }">
+              <div v-if="option" class="flex min-w-0 flex-col text-left">
+                <span class="truncate text-sm font-medium text-gray-900 dark:text-white">
+                  {{ (option as unknown as PlanOption).label }}
+                </span>
+                <span class="truncate text-xs text-gray-500 dark:text-gray-400">
+                  {{ (option as unknown as PlanOption).description }}
+                </span>
+              </div>
+              <span v-else class="text-gray-400">{{ t('admin.subscriptions.selectPlan') }}</span>
+            </template>
+            <template #option="{ option, selected }">
+              <div class="flex w-full min-w-0 items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="truncate text-sm font-medium text-gray-900 dark:text-white">
+                      {{ (option as unknown as PlanOption).label }}
+                    </span>
+                    <span class="rounded-full bg-primary-100 px-2 py-0.5 text-xs font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300">
+                      {{ (option as unknown as PlanOption).walletQuotaLabel }}
+                    </span>
+                  </div>
+                  <p class="truncate text-xs text-gray-500 dark:text-gray-400">
+                    {{ (option as unknown as PlanOption).description }}
+                  </p>
+                </div>
+                <Icon
+                  v-if="selected"
+                  name="check"
+                  size="sm"
+                  class="shrink-0 text-primary-500"
+                  :stroke-width="2"
+                />
+              </div>
+            </template>
+          </Select>
+          <p class="input-hint">{{ t('admin.subscriptions.planHint') }}</p>
+        </div>
+        <div v-else-if="assignForm.mode === 'group'">
           <label class="input-label">{{ t('admin.subscriptions.form.group') }}</label>
           <Select
             v-model="assignForm.group_id"
@@ -604,7 +663,7 @@
           />
           <p class="input-hint">{{ t('admin.subscriptions.form.walletInitialHint') }}</p>
         </div>
-        <div>
+        <div v-if="assignForm.mode !== 'plan'">
           <label class="input-label">{{ t('admin.subscriptions.form.validityDays') }}</label>
           <input v-model.number="assignForm.validity_days" type="number" min="1" class="input" />
           <p class="input-hint">{{ t('admin.subscriptions.validityHint') }}</p>
@@ -832,6 +891,7 @@ import type {
   AssignSubscriptionRequest
 } from '@/types'
 import type { SimpleUser } from '@/api/admin/usage'
+import type { SubscriptionPlan } from '@/types/payment'
 import type { Column } from '@/components/common/types'
 import { formatDateOnly } from '@/utils/format'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
@@ -864,6 +924,14 @@ interface GroupOption {
   platform: GroupPlatform
   subscriptionType: SubscriptionType
   rate: number
+}
+
+interface PlanOption {
+  value: number
+  label: string
+  description: string
+  walletQuotaLabel: string
+  [key: string]: unknown
 }
 
 // Guide modal state
@@ -992,6 +1060,8 @@ const statusOptions = computed(() => [
 
 const subscriptions = ref<UserSubscription[]>([])
 const groups = ref<Group[]>([])
+const subscriptionPlans = ref<SubscriptionPlan[]>([])
+const subscriptionPlansLoading = ref(false)
 const loading = ref(false)
 let abortController: AbortController | null = null
 
@@ -1043,8 +1113,9 @@ const revokingSubscription = ref<UserSubscription | null>(null)
 
 const assignForm = reactive({
   user_id: null as number | null,
-  // 'group' = v3 单 group 订阅；'wallet' = v4 钱包模式（用户级共享额度）
-  mode: 'group' as 'group' | 'wallet',
+  // 'plan' = 业务套餐档位；'group' = v3 单 group 订阅；'wallet' = 手动钱包额度
+  mode: 'plan' as 'plan' | 'group' | 'wallet',
+  plan_id: null as number | null,
   group_id: null as number | null,
   validity_days: 30,
   wallet_initial_usd: null as number | null
@@ -1081,6 +1152,35 @@ const subscriptionGroupOptions = computed(() =>
       platform: g.platform,
       subscriptionType: g.subscription_type,
       rate: g.rate_multiplier
+    }))
+)
+
+const formatMoney = (value: number, currency: 'CNY' | 'USD') =>
+  new Intl.NumberFormat(currency === 'CNY' ? 'zh-CN' : 'en-US', {
+    style: 'currency',
+    currency,
+    maximumFractionDigits: value % 1 === 0 ? 0 : 2
+  }).format(value)
+
+const planDisplayName = (plan: SubscriptionPlan) =>
+  plan.description?.trim() || plan.name
+
+const isAssignableSubscriptionPlan = (plan: SubscriptionPlan) =>
+  plan.for_sale &&
+  plan.plan_type !== 'credits' &&
+  Number(plan.wallet_quota_usd || 0) > 0 &&
+  Number(plan.validity_days || 0) > 0
+
+const subscriptionPlanOptions = computed<PlanOption[]>(() =>
+  subscriptionPlans.value
+    .filter(isAssignableSubscriptionPlan)
+    .slice()
+    .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id))
+    .map((plan) => ({
+      value: plan.id,
+      label: `${formatMoney(Number(plan.price || 0), 'CNY')} ${planDisplayName(plan)}`,
+      description: `${plan.validity_days} ${t('admin.subscriptions.form.days')} / ${formatMoney(Number(plan.wallet_quota_usd || 0), 'USD')} ${t('admin.subscriptions.form.walletQuota')}`,
+      walletQuotaLabel: formatMoney(Number(plan.wallet_quota_usd || 0), 'USD')
     }))
 )
 
@@ -1137,6 +1237,19 @@ const loadGroups = async () => {
     groups.value = await adminAPI.groups.getAll()
   } catch (error) {
     console.error('Error loading groups:', error)
+  }
+}
+
+const loadSubscriptionPlans = async () => {
+  subscriptionPlansLoading.value = true
+  try {
+    const response = await adminAPI.payment.getPlans()
+    subscriptionPlans.value = response.data || []
+  } catch (error) {
+    console.error('Error loading subscription plans:', error)
+    appStore.showError(t('admin.subscriptions.failedToLoadPlans'))
+  } finally {
+    subscriptionPlansLoading.value = false
   }
 }
 
@@ -1259,7 +1372,8 @@ const handleSort = (key: string, order: 'asc' | 'desc') => {
 const closeAssignModal = () => {
   showAssignModal.value = false
   assignForm.user_id = null
-  assignForm.mode = 'group'
+  assignForm.mode = 'plan'
+  assignForm.plan_id = null
   assignForm.group_id = null
   assignForm.validity_days = 30
   assignForm.wallet_initial_usd = null
@@ -1275,18 +1389,23 @@ const handleAssignSubscription = async () => {
     appStore.showError(t('admin.subscriptions.pleaseSelectUser'))
     return
   }
-  if (assignForm.mode === 'group') {
+  if (assignForm.mode === 'plan') {
+    if (!assignForm.plan_id) {
+      appStore.showError(t('admin.subscriptions.pleaseSelectPlan'))
+      return
+    }
+  } else if (assignForm.mode === 'group') {
     if (!assignForm.group_id) {
       appStore.showError(t('admin.subscriptions.pleaseSelectGroup'))
       return
     }
-  } else {
+  } else if (assignForm.mode === 'wallet') {
     if (!assignForm.wallet_initial_usd || assignForm.wallet_initial_usd <= 0) {
       appStore.showError(t('admin.subscriptions.walletInitialRequired'))
       return
     }
   }
-  if (!assignForm.validity_days || assignForm.validity_days < 1) {
+  if (assignForm.mode !== 'plan' && (!assignForm.validity_days || assignForm.validity_days < 1)) {
     appStore.showError(t('admin.subscriptions.validityDaysRequired'))
     return
   }
@@ -1294,20 +1413,35 @@ const handleAssignSubscription = async () => {
   submitting.value = true
   try {
     const payload: AssignSubscriptionRequest = {
-      user_id: assignForm.user_id,
-      validity_days: assignForm.validity_days
+      user_id: assignForm.user_id
     }
-    if (assignForm.mode === 'wallet') {
+    if (assignForm.mode === 'plan') {
+      payload.plan_id = assignForm.plan_id ?? undefined
+    } else if (assignForm.mode === 'wallet') {
       payload.wallet_initial_usd = assignForm.wallet_initial_usd ?? undefined
+      payload.validity_days = assignForm.validity_days
     } else {
       payload.group_id = assignForm.group_id ?? undefined
+      payload.validity_days = assignForm.validity_days
     }
     await adminAPI.subscriptions.assign(payload)
     appStore.showSuccess(t('admin.subscriptions.subscriptionAssigned'))
     closeAssignModal()
     loadSubscriptions()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.subscriptions.failedToAssign'))
+    const data = error.response?.data
+    const conflictReason = data?.metadata?.conflict_reason
+    let msg = t('admin.subscriptions.failedToAssign')
+    if (conflictReason === 'wallet_already_active') {
+      msg = t('admin.subscriptions.errorWalletAlreadyActive')
+    } else if (conflictReason === 'wallet_topup_unsupported') {
+      msg = t('admin.subscriptions.errorWalletTopupUnsupported')
+    } else if (conflictReason === 'validity_days_mismatch' || conflictReason === 'notes_mismatch') {
+      msg = t('admin.subscriptions.errorAssignConflict')
+    } else if (data?.detail || data?.message) {
+      msg = data.detail || data.message
+    }
+    appStore.showError(msg)
     console.error('Error assigning subscription:', error)
   } finally {
     submitting.value = false
@@ -1480,6 +1614,7 @@ onMounted(() => {
   loadSavedColumns()
   loadSubscriptions()
   loadGroups()
+  loadSubscriptionPlans()
   document.addEventListener('click', handleClickOutside)
 })
 

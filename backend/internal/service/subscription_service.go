@@ -11,6 +11,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -74,7 +75,7 @@ type WalletGroupKeyService interface {
 // wallet_balance_usd 和 wallet_initial_usd，并写一条 reason='topup' 流水。
 //
 // SubscriptionService 在「用户已有 active 钱包 + 本次是额度卡 (plan_type='credits')」
-// 场景下调用，避开 partial unique index 撞车。WalletService 实现此接口。
+// 场景下调用，避免为额度卡新建独立 wallet 行。WalletService 实现此接口。
 type WalletTopupService interface {
 	Topup(ctx context.Context, subscriptionID int64, deltaUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error)
 }
@@ -178,7 +179,8 @@ func (s *SubscriptionService) InvalidateSubCache(userID, groupID int64) {
 
 // AssignSubscriptionInput 分配订阅输入
 //
-// 两种模式：
+// 三种模式：
+//   - Plan 模式：PlanID > 0, WalletInitialUSD == nil，由 plan 读取钱包额度/有效期
 //   - Group 模式（v3）：GroupID > 0, WalletInitialUSD == nil
 //   - 钱包模式 (v4)：WalletInitialUSD != nil, GroupID 忽略；用户级，与 group 解耦
 type AssignSubscriptionInput struct {
@@ -190,7 +192,7 @@ type AssignSubscriptionInput struct {
 
 	// WalletInitialUSD 非 nil → 走钱包路径：创建一条 group_id=NULL 的钱包订阅，
 	// 初始余额=该值（同时写入 wallet_initial_usd 和 wallet_balance_usd）。
-	// schema 上的 partial unique index 保证一个用户最多一条 active 钱包订阅。
+	// 月卡允许一个用户多条 active wallet 订阅并存，按 expires_at 先到期先消费。
 	WalletInitialUSD *float64
 
 	// PlanID 钱包模式下用于查 subscription_plan_groups 决定建哪些 group 的 key。
@@ -215,11 +217,61 @@ func (i *AssignSubscriptionInput) IsWalletAssign() bool {
 
 // AssignSubscription 分配订阅给用户（不允许重复分配）
 func (s *SubscriptionService) AssignSubscription(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, error) {
-	sub, _, err := s.assignSubscriptionWithReuse(ctx, input)
+	normalized, err := s.normalizePlanWalletAssignInput(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	sub, _, err := s.assignSubscriptionWithReuse(ctx, normalized)
 	if err != nil {
 		return nil, err
 	}
 	return sub, nil
+}
+
+func (s *SubscriptionService) normalizePlanWalletAssignInput(ctx context.Context, input *AssignSubscriptionInput) (*AssignSubscriptionInput, error) {
+	if input == nil {
+		return nil, ErrSubscriptionNilInput
+	}
+	if input.PlanID == nil || input.WalletInitialUSD != nil {
+		return input, nil
+	}
+
+	client := s.entClient
+	if tx := dbent.TxFromContext(ctx); tx != nil {
+		client = tx.Client()
+	}
+	if client == nil {
+		return nil, infraerrors.BadRequest("SUBSCRIPTION_PLAN_UNAVAILABLE", "subscription plan lookup is unavailable")
+	}
+
+	plan, err := client.SubscriptionPlan.Query().
+		Where(subscriptionplan.IDEQ(*input.PlanID)).
+		Only(ctx)
+	if dbent.IsNotFound(err) {
+		return nil, infraerrors.BadRequest("SUBSCRIPTION_PLAN_NOT_FOUND", "subscription plan not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if plan.WalletQuotaUsd == nil || *plan.WalletQuotaUsd <= 0 {
+		return nil, infraerrors.BadRequest("SUBSCRIPTION_PLAN_NOT_WALLET", "subscription plan is not a wallet plan")
+	}
+
+	walletInitial := *plan.WalletQuotaUsd
+	planType, err := validatePlanType(plan.PlanType)
+	if err != nil {
+		return nil, err
+	}
+	return &AssignSubscriptionInput{
+		UserID:           input.UserID,
+		GroupID:          input.GroupID,
+		ValidityDays:     plan.ValidityDays,
+		AssignedBy:       input.AssignedBy,
+		Notes:            input.Notes,
+		WalletInitialUSD: &walletInitial,
+		PlanID:           input.PlanID,
+		PlanType:         planType,
+	}, nil
 }
 
 // AssignOrExtendSubscription 分配或续期订阅（用于兑换码等场景）
@@ -390,13 +442,14 @@ func (s *SubscriptionService) createSubscription(ctx context.Context, input *Ass
 // assignWalletSubscriptionWithReuse 钱包模式分配（v4）。
 //
 // 三条分支：
-//  1. 用户没有 active 钱包 → 新建。
+//  1. 用户没有 active 钱包，或本次是月卡（PlanType='subscription'）→ 新建独立行。
+//     月卡叠月卡：允许多条 active wallet 并存，各自独立到期时间和余额，
+//     计费时按 expires_at 升序选行（先到期先消费）。
 //  2. 已有 active 钱包 + 本次是额度卡 (PlanType='credits') →
 //     调用 walletTopupService.Topup，把 quota 合入现有钱包（balance+initial 双 +delta，
 //     ledger 写 reason='topup'）；不新建 user_subscriptions 行。设计 §2.3。
-//  3. 已有 active 钱包 + 本次是月卡（或未注入 topup 服务）→
-//     返回 ErrSubscriptionAssignConflict（conflict_reason=wallet_already_active 或
-//     wallet_topup_unsupported）；partial unique index 兜底拦截。
+//  3. 已有 active 钱包 + 本次是额度卡 + 未注入 topup 服务 →
+//     返回 ErrSubscriptionAssignConflict（conflict_reason=wallet_topup_unsupported）。
 //
 // 不复用 group 路径的 ExistsByUserIDAndGroupID 是因为钱包订阅 group_id=NULL，
 // 复合查询用 group_id=0 拿不到；改用 GetActiveWalletByUserID。
@@ -405,6 +458,20 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 		return nil, false, fmt.Errorf("wallet_initial_usd must be > 0")
 	}
 
+	// 月卡（subscription）直接新建独立行，支持多张月卡并存。
+	// credits 额度卡才走「叠加到现有行」路径。
+	if !input.IsCreditsAssign() {
+		sub, err := s.createWalletSubscription(ctx, input)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := s.ensureWalletGroupKeys(ctx, input, sub); err != nil {
+			return nil, false, err
+		}
+		return sub, false, nil
+	}
+
+	// 额度卡：查找现有 active 钱包并叠加。
 	existing, err := s.userSubRepo.GetActiveWalletByUserID(ctx, input.UserID)
 	if err != nil && !errors.Is(err, ErrSubscriptionNotFound) {
 		return nil, false, err
@@ -413,6 +480,7 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 		return s.topupExistingWallet(ctx, input, existing)
 	}
 
+	// 额度卡但还没有任何 active 钱包 → 新建。
 	sub, err := s.createWalletSubscription(ctx, input)
 	if err != nil {
 		return nil, false, err
@@ -426,10 +494,10 @@ func (s *SubscriptionService) assignWalletSubscriptionWithReuse(ctx context.Cont
 	return sub, false, nil
 }
 
-// topupExistingWallet 用户已有 active 钱包 → 走 B2.4 叠加路径或拒绝。
+// topupExistingWallet 用户已有 active 钱包 + credits → 走 B2.4 叠加路径或拒绝。
 //
-// 仅当 input.PlanType='credits' 且注入了 walletTopupService 时才叠加；否则按老逻辑
-// 返回 conflict，避免月卡叠月卡 / 月卡叠 trial 等语义混乱。
+// 常规入口只会让 credits 调到这里；非 credits 若误入则返回 conflict 作为兜底。
+// 未注入 walletTopupService 时返回 wallet_topup_unsupported，避免额度卡静默丢失。
 //
 // 返回 reused=true，sub.ID 不变（叠加在 existing 行上），但 WalletBalanceUSD /
 // WalletInitialUSD 字段已更新到叠加后的值；同时 ensureWalletGroupKeys 也会跑一遍

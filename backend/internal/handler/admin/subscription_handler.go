@@ -43,7 +43,8 @@ func NewSubscriptionHandler(subscriptionService *service.SubscriptionService, af
 
 // AssignSubscriptionRequest represents assign subscription request.
 //
-// 两种模式二选一：
+// 三种模式三选一：
+//   - Plan 模式：填 plan_id，由 plan 读取钱包额度/有效期
 //   - Group 模式（v3）：填 group_id，wallet_initial_usd 留空
 //   - 钱包模式 (v4)：填 wallet_initial_usd（>0），group_id 忽略；用户级钱包
 //     additionally 可填 plan_id → 自动按 plan 关联 groups 建 N 把分组 key
@@ -151,9 +152,9 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 		return
 	}
 
-	// 钱包模式 ↔ group 模式互斥校验：必须提供其一
-	if req.WalletInitialUSD == nil && req.GroupID <= 0 {
-		response.BadRequest(c, "either group_id or wallet_initial_usd is required")
+	// Plan / 钱包 / group 模式：必须提供其一。
+	if req.PlanID == nil && req.WalletInitialUSD == nil && req.GroupID <= 0 {
+		response.BadRequest(c, "one of plan_id, group_id, or wallet_initial_usd is required")
 		return
 	}
 
