@@ -267,6 +267,13 @@
 - Catalogued user-facing page changes: Dashboard balance CTA and shared recharge/renew modal, purchase-page redeem-code expiry reminder, subscription-page shared modal reuse, redeem-page localized error extraction, Opus 4.8 dashboard/model badge display, and wallet display helpers.
 - Reconfirmed the removed Opus 4.8 customer-side monthly-card banners stay removed from purchase, subscription, and renewal surfaces; retained Opus 4.8 display only for backend/admin/dashboard/model-entry contexts.
 
+## 2026-06-04 - HFC wallet renewal entry always visible
+
+- Fixed the wallet dashboard renewal entry so users with an active wallet monthly card can always see a `Renew` / `续费` button, even when the remaining wallet balance is still above the low-balance warning threshold.
+- Kept the low-balance / exhausted warning as a reminder only; it no longer controls whether the renewal entry exists.
+- Added a frontend marker `data-hfc-renew-entry="wallet"` and a targeted component test covering both normal-balance and low-balance wallet states.
+- This is frontend display/entry behavior only. It does not change billing, wallet ledger, monthly-card deduction, prices, multipliers, payment callback handling, platform quota, group coverage, LoadFactor, dispatch priority, production data, or migrations.
+
 ## 2026-06-01 - HFC GPT-group Image2 production recovery
 
 - Cleaned content-moderation audit non-hit policy names so allowed input/output audit rows record `moderation_pass_input` / `moderation_pass_output` instead of legacy `moderation_flagged_*` fallback labels.
