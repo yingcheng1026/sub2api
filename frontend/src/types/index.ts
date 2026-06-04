@@ -643,8 +643,6 @@ export interface CreateGroupRequest {
   supported_model_scopes?: string[]
   require_oauth_only?: boolean
   require_privacy_set?: boolean
-  // 从指定分组复制账号
-  copy_accounts_from_group_ids?: number[]
 }
 
 export interface UpdateGroupRequest {
@@ -671,7 +669,6 @@ export interface UpdateGroupRequest {
   supported_model_scopes?: string[]
   require_oauth_only?: boolean
   require_privacy_set?: boolean
-  copy_accounts_from_group_ids?: number[]
 }
 
 // ==================== Account & Proxy Types ====================
