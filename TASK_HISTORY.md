@@ -274,6 +274,13 @@
 - Added a frontend marker `data-hfc-renew-entry="wallet"` and a targeted component test covering both normal-balance and low-balance wallet states.
 - This is frontend display/entry behavior only. It does not change billing, wallet ledger, monthly-card deduction, prices, multipliers, payment callback handling, platform quota, group coverage, LoadFactor, dispatch priority, production data, or migrations.
 
+## 2026-06-05 - HFC paid-lite subscription group sync
+
+- Synced production admin subscription assignment data for the 99 yuan paid-lite tier by adding/updating `paid-lite-v3` as an active subscription group with 400 USD monthly quota, 50 USD daily cap, and sort order between `paid-trial-v3` and `paid-standard-v3`.
+- Corrected `paid-lite-v3-30d` plan coverage so the plan maps to `paid-lite-v3` instead of `paid-trial-v3`, while preserving its shared coverage groups `cc-default`, `openai-default`, `gemini-default`, and `cc-antigravity`.
+- Added `deploy/sync_paid_lite_subscription_group_20260605.sql` as an idempotent production replay script for the admin subscription-group sync.
+- Production verification: groups query showed `paid-lite-v3` active at sort order 102, `paid-lite-v3-30d` remained price 99 / wallet quota 400 / for_sale=true / sort order 2, public admin/API probes returned 200, and the anti-overwrite gate plus monthly billing smoke passed with the dedicated zero-balance monthly test account still at balance 0.00000000.
+
 ## 2026-06-01 - HFC GPT-group Image2 production recovery
 
 - Cleaned content-moderation audit non-hit policy names so allowed input/output audit rows record `moderation_pass_input` / `moderation_pass_output` instead of legacy `moderation_flagged_*` fallback labels.
