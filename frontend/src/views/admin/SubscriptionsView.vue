@@ -1260,7 +1260,19 @@ const handleAssignSubscription = async () => {
     closeAssignModal()
     loadSubscriptions()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.subscriptions.failedToAssign'))
+    const data = error.response?.data
+    const conflictReason = data?.metadata?.conflict_reason
+    let msg = t('admin.subscriptions.failedToAssign')
+    if (conflictReason === 'wallet_already_active') {
+      msg = t('admin.subscriptions.errorWalletAlreadyActive')
+    } else if (conflictReason === 'wallet_topup_unsupported') {
+      msg = t('admin.subscriptions.errorWalletTopupUnsupported')
+    } else if (conflictReason === 'validity_days_mismatch' || conflictReason === 'notes_mismatch') {
+      msg = t('admin.subscriptions.errorAssignConflict')
+    } else if (data?.message) {
+      msg = data.message
+    }
+    appStore.showError(msg)
     console.error('Error assigning subscription:', error)
   } finally {
     submitting.value = false
