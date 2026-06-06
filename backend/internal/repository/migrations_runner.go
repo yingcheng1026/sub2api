@@ -179,7 +179,7 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 						"migration %s checksum mismatch (db=%s file=%s)\n"+
 							"This migration contains data-changing SQL (UPDATE/INSERT/DELETE/MERGE/COPY), so checksum compatibility is disabled and manual review is required.\n"+
 							"Review the applied production state, then either create a new remediation migration or explicitly document why no data backfill is needed.\n"+
-							"Do not silently whitelist checksum mismatches for data migrations.",
+							"Do not silently whitelist checksum mismatches for data migrations",
 						name, existing, checksum,
 					)
 				}
