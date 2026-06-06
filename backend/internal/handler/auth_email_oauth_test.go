@@ -404,6 +404,18 @@ func (r *oauthEmailAffiliateRepoStub) GetAffiliateUserOverview(context.Context, 
 	panic("unexpected GetAffiliateUserOverview call")
 }
 
+func (r *oauthEmailAffiliateRepoStub) GetUserSignupIPPrefix(context.Context, int64) (string, error) {
+	return "", nil
+}
+
+func (r *oauthEmailAffiliateRepoStub) HasInviteeFirstOrderRebate(context.Context, int64) (bool, error) {
+	return false, nil
+}
+
+func (r *oauthEmailAffiliateRepoStub) AccrueInviteeFirstOrderQuota(context.Context, int64, float64) (bool, error) {
+	return false, nil
+}
+
 func findSetCookieValue(cookies []*http.Cookie, name string) string {
 	for _, cookie := range cookies {
 		if cookie != nil && strings.EqualFold(cookie.Name, name) && cookie.MaxAge >= 0 {

@@ -114,6 +114,13 @@ type AffiliateRepository interface {
 	ListAffiliateRebateRecords(ctx context.Context, filter AffiliateRecordFilter) ([]AffiliateRebateRecord, int64, error)
 	ListAffiliateTransferRecords(ctx context.Context, filter AffiliateRecordFilter) ([]AffiliateTransferRecord, int64, error)
 	GetAffiliateUserOverview(ctx context.Context, userID int64) (*AffiliateUserOverview, error)
+	// GetUserSignupIPPrefix 查询指定用户的注册 IP 前缀（/24 段），用于防自邀比对。
+	// 用户不存在或字段为空时返回空字符串，不报错。
+	GetUserSignupIPPrefix(ctx context.Context, userID int64) (string, error)
+	// HasInviteeFirstOrderRebate 检查被邀请人是否已收到过首单返利（防重触发）。
+	HasInviteeFirstOrderRebate(ctx context.Context, inviteeUserID int64) (bool, error)
+	// AccrueInviteeFirstOrderQuota 向被邀请人发放首单返利至 aff_quota。
+	AccrueInviteeFirstOrderQuota(ctx context.Context, inviteeUserID int64, amount float64) (bool, error)
 }
 
 // AffiliateAdminFilter 列表筛选条件
@@ -266,7 +273,9 @@ func (s *AffiliateService) GetAffiliateDetail(ctx context.Context, userID int64)
 	}, nil
 }
 
-func (s *AffiliateService) BindInviterByCode(ctx context.Context, userID int64, rawCode string) error {
+// BindInviterByCode 绑定邀请人。inviteeIPPrefix 为被邀请人注册时的 /24 IP 段，
+// 与邀请人注册 IP 段相同则静默跳过（防自邀），传空字符串则跳过 IP 检查。
+func (s *AffiliateService) BindInviterByCode(ctx context.Context, userID int64, rawCode, inviteeIPPrefix string) error {
 	code := strings.ToUpper(strings.TrimSpace(rawCode))
 	if code == "" {
 		return nil
@@ -299,6 +308,14 @@ func (s *AffiliateService) BindInviterByCode(ctx context.Context, userID int64, 
 	}
 	if inviterSummary == nil || inviterSummary.UserID <= 0 || inviterSummary.UserID == userID {
 		return ErrAffiliateCodeInvalid
+	}
+
+	// 同 /24 IP 段防自邀：静默跳过绑定，不报错、不阻断注册
+	if inviteeIPPrefix != "" {
+		inviterIPPrefix, _ := s.repo.GetUserSignupIPPrefix(ctx, inviterSummary.UserID)
+		if inviterIPPrefix != "" && strings.EqualFold(inviteeIPPrefix, inviterIPPrefix) {
+			return nil
+		}
 	}
 
 	bound, err := s.repo.BindInviter(ctx, userID, inviterSummary.UserID)
@@ -386,6 +403,75 @@ func (s *AffiliateService) AccrueInviteRebateForOrder(ctx context.Context, invit
 	return rebate, nil
 }
 
+// AccrueInviteRebateForOrderWithOverride 与 AccrueInviteRebateForOrder 相同，但允许
+// 调用方传入比例 override（如卡类型差异化比例）。优先级：邀请人专属率 > override > 全局。
+func (s *AffiliateService) AccrueInviteRebateForOrderWithOverride(ctx context.Context, inviteeUserID int64, baseRechargeAmount float64, rateOverride *float64, sourceOrderID *int64) (float64, error) {
+	if s == nil || s.repo == nil {
+		return 0, nil
+	}
+	if inviteeUserID <= 0 || baseRechargeAmount <= 0 || math.IsNaN(baseRechargeAmount) || math.IsInf(baseRechargeAmount, 0) {
+		return 0, nil
+	}
+	if !s.IsEnabled(ctx) {
+		return 0, nil
+	}
+
+	inviteeSummary, err := s.repo.EnsureUserAffiliate(ctx, inviteeUserID)
+	if err != nil {
+		return 0, err
+	}
+	if inviteeSummary.InviterID == nil || *inviteeSummary.InviterID <= 0 {
+		return 0, nil
+	}
+
+	inviterSummary, err := s.repo.EnsureUserAffiliate(ctx, *inviteeSummary.InviterID)
+	if err != nil {
+		return 0, err
+	}
+	if s.settingService != nil {
+		if durationDays := s.settingService.GetAffiliateRebateDurationDays(ctx); durationDays > 0 {
+			if time.Now().After(inviteeSummary.CreatedAt.AddDate(0, 0, durationDays)) {
+				return 0, nil
+			}
+		}
+	}
+
+	rebateRatePercent := s.resolveRebateRatePercentWithOverride(ctx, inviterSummary, rateOverride)
+	rebate := roundTo(baseRechargeAmount*(rebateRatePercent/100), 8)
+	if rebate <= 0 {
+		return 0, nil
+	}
+
+	if s.settingService != nil {
+		if perInviteeCap := s.settingService.GetAffiliateRebatePerInviteeCap(ctx); perInviteeCap > 0 {
+			existing, err := s.repo.GetAccruedRebateFromInvitee(ctx, *inviteeSummary.InviterID, inviteeUserID)
+			if err != nil {
+				return 0, err
+			}
+			if existing >= perInviteeCap {
+				return 0, nil
+			}
+			if remaining := perInviteeCap - existing; rebate > remaining {
+				rebate = roundTo(remaining, 8)
+			}
+		}
+	}
+
+	var freezeHours int
+	if s.settingService != nil {
+		freezeHours = s.settingService.GetAffiliateRebateFreezeHours(ctx)
+	}
+
+	applied, err := s.repo.AccrueQuota(ctx, *inviteeSummary.InviterID, inviteeUserID, rebate, freezeHours, sourceOrderID)
+	if err != nil {
+		return 0, err
+	}
+	if !applied {
+		return 0, nil
+	}
+	return rebate, nil
+}
+
 // resolveRebateRatePercent returns the inviter's exclusive rate when set,
 // otherwise the global setting value (clamped to [Min, Max]).
 func (s *AffiliateService) resolveRebateRatePercent(ctx context.Context, inviter *AffiliateSummary) float64 {
@@ -399,6 +485,20 @@ func (s *AffiliateService) resolveRebateRatePercent(ctx context.Context, inviter
 	return s.globalRebateRatePercent(ctx)
 }
 
+// resolveRebateRatePercentWithOverride 优先级：邀请人专属率 > override（卡类型）> 全局率。
+func (s *AffiliateService) resolveRebateRatePercentWithOverride(ctx context.Context, inviter *AffiliateSummary, override *float64) float64 {
+	if inviter != nil && inviter.AffRebateRatePercent != nil {
+		v := *inviter.AffRebateRatePercent
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			return clampAffiliateRebateRate(v)
+		}
+	}
+	if override != nil {
+		return clampAffiliateRebateRate(*override)
+	}
+	return s.globalRebateRatePercent(ctx)
+}
+
 // globalRebateRatePercent reads the system-wide rebate rate via SettingService,
 // returning the documented default when SettingService is unavailable.
 func (s *AffiliateService) globalRebateRatePercent(ctx context.Context) float64 {
@@ -406,6 +506,42 @@ func (s *AffiliateService) globalRebateRatePercent(ctx context.Context) float64 
 		return AffiliateRebateRateDefault
 	}
 	return s.settingService.GetAffiliateRebateRatePercent(ctx)
+}
+
+// AccrueInviteeFirstOrderRebate 新人首单 5%：被邀请人首次兑换正价链动卡时，
+// 按面值 AffiliateRebateInviteeFirst% 入本人余额。per-user 首单锁防重触发。
+// 被邀请人无邀请人、总开关关闭、或已触发过则静默返回 0。
+func (s *AffiliateService) AccrueInviteeFirstOrderRebate(ctx context.Context, inviteeUserID int64, baseAmount float64) (float64, error) {
+	if s == nil || s.repo == nil {
+		return 0, nil
+	}
+	if !s.IsEnabled(ctx) {
+		return 0, nil
+	}
+	inviteeSummary, err := s.repo.EnsureUserAffiliate(ctx, inviteeUserID)
+	if err != nil {
+		return 0, err
+	}
+	if inviteeSummary.InviterID == nil || *inviteeSummary.InviterID <= 0 {
+		return 0, nil // 没有邀请人，不给首单返利
+	}
+	// 首单判定：检查 ledger 是否已有该用户的 first_order 记录
+	alreadyRewarded, err := s.repo.HasInviteeFirstOrderRebate(ctx, inviteeUserID)
+	if err != nil || alreadyRewarded {
+		return 0, err
+	}
+	rebate := roundTo(baseAmount*(AffiliateRebateInviteeFirst/100), 8)
+	if rebate <= 0 {
+		return 0, nil
+	}
+	applied, err := s.repo.AccrueInviteeFirstOrderQuota(ctx, inviteeUserID, rebate)
+	if err != nil {
+		return 0, err
+	}
+	if !applied {
+		return 0, nil
+	}
+	return rebate, nil
 }
 
 func (s *AffiliateService) TransferAffiliateQuota(ctx context.Context, userID int64) (float64, float64, error) {

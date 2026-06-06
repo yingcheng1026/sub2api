@@ -29,7 +29,16 @@ const (
 	AffiliateRebateDurationDaysDefault  = 0     // 0 = 永久有效
 	AffiliateRebateDurationDaysMax      = 3650  // ~10 年
 	AffiliateRebatePerInviteeCapDefault = 0.0   // 0 = 无上限
+
+	// 差异化邀请返利比例（王哥 5/31 定稿，6/6 重申）
+	AffiliateRebateCreditsCardRate = 15.0 // 余额卡（wallet type，plan 11/12/13）
+	AffiliateRebatePackageRate     = 10.0 // 套餐月卡 + plan18（wallet/subscription）
+	AffiliateRebateInviteeFirst    = 5.0  // 新人首单（被邀请人，链动卡都给）
 )
+
+// affiliateCreditsPlanIDs 是余额卡套餐 ID 集合，这类 wallet 码走 15% 邀请人返利。
+// plan 11=credits-30, plan 12=credits-100, plan 13=credits-500
+var affiliateCreditsPlanIDs = map[int64]bool{11: true, 12: true, 13: true}
 
 // Platform constants
 const (

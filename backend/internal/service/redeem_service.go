@@ -423,9 +423,15 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	// 事务提交成功后失效缓存
 	s.invalidateRedeemCaches(ctx, userID, redeemCode)
 
-	// 余额类正数兑换码触发邀请返利（best-effort，失败不影响兑换结果）
-	if redeemCode.Type == RedeemTypeBalance && redeemCode.Value > 0 {
-		s.tryAccrueAffiliateRebateForRedeem(ctx, userID, redeemCode.Value)
+	// 邀请返利触发（best-effort，失败不影响兑换结果）
+	// 触发范围：balance / wallet / subscription 正数码，subscription 缩短/退款码（ValidityDays<0）除外。
+	if redeemCode.Value > 0 && isAffiliateRebateTriggerRedeem(redeemCode) {
+		override := inviterRebateOverrideForRedeem(redeemCode)
+		s.tryAccrueAffiliateRebateForRedeemWithOverride(ctx, userID, redeemCode.Value, override)
+		// 非散装 balance 码额外触发新人首单 5%
+		if redeemCode.Type != RedeemTypeBalance {
+			s.tryAccrueInviteeFirstOrderRebateForRedeem(ctx, userID, redeemCode.Value)
+		}
 	}
 
 	// 重新获取更新后的兑换码
@@ -549,7 +555,39 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 	}
 }
 
-func (s *RedeemService) tryAccrueAffiliateRebateForRedeem(ctx context.Context, userID int64, amount float64) {
+// isAffiliateRebateTriggerRedeem 判断该兑换码是否触发邀请返利。
+// subscription 缩短/退款码（ValidityDays<0）不触发。
+func isAffiliateRebateTriggerRedeem(code *RedeemCode) bool {
+	switch code.Type {
+	case RedeemTypeBalance, RedeemTypeWallet:
+		return true
+	case RedeemTypeSubscription:
+		return code.ValidityDays >= 0
+	default:
+		return false
+	}
+}
+
+// inviterRebateOverrideForRedeem 根据兑换码类型返回邀请人差异化比例 override。
+// balance 类返回 nil（走全局 20%），wallet/subscription 类返回对应比例。
+func inviterRebateOverrideForRedeem(code *RedeemCode) *float64 {
+	switch code.Type {
+	case RedeemTypeWallet:
+		if code.PlanID != nil && affiliateCreditsPlanIDs[*code.PlanID] {
+			rate := AffiliateRebateCreditsCardRate // 余额卡 15%
+			return &rate
+		}
+		rate := AffiliateRebatePackageRate // plan18 等归套餐档 10%
+		return &rate
+	case RedeemTypeSubscription:
+		rate := AffiliateRebatePackageRate // 月卡 10%
+		return &rate
+	default:
+		return nil // balance → 全局率
+	}
+}
+
+func (s *RedeemService) tryAccrueAffiliateRebateForRedeemWithOverride(ctx context.Context, userID int64, amount float64, override *float64) {
 	if ctx.Value(ctxKeySkipRedeemAffiliate{}) != nil {
 		return
 	}
@@ -559,7 +597,7 @@ func (s *RedeemService) tryAccrueAffiliateRebateForRedeem(ctx context.Context, u
 	if !s.affiliateService.IsEnabled(ctx) {
 		return
 	}
-	rebate, err := s.affiliateService.AccrueInviteRebate(ctx, userID, amount)
+	rebate, err := s.affiliateService.AccrueInviteRebateForOrderWithOverride(ctx, userID, amount, override, nil)
 	if err != nil {
 		logger.LegacyPrintf("service.redeem", "[Redeem] affiliate rebate failed for user %d amount %.2f: %v", userID, amount, err)
 		return
@@ -567,6 +605,31 @@ func (s *RedeemService) tryAccrueAffiliateRebateForRedeem(ctx context.Context, u
 	if rebate > 0 {
 		logger.LegacyPrintf("service.redeem", "[Redeem] affiliate rebate accrued %.8f for inviter of user %d", rebate, userID)
 	}
+}
+
+// tryAccrueInviteeFirstOrderRebateForRedeem 新人首单 5%：被邀请人兑换首张正价链动卡时，
+// 按面值 5% 入本人余额。per-user 锁防重入，只触发一次。
+func (s *RedeemService) tryAccrueInviteeFirstOrderRebateForRedeem(ctx context.Context, userID int64, amount float64) {
+	if ctx.Value(ctxKeySkipRedeemAffiliate{}) != nil {
+		return
+	}
+	if s.affiliateService == nil || !s.affiliateService.IsEnabled(ctx) {
+		return
+	}
+	// 检查是否已有过返利（首单判定：此前无其他 used 且 value>0 的非 balance 码）
+	// 用 redis / DB 锁，这里通过 AffiliateService 的首单专属接口实现
+	rebate, err := s.affiliateService.AccrueInviteeFirstOrderRebate(ctx, userID, amount)
+	if err != nil {
+		logger.LegacyPrintf("service.redeem", "[Redeem] invitee first-order rebate failed for user %d: %v", userID, err)
+		return
+	}
+	if rebate > 0 {
+		logger.LegacyPrintf("service.redeem", "[Redeem] invitee first-order rebate %.8f accrued for user %d", rebate, userID)
+	}
+}
+
+func (s *RedeemService) tryAccrueAffiliateRebateForRedeem(ctx context.Context, userID int64, amount float64) {
+	s.tryAccrueAffiliateRebateForRedeemWithOverride(ctx, userID, amount, nil)
 }
 
 // GetByID 根据ID获取兑换码
