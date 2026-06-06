@@ -2,6 +2,7 @@
   <!-- 续费 / 充值 SKU 选择 modal — 链动小铺直跳,绕开内置 ZPay -->
   <div
     v-if="show"
+    data-hfc-liandong-renew-modal="wallet"
     class="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4"
     @click.self="emit('close')"
   >
@@ -56,6 +57,9 @@
               </div>
               <div class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
                 ${{ tier.quotaUsd.toLocaleString() }} USD 月配额
+              </div>
+              <div class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
+                每日 cap {{ formatDailyCap(tier.dailyCapUsd) }}
               </div>
             </div>
             <div class="text-right">
@@ -142,6 +146,10 @@ const recommendedTier = computed(() => {
 function openLiandong(url: string) {
   window.open(url, '_blank', 'noopener')
   emit('close')
+}
+
+function formatDailyCap(capUsd: number | null): string {
+  return capUsd == null ? '不限' : `$${capUsd.toLocaleString()}`
 }
 
 function copyCustomWechat() {
