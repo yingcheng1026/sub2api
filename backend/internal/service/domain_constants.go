@@ -43,8 +43,8 @@ var affiliateCreditsPlanIDs = map[int64]bool{11: true, 12: true, 13: true}
 
 // AffiliateRebateOverrideForAdminAssign 决定 admin 后台分配订阅时的邀请人返利 override。
 // 后台分配只有 planID 可判类型（拿不到兑换码的 wallet/subscription 区分），故采用最稳口径：
-//   - 余额卡 plan 11/12/13 → 余额卡率（当前 10%）
-//   - 其余（月卡及其它）→ 订阅率 0%（不保本 SKU 不给佣金；后台手动发 ¥99 极罕见，归 0 也是省成本方向）
+// 余额卡 plan 11/12/13 走余额卡率（当前 10%），其余（月卡及其它）走订阅率 0%
+// （不保本 SKU 不给佣金；后台手动发 ¥99 极罕见，归 0 也是省成本方向）。
 // 返回 0 而非 nil，避免落回全局 20% 率。
 func AffiliateRebateOverrideForAdminAssign(planID *int64) *float64 {
 	if planID != nil && affiliateCreditsPlanIDs[*planID] {
