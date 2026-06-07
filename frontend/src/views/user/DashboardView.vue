@@ -18,12 +18,16 @@
         </div>
       </template>
     </div>
+    <RenewLiandongModal
+      :show="renewModalSub !== null"
+      :subscription="renewModalSub"
+      @close="closeRenewModal"
+    />
   </AppLayout>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { usageAPI, type UserDashboardStats as UserStatsType } from '@/api/usage'
 import subscriptionsAPI from '@/api/subscriptions'
@@ -35,11 +39,11 @@ import UserDashboardRecentUsage from '@/components/user/dashboard/UserDashboardR
 import UserDashboardQuickActions from '@/components/user/dashboard/UserDashboardQuickActions.vue'
 import WalletBalanceCard from '@/components/user/WalletBalanceCard.vue'
 import WalletModelRouteList from '@/components/user/WalletModelRouteList.vue'
+import RenewLiandongModal from '@/components/user/RenewLiandongModal.vue'
 import type { UsageLog, TrendDataPoint, ModelStat, UserSubscription } from '@/types'
 
 const authStore = useAuthStore()
 const user = computed(() => authStore.user)
-const router = useRouter()
 const stats = ref<UserStatsType | null>(null)
 const loading = ref(false)
 const loadingUsage = ref(false)
@@ -48,6 +52,7 @@ const trendData = ref<TrendDataPoint[]>([])
 const modelStats = ref<ModelStat[]>([])
 const recentUsage = ref<UsageLog[]>([])
 const walletSubscription = ref<UserSubscription | null>(null)
+const renewModalSub = ref<UserSubscription | null>(null)
 
 const formatLD = (d: Date) => d.toISOString().split('T')[0]
 const startDate = ref(formatLD(new Date(Date.now() - 6 * 86400000)))
@@ -111,7 +116,11 @@ const loadWalletSubscription = async () => {
 }
 
 const goRenew = (sub: UserSubscription) => {
-  router.push({ path: '/purchase', query: { tab: 'subscription', wallet: '1', sub: String(sub.id) } })
+  renewModalSub.value = sub
+}
+
+const closeRenewModal = () => {
+  renewModalSub.value = null
 }
 
 const refreshAll = () => {

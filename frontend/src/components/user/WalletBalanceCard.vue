@@ -3,7 +3,7 @@
     class="overflow-hidden rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 dark:border-amber-900/40 dark:from-amber-950/40 dark:via-dark-800 dark:to-orange-950/40"
   >
     <!-- Header -->
-    <div class="flex items-center justify-between border-b border-amber-100 p-4 dark:border-amber-900/40">
+    <div class="flex items-center justify-between gap-3 border-b border-amber-100 p-4 dark:border-amber-900/40">
       <div class="flex items-center gap-3">
         <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
           <Icon name="creditCard" size="lg" />
@@ -17,18 +17,27 @@
           </p>
         </div>
       </div>
-      <span
-        :class="[
-          'rounded-full px-2 py-0.5 text-xs font-medium',
-          subscription.status === 'active'
-            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
-            : subscription.status === 'expired'
-              ? 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-400'
-              : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-        ]"
-      >
-        {{ t(`userSubscriptions.status.${subscription.status}`) }}
-      </span>
+      <div class="flex shrink-0 items-center gap-2">
+        <span
+          :class="[
+            'rounded-full px-2 py-0.5 text-xs font-medium',
+            subscription.status === 'active'
+              ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+              : subscription.status === 'expired'
+                ? 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-400'
+                : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+          ]"
+        >
+          {{ t(`userSubscriptions.status.${subscription.status}`) }}
+        </span>
+        <button
+          data-hfc-renew-entry="wallet"
+          class="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+          @click="$emit('renew')"
+        >
+          {{ t('payment.renewNow') }}
+        </button>
+      </div>
     </div>
 
     <div class="space-y-4 p-4">
@@ -66,7 +75,7 @@
         ></div>
       </div>
 
-      <!-- Renew CTA when low or out -->
+      <!-- Low-balance reminder; renewal entry stays visible in the header. -->
       <div v-if="isLow" class="rounded-xl border border-amber-300 bg-amber-50/80 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/40">
         <div class="flex items-start gap-2">
           <Icon name="infoCircle" class="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
@@ -77,12 +86,6 @@
                 : t('userSubscriptions.wallet.lowWarning', { amount: remaining.toFixed(2) })
               }}
             </p>
-            <button
-              class="mt-2 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
-              @click="$emit('renew')"
-            >
-              {{ t('payment.renewNow') }}
-            </button>
           </div>
         </div>
       </div>

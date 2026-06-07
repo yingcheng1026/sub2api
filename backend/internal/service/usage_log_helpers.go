@@ -43,6 +43,18 @@ func mappedBillingModelOverRequested(originalModel string, candidates ...string)
 	return ""
 }
 
+// usageLogModelForMappedClaudeCompat keeps protocol aliases in requested_model
+// while storing the non-Claude execution model as the product-visible model.
+func usageLogModelForMappedClaudeCompat(requestedModel, fallbackModel string, candidates ...string) string {
+	if mappedModel := mappedBillingModelOverRequested(requestedModel, candidates...); mappedModel != "" {
+		return mappedModel
+	}
+	if trimmed := strings.TrimSpace(fallbackModel); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(requestedModel)
+}
+
 func isClaudeCompatBillingModel(normalized string) bool {
 	if strings.HasPrefix(normalized, "claude") {
 		return true

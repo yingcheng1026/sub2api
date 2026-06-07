@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -64,5 +65,36 @@ func newBufferedMissingTerminalFailover(resp *http.Response, detail string) *Ups
 		ResponseBody:           []byte(detail),
 		ResponseHeaders:        headers,
 		RetryableOnSameAccount: true,
+	}
+}
+
+func newBufferedReadFailover(resp *http.Response, component string, err error) *UpstreamFailoverError {
+	headers := http.Header(nil)
+	if resp != nil && resp.Header != nil {
+		headers = resp.Header.Clone()
+	}
+	msg := "upstream stream read failed"
+	if err != nil {
+		msg = sanitizeUpstreamErrorMessage(strings.TrimSpace(err.Error()))
+		if msg == "" {
+			msg = "upstream stream read failed"
+		}
+	}
+	component = strings.TrimSpace(component)
+	if component == "" {
+		component = "openai buffered"
+	}
+	detail := fmt.Sprintf("%s upstream stream read failed before buffered response was written: scanner_err=%q", component, msg)
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]string{
+			"type":    "upstream_error",
+			"message": detail,
+		},
+	})
+	return &UpstreamFailoverError{
+		StatusCode:             http.StatusBadGateway,
+		ResponseBody:           body,
+		ResponseHeaders:        headers,
+		RetryableOnSameAccount: false,
 	}
 }

@@ -910,6 +910,65 @@ func queryUserBalance(ctx context.Context, client affiliateQueryExecer, userID i
 	return balance, nil
 }
 
+func (r *affiliateRepository) HasInviteeFirstOrderRebate(ctx context.Context, inviteeUserID int64) (bool, error) {
+	client := clientFromContext(ctx, r.client)
+	rows, err := client.QueryContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM user_affiliate_ledger WHERE source_user_id = $1 AND action = 'invitee_first_order')`,
+		inviteeUserID)
+	if err != nil {
+		return false, fmt.Errorf("check invitee first order rebate: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		var exists bool
+		if err := rows.Scan(&exists); err != nil {
+			return false, err
+		}
+		return exists, nil
+	}
+	return false, nil
+}
+
+func (r *affiliateRepository) AccrueInviteeFirstOrderQuota(ctx context.Context, inviteeUserID int64, amount float64) (bool, error) {
+	client := clientFromContext(ctx, r.client)
+	// 原子性写入 ledger + 更新 aff_quota，同时防止重复（UNIQUE 约束或 INSERT ... WHERE NOT EXISTS）
+	rows, err := client.QueryContext(ctx, `
+WITH ins AS (
+    INSERT INTO user_affiliate_ledger (user_id, source_user_id, amount, action, created_at)
+    SELECT $1, $1, $2, 'invitee_first_order', NOW()
+    WHERE NOT EXISTS (
+        SELECT 1 FROM user_affiliate_ledger WHERE source_user_id = $1 AND action = 'invitee_first_order'
+    )
+    RETURNING 1
+)
+UPDATE user_affiliates SET aff_quota = aff_quota + $2, updated_at = NOW()
+WHERE user_id = $1 AND EXISTS (SELECT 1 FROM ins)
+RETURNING TRUE`, inviteeUserID, amount)
+	if err != nil {
+		return false, fmt.Errorf("accrue invitee first order quota: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	applied := rows.Next()
+	return applied, rows.Err()
+}
+
+func (r *affiliateRepository) GetUserSignupIPPrefix(ctx context.Context, userID int64) (string, error) {
+	client := clientFromContext(ctx, r.client)
+	rows, err := client.QueryContext(ctx, `SELECT COALESCE(signup_ip_prefix, '') FROM users WHERE id = $1`, userID)
+	if err != nil {
+		return "", nil
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		var prefix string
+		if err := rows.Scan(&prefix); err != nil {
+			return "", nil
+		}
+		return prefix, nil
+	}
+	return "", nil
+}
+
 type affiliateTransferSnapshot struct {
 	BalanceAfter        float64
 	AvailableQuotaAfter float64

@@ -44,13 +44,14 @@ func NewAuthHandler(cfg *config.Config, authService *service.AuthService, userSe
 
 // RegisterRequest represents the registration request payload
 type RegisterRequest struct {
-	Email          string `json:"email" binding:"required,email"`
-	Password       string `json:"password" binding:"required,min=6"`
-	VerifyCode     string `json:"verify_code"`
-	TurnstileToken string `json:"turnstile_token"`
-	PromoCode      string `json:"promo_code"`      // 注册优惠码
-	InvitationCode string `json:"invitation_code"` // 邀请码
-	AffCode        string `json:"aff_code"`        // 邀请返利码
+	Email             string `json:"email" binding:"required,email"`
+	Password          string `json:"password" binding:"required,min=6"`
+	VerifyCode        string `json:"verify_code"`
+	TurnstileToken    string `json:"turnstile_token"`
+	PromoCode         string `json:"promo_code"`         // 注册优惠码
+	InvitationCode    string `json:"invitation_code"`    // 邀请码
+	AffCode           string `json:"aff_code"`           // 邀请返利码
+	DeviceFingerprint string `json:"device_fingerprint"` // 浏览器设备指纹 visitorId
 }
 
 // SendVerifyCodeRequest 发送验证码请求
@@ -167,7 +168,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	_, user, err := h.authService.RegisterWithVerification(
+	_, user, err := h.authService.RegisterWithVerificationAndRisk(
 		c.Request.Context(),
 		req.Email,
 		req.Password,
@@ -175,6 +176,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		req.PromoCode,
 		req.InvitationCode,
 		req.AffCode,
+		service.RegistrationRiskInput{
+			ClientIP:          ip.GetClientIP(c),
+			UserAgent:         c.Request.UserAgent(),
+			DeviceFingerprint: req.DeviceFingerprint,
+		},
 	)
 	if err != nil {
 		response.ErrorFrom(c, err)

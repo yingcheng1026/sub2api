@@ -1,8 +1,10 @@
 package service
 
 import (
+	"context"
 	"testing"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -46,4 +48,74 @@ func TestValidatePlanPatchPlanType(t *testing.T) {
 
 	ok := "credits"
 	require.NoError(t, validatePlanPatch(UpdatePlanRequest{PlanType: &ok}))
+}
+
+func TestPaymentConfigServiceCreateWalletPlanWithPlanGroupIDs(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	svc := &PaymentConfigService{entClient: client}
+
+	g1 := createPlanCoverageGroup(t, ctx, client, "cc-default")
+	g3 := createPlanCoverageGroup(t, ctx, client, "openai-default")
+	walletQuota := 400.0
+	originalPrice := 199.0
+
+	plan, err := svc.CreatePlan(ctx, CreatePlanRequest{
+		Name:           "paid-lite-v3-30d",
+		Description:    "30 days $400 wallet quota",
+		Price:          99,
+		OriginalPrice:  &originalPrice,
+		ValidityDays:   30,
+		ValidityUnit:   "days",
+		Features:       "轻量 Claude Code / GPT 日常使用",
+		ProductName:    "轻量正式版",
+		ForSale:        true,
+		SortOrder:      15,
+		PlanType:       PlanTypeSubscription,
+		WalletQuotaUSD: &walletQuota,
+		PlanGroupIDs:   []int64{g3.ID, g1.ID, g1.ID},
+	})
+	require.NoError(t, err)
+	require.Nil(t, plan.GroupID)
+	require.NotNil(t, plan.WalletQuotaUsd)
+	require.InDelta(t, walletQuota, *plan.WalletQuotaUsd, 0.000001)
+	require.Equal(t, []int64{g1.ID, g3.ID}, NewSubscriptionPlanResponse(plan).PlanGroupIDs)
+}
+
+func TestPaymentConfigServiceUpdatePlanGroupIDs(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	svc := &PaymentConfigService{entClient: client}
+
+	g1 := createPlanCoverageGroup(t, ctx, client, "cc-default")
+	g3 := createPlanCoverageGroup(t, ctx, client, "openai-default")
+	g24 := createPlanCoverageGroup(t, ctx, client, "Claude-Max pool public")
+	walletQuota := 400.0
+	plan, err := svc.CreatePlan(ctx, CreatePlanRequest{
+		Name:           "paid-lite-v3-30d",
+		Price:          99,
+		ValidityDays:   30,
+		ValidityUnit:   "days",
+		ForSale:        true,
+		PlanType:       PlanTypeSubscription,
+		WalletQuotaUSD: &walletQuota,
+		PlanGroupIDs:   []int64{g1.ID, g3.ID},
+	})
+	require.NoError(t, err)
+
+	nextIDs := []int64{g24.ID, g1.ID}
+	updated, err := svc.UpdatePlan(ctx, plan.ID, UpdatePlanRequest{PlanGroupIDs: &nextIDs})
+	require.NoError(t, err)
+	require.Equal(t, []int64{g1.ID, g24.ID}, NewSubscriptionPlanResponse(updated).PlanGroupIDs)
+}
+
+func createPlanCoverageGroup(t *testing.T, ctx context.Context, client *dbent.Client, name string) *Group {
+	t.Helper()
+	g, err := client.Group.Create().
+		SetName(name).
+		SetSubscriptionType(SubscriptionTypeStandard).
+		SetStatus(StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+	return &Group{ID: g.ID, Name: g.Name}
 }

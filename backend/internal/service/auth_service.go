@@ -9,16 +9,20 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/authidentity"
+	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	dbuser "github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -74,6 +78,7 @@ type AuthService struct {
 	promoService       *PromoService
 	affiliateService   *AffiliateService
 	defaultSubAssigner DefaultSubscriptionAssigner
+	abuseRiskRecorder  HFCAbuseRiskRecorder
 }
 
 type DefaultSubscriptionAssigner interface {
@@ -85,6 +90,30 @@ type signupGrantPlan struct {
 	Concurrency   int
 	Subscriptions []DefaultSubscriptionSetting
 }
+
+type RegistrationRiskInput struct {
+	ClientIP          string
+	UserAgent         string
+	DeviceFingerprint string
+}
+
+type signupRiskSnapshot struct {
+	SignupIP                    string
+	SignupIPPrefix              string
+	SignupUserAgentHash         string
+	SignupDeviceFingerprintHash string
+	TrialBonusEligible          bool
+	TrialBonusHoldReason        string
+	TrialBonusRiskScore         int
+}
+
+const (
+	signupIPPrefix24hTrialLimit       = 3
+	signupDeviceFingerprintTrialLimit = 1
+	signupRiskWindow                  = 24 * time.Hour
+	maxSignupUserAgentSignalBytes     = 2048
+	maxSignupFingerprintSignalBytes   = 512
+)
 
 // NewAuthService 创建认证服务实例
 func NewAuthService(
@@ -124,6 +153,13 @@ func (s *AuthService) EntClient() *dbent.Client {
 	return s.entClient
 }
 
+func (s *AuthService) SetHFCAbuseRiskRecorder(recorder HFCAbuseRiskRecorder) {
+	if s == nil {
+		return
+	}
+	s.abuseRiskRecorder = recorder
+}
+
 // Register 用户注册，返回token和用户
 func (s *AuthService) Register(ctx context.Context, email, password string) (string, *User, error) {
 	return s.RegisterWithVerification(ctx, email, password, "", "", "", "")
@@ -131,6 +167,12 @@ func (s *AuthService) Register(ctx context.Context, email, password string) (str
 
 // RegisterWithVerification 用户注册（支持邮件验证、优惠码、邀请码和邀请返利码），返回token和用户。
 func (s *AuthService) RegisterWithVerification(ctx context.Context, email, password, verifyCode, promoCode, invitationCode, affiliateCode string) (string, *User, error) {
+	return s.RegisterWithVerificationAndRisk(ctx, email, password, verifyCode, promoCode, invitationCode, affiliateCode, RegistrationRiskInput{})
+}
+
+// RegisterWithVerificationAndRisk 用户注册，并记录注册时刻的风控信号。
+// 风控命中只会影响 trial bonus 发放资格，不会锁号或阻断正常注册。
+func (s *AuthService) RegisterWithVerificationAndRisk(ctx context.Context, email, password, verifyCode, promoCode, invitationCode, affiliateCode string, riskInput RegistrationRiskInput) (string, *User, error) {
 	// 检查是否开放注册（默认关闭：settingService 未配置时不允许注册）
 	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) {
 		return "", nil, ErrRegDisabled
@@ -204,16 +246,25 @@ func (s *AuthService) RegisterWithVerification(ctx context.Context, email, passw
 	if s.settingService != nil {
 		defaultRPMLimit = s.settingService.GetDefaultUserRPMLimit(ctx)
 	}
+	signupRisk := s.evaluateSignupRisk(ctx, riskInput)
 
 	// 创建用户
 	user := &User{
-		Email:        email,
-		PasswordHash: hashedPassword,
-		Role:         RoleUser,
-		Balance:      grantPlan.Balance,
-		Concurrency:  grantPlan.Concurrency,
-		RPMLimit:     defaultRPMLimit,
-		Status:       StatusActive,
+		Email:                       email,
+		PasswordHash:                hashedPassword,
+		Role:                        RoleUser,
+		Balance:                     grantPlan.Balance,
+		Concurrency:                 grantPlan.Concurrency,
+		RPMLimit:                    defaultRPMLimit,
+		Status:                      StatusActive,
+		SignupIP:                    signupRisk.SignupIP,
+		SignupIPPrefix:              signupRisk.SignupIPPrefix,
+		SignupUserAgentHash:         signupRisk.SignupUserAgentHash,
+		SignupDeviceFingerprintHash: signupRisk.SignupDeviceFingerprintHash,
+		SignupRiskRecorded:          true,
+		TrialBonusEligible:          signupRisk.TrialBonusEligible,
+		TrialBonusHoldReason:        signupRisk.TrialBonusHoldReason,
+		TrialBonusRiskScore:         signupRisk.TrialBonusRiskScore,
 	}
 
 	if err := s.userRepo.Create(ctx, user); err != nil {
@@ -224,6 +275,7 @@ func (s *AuthService) RegisterWithVerification(ctx context.Context, email, passw
 		logger.LegacyPrintf("service.auth", "[Auth] Database error creating user: %v", err)
 		return "", nil, ErrServiceUnavailable
 	}
+	s.notifySignupRiskTelegramAlert(user, signupRisk)
 	s.postAuthUserBootstrap(ctx, user, "email", true)
 	s.assignSubscriptions(ctx, user.ID, grantPlan.Subscriptions, "auto assigned by signup defaults")
 	if s.affiliateService != nil {
@@ -231,7 +283,7 @@ func (s *AuthService) RegisterWithVerification(ctx context.Context, email, passw
 			logger.LegacyPrintf("service.auth", "[Auth] Failed to initialize affiliate profile for user %d: %v", user.ID, err)
 		}
 		if code := strings.TrimSpace(affiliateCode); code != "" {
-			if err := s.affiliateService.BindInviterByCode(ctx, user.ID, code); err != nil {
+			if err := s.affiliateService.BindInviterByCode(ctx, user.ID, code, signupRisk.SignupIPPrefix); err != nil {
 				// 邀请返利码绑定失败不影响注册，只记录日志
 				logger.LegacyPrintf("service.auth", "[Auth] Failed to bind affiliate inviter for user %d: %v", user.ID, err)
 			}
@@ -265,6 +317,188 @@ func (s *AuthService) RegisterWithVerification(ctx context.Context, email, passw
 	}
 
 	return token, user, nil
+}
+
+func (s *AuthService) notifySignupRiskTelegramAlert(user *User, risk signupRiskSnapshot) {
+	if s == nil || user == nil || risk.TrialBonusEligible || risk.TrialBonusRiskScore <= 0 || s.settingService == nil || s.settingService.settingRepo == nil {
+		return
+	}
+	evidence := []string{
+		"hold_reason=" + risk.TrialBonusHoldReason,
+	}
+	if risk.SignupIPPrefix != "" {
+		evidence = append(evidence, "signup_ip_prefix="+risk.SignupIPPrefix)
+	}
+	if risk.SignupDeviceFingerprintHash != "" {
+		evidence = append(evidence, "device_fingerprint_hash="+truncateMiddle(risk.SignupDeviceFingerprintHash, 8, 8))
+	}
+	if risk.SignupUserAgentHash != "" {
+		evidence = append(evidence, "user_agent_hash="+truncateMiddle(risk.SignupUserAgentHash, 8, 8))
+	}
+	alert := HFCAbuseRiskTelegramAlert{
+		Source:                "signup_risk",
+		Severity:              signupRiskTelegramSeverity(risk.TrialBonusRiskScore),
+		Summary:               "注册风控命中，已保留正常注册，仅暂停 trial bonus 资格",
+		UserID:                user.ID,
+		UserEmail:             user.Email,
+		RiskScore:             risk.TrialBonusRiskScore,
+		SignupIPPrefix:        risk.SignupIPPrefix,
+		DeviceFingerprintHash: risk.SignupDeviceFingerprintHash,
+		Evidence:              evidence,
+		Action:                "registration allowed; trial bonus held; manual review if abuse continues",
+		OccurredAt:            time.Now(),
+	}
+	if s.abuseRiskRecorder == nil {
+		DispatchHFCAbuseRiskTelegramAlert(s.settingService.settingRepo, alert)
+		return
+	}
+	recorder := s.abuseRiskRecorder
+	settingRepo := s.settingService.settingRepo
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		event, err := recorder.RecordEvent(ctx, &HFCAbuseRiskEvent{
+			Source:                HFCAbuseRiskSourceSignupRisk,
+			Severity:              alert.Severity,
+			Status:                HFCAbuseRiskStatusOpen,
+			UserID:                &user.ID,
+			UserEmail:             user.Email,
+			RiskScore:             risk.TrialBonusRiskScore,
+			SignupIPPrefix:        risk.SignupIPPrefix,
+			DeviceFingerprintHash: risk.SignupDeviceFingerprintHash,
+			SignupUserAgentHash:   risk.SignupUserAgentHash,
+			Summary:               alert.Summary,
+			Evidence: []HFCAbuseRiskEvidence{
+				hfcRiskEvidence("hold_reason", "暂停 trial bonus 原因", risk.TrialBonusHoldReason),
+				hfcRiskEvidence("signup_ip_prefix", "注册 IP 段", risk.SignupIPPrefix),
+				hfcRiskEvidence("device_fingerprint_hash", "设备指纹 hash", truncateMiddle(risk.SignupDeviceFingerprintHash, 8, 8)),
+				hfcRiskEvidence("user_agent_hash", "User-Agent hash", truncateMiddle(risk.SignupUserAgentHash, 8, 8)),
+			},
+		})
+		if err != nil {
+			logHFCAbuseRiskRecordFailure(HFCAbuseRiskSourceSignupRisk, user.ID, 0, err)
+		}
+		if event != nil && event.ID > 0 {
+			alert.EventID = event.ID
+		}
+		DispatchHFCAbuseRiskTelegramAlert(settingRepo, alert)
+	}()
+}
+
+func signupRiskTelegramSeverity(score int) string {
+	if score >= 120 {
+		return HFCAbuseRiskSeverityCritical
+	}
+	if score >= 80 {
+		return HFCAbuseRiskSeverityHigh
+	}
+	if score >= 50 {
+		return HFCAbuseRiskSeverityMedium
+	}
+	return HFCAbuseRiskSeverityLow
+}
+
+func (s *AuthService) evaluateSignupRisk(ctx context.Context, input RegistrationRiskInput) signupRiskSnapshot {
+	snapshot := signupRiskSnapshot{TrialBonusEligible: true}
+
+	snapshot.SignupIP = normalizeSignupClientIP(input.ClientIP)
+	snapshot.SignupIPPrefix = signupIPPrefix(snapshot.SignupIP)
+	snapshot.SignupUserAgentHash = hashSignupSignal(input.UserAgent, maxSignupUserAgentSignalBytes)
+	snapshot.SignupDeviceFingerprintHash = hashSignupSignal(input.DeviceFingerprint, maxSignupFingerprintSignalBytes)
+
+	var holdReasons []string
+	if snapshot.SignupIPPrefix != "" {
+		count := s.countRecentSignupSignal(ctx, "signup_ip_prefix", snapshot.SignupIPPrefix)
+		if count >= signupIPPrefix24hTrialLimit {
+			holdReasons = append(holdReasons, "signup_ip_prefix_24h_cap")
+			snapshot.TrialBonusRiskScore += 50
+		}
+	}
+	if snapshot.SignupDeviceFingerprintHash != "" {
+		count := s.countRecentSignupSignal(ctx, "signup_device_fingerprint_hash", snapshot.SignupDeviceFingerprintHash)
+		if count >= signupDeviceFingerprintTrialLimit {
+			holdReasons = append(holdReasons, "duplicate_device_fingerprint")
+			snapshot.TrialBonusRiskScore += 80
+		}
+	}
+
+	if len(holdReasons) > 0 {
+		snapshot.TrialBonusEligible = false
+		snapshot.TrialBonusHoldReason = strings.Join(holdReasons, ",")
+	}
+	return snapshot
+}
+
+func (s *AuthService) countRecentSignupSignal(ctx context.Context, column, value string) int {
+	if s == nil || s.entClient == nil || strings.TrimSpace(value) == "" {
+		return 0
+	}
+	switch column {
+	case "signup_ip_prefix", "signup_device_fingerprint_hash":
+	default:
+		return 0
+	}
+
+	cutoff := time.Now().Add(-signupRiskWindow)
+	count, err := s.entClient.User.Query().
+		Where(
+			dbuser.DeletedAtIsNil(),
+			dbuser.RoleEQ(RoleUser),
+			dbuser.CreatedAtGTE(cutoff),
+			predicate.User(func(selector *entsql.Selector) {
+				selector.Where(entsql.P(func(b *entsql.Builder) {
+					b.Ident(selector.C(column)).
+						WriteString(" = ").
+						Arg(value)
+				}))
+			}),
+		).
+		Count(ctx)
+	if err != nil {
+		logger.LegacyPrintf("service.auth", "[Auth] Failed to count signup risk signal column=%s: %v", column, err)
+		return 0
+	}
+	return count
+}
+
+func normalizeSignupClientIP(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return ""
+	}
+	return addr.Unmap().String()
+}
+
+func signupIPPrefix(value string) string {
+	addr, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil {
+		return ""
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return netip.PrefixFrom(addr, 24).Masked().String()
+	}
+	if addr.Is6() {
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return ""
+}
+
+func hashSignupSignal(value string, maxBytes int) string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return ""
+	}
+	if maxBytes > 0 && len(normalized) > maxBytes {
+		normalized = normalized[:maxBytes]
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])
 }
 
 // SendVerifyCodeResult 发送验证码返回结果
@@ -667,7 +901,7 @@ func (s *AuthService) LoginOrRegisterOAuthWithTokenPair(ctx context.Context, ema
 					user = newUser
 					s.postAuthUserBootstrap(ctx, user, signupSource, false)
 					s.assignSubscriptions(ctx, user.ID, grantPlan.Subscriptions, "auto assigned by signup defaults")
-					s.bindOAuthAffiliate(ctx, user.ID, affiliateCode)
+					s.bindOAuthAffiliate(ctx, user.ID, affiliateCode, newUser.SignupIPPrefix)
 				}
 			} else {
 				if err := s.userRepo.Create(ctx, newUser); err != nil {
@@ -685,7 +919,7 @@ func (s *AuthService) LoginOrRegisterOAuthWithTokenPair(ctx context.Context, ema
 					user = newUser
 					s.postAuthUserBootstrap(ctx, user, signupSource, false)
 					s.assignSubscriptions(ctx, user.ID, grantPlan.Subscriptions, "auto assigned by signup defaults")
-					s.bindOAuthAffiliate(ctx, user.ID, affiliateCode)
+					s.bindOAuthAffiliate(ctx, user.ID, affiliateCode, newUser.SignupIPPrefix)
 					if invitationRedeemCode != nil {
 						if err := s.redeemRepo.Use(ctx, invitationRedeemCode.ID, user.ID); err != nil {
 							return nil, nil, ErrInvitationCodeInvalid
@@ -786,7 +1020,7 @@ func authSourceSignupSettings(defaults *AuthSourceDefaultSettings, signupSource 
 
 // bindOAuthAffiliate initializes the affiliate profile and binds the inviter
 // for an OAuth-registered user. Failures are logged but never block registration.
-func (s *AuthService) bindOAuthAffiliate(ctx context.Context, userID int64, affiliateCode string) {
+func (s *AuthService) bindOAuthAffiliate(ctx context.Context, userID int64, affiliateCode, signupIPPrefix string) {
 	if s.affiliateService == nil || userID <= 0 {
 		return
 	}
@@ -794,7 +1028,7 @@ func (s *AuthService) bindOAuthAffiliate(ctx context.Context, userID int64, affi
 		logger.LegacyPrintf("service.auth", "[Auth] Failed to initialize affiliate profile for user %d: %v", userID, err)
 	}
 	if code := strings.TrimSpace(affiliateCode); code != "" {
-		if err := s.affiliateService.BindInviterByCode(ctx, userID, code); err != nil {
+		if err := s.affiliateService.BindInviterByCode(ctx, userID, code, signupIPPrefix); err != nil {
 			logger.LegacyPrintf("service.auth", "[Auth] Failed to bind affiliate inviter for user %d: %v", userID, err)
 		}
 	}

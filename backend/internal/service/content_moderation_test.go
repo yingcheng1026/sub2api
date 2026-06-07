@@ -634,6 +634,140 @@ func TestContentModerationCheck_PreBlockBlocksCodexResponsesLatestUserInput(t *t
 	require.Equal(t, "latest blocked prompt", moderationRequest.Input)
 }
 
+func TestContentModerationCheck_ImageFailClosedBlocksWhenAuditKeysMissing(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.APIKeys = nil
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		UserID:     1001,
+		Endpoint:   "/v1/images/generations",
+		Model:      "gpt-image-2",
+		Protocol:   ContentModerationProtocolOpenAIImages,
+		Body:       []byte(`{"prompt":"draw a cat"}`),
+		Stage:      ContentModerationStageInput,
+		FailClosed: true,
+		PolicyRule: "moderation_flagged_input",
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionError, decision.Action)
+	require.Equal(t, http.StatusServiceUnavailable, decision.StatusCode)
+	require.Len(t, repo.logs, 1)
+	require.Equal(t, ContentModerationActionError, repo.logs[0].Action)
+	require.Equal(t, ContentModerationStageInput, repo.logs[0].Stage)
+	require.Equal(t, "moderation_no_audit_api_keys", repo.logs[0].PolicyRule)
+	require.NotEmpty(t, repo.logs[0].InputHash)
+}
+
+func TestContentModerationCheck_NonImageStillAllowsWhenAuditKeysMissing(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModePreBlock
+	cfg.APIKeys = nil
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		&contentModerationTestRepo{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		UserID:   1001,
+		Endpoint: "/v1/responses",
+		Model:    "gpt-5.5",
+		Protocol: ContentModerationProtocolOpenAIResponses,
+		Body:     []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}`),
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.False(t, decision.Blocked)
+}
+
+func TestContentModerationCheck_ImageFailClosedBlocksOnCategoryFlags(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/moderations", r.URL.Path)
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
+			Results: []moderationAPIResult{{
+				Categories:                map[string]bool{"sexual/minors": true},
+				CategoryScores:            map[string]float64{"sexual/minors": 0.2},
+				CategoryAppliedInputTypes: map[string][]string{"sexual/minors": []string{"image"}},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	cfg := defaultContentModerationConfig()
+	cfg.Enabled = true
+	cfg.Mode = ContentModerationModeObserve
+	cfg.BaseURL = server.URL
+	cfg.APIKeys = []string{"sk-test"}
+	rawCfg, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	repo := &contentModerationTestRepo{}
+	svc := NewContentModerationService(
+		&contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled:      "true",
+			SettingKeyContentModerationConfig: string(rawCfg),
+		}},
+		repo,
+		&contentModerationTestHashCache{},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		UserID:     1001,
+		Endpoint:   "/v1/images/generations",
+		Model:      "gpt-image-2",
+		Protocol:   ContentModerationProtocolOpenAIImages,
+		Body:       []byte(`{"prompt":"draw","images":[{"image_url":"data:image/png;base64,aGVsbG8="}]}`),
+		Stage:      ContentModerationStageOutput,
+		FailClosed: true,
+		PolicyRule: "moderation_flagged_output",
+	})
+
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionBlock, decision.Action)
+	require.Equal(t, "sexual/minors", decision.HighestCategory)
+	require.Len(t, repo.logs, 1)
+	require.True(t, repo.logs[0].CategoryFlags["sexual/minors"])
+	require.Equal(t, []string{"image"}, repo.logs[0].CategoryAppliedInputTypes["sexual/minors"])
+	require.Equal(t, ContentModerationStageOutput, repo.logs[0].Stage)
+}
+
 func TestBuildContentModerationTestAuditResult_UsesConfiguredThresholdsOnly(t *testing.T) {
 	result := buildContentModerationTestAuditResult(&moderationAPIResult{
 		Flagged: true,

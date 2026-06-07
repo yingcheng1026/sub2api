@@ -172,6 +172,7 @@ import {
   loadAffiliateReferralCode,
   oauthAffiliatePayload
 } from '@/utils/oauthAffiliate'
+import { collectSignupDeviceFingerprint } from '@/utils/signupFingerprint'
 
 const { t, locale } = useI18n()
 
@@ -215,6 +216,7 @@ const initialTurnstileToken = ref<string>('')
 const promoCode = ref<string>('')
 const invitationCode = ref<string>('')
 const affCode = ref<string>('')
+const deviceFingerprint = ref<string>('')
 const pendingAuthToken = ref<string>('')
 const pendingAuthTokenField = ref<PendingAuthTokenField>('pending_auth_token')
 const pendingProvider = ref<string>('')
@@ -267,6 +269,7 @@ onMounted(async () => {
       promoCode.value = registerData.promo_code || ''
       invitationCode.value = registerData.invitation_code || ''
       affCode.value = registerData.aff_code || loadAffiliateReferralCode()
+      deviceFingerprint.value = registerData.device_fingerprint || ''
       pendingAuthToken.value = registerData.pending_auth_token || activePendingSession?.token || ''
       pendingAuthTokenField.value = registerData.pending_auth_token_field || activePendingSession?.token_field || 'pending_auth_token'
       pendingProvider.value = registerData.pending_provider || activePendingSession?.provider || ''
@@ -533,6 +536,7 @@ async function handleVerify(): Promise<void> {
         turnstile_token: initialTurnstileToken.value || undefined,
         promo_code: promoCode.value || undefined,
         invitation_code: invitationCode.value || undefined,
+        device_fingerprint: deviceFingerprint.value || await collectSignupDeviceFingerprint(),
         ...(affCode.value ? { aff_code: affCode.value } : {})
       })
     }

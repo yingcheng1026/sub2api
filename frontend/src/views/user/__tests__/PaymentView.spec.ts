@@ -411,4 +411,36 @@ describe('PaymentView WeChat JSAPI flow', () => {
     expect(showError).not.toHaveBeenCalled()
     expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toContain('weixin://wxpay/bizpayurl?pr=fallback-native')
   })
+
+  it('opens the Liandong paid-lite SKU directly from the subscription tab', async () => {
+    routeState.query = { tab: 'subscription' }
+    getCheckoutInfo.mockResolvedValue(checkoutInfoFixture())
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-hfc-purchase-liandong-subscription="monthly"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('轻量正式版')
+    expect(wrapper.text()).toContain('$400')
+    expect(wrapper.text()).toContain('$50')
+    expect(wrapper.text()).toContain('$4,500')
+    expect(wrapper.text()).not.toContain('×0')
+    expect(wrapper.text()).not.toContain('无限制')
+
+    await wrapper.get('[data-hfc-liandong-tier="lite"] button').trigger('click')
+
+    expect(openSpy).toHaveBeenCalledWith('https://pay.ldxp.cn/item/neu4dr', '_blank', 'noopener')
+    expect(createOrder).not.toHaveBeenCalled()
+
+    openSpy.mockRestore()
+  })
 })

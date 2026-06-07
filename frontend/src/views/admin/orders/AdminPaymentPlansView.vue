@@ -14,8 +14,12 @@
         <template #cell-name="{ value, row }">
           <span class="text-sm font-medium" :class="getPlanNameClass(row.group_id)">{{ value }}</span>
         </template>
-        <template #cell-group_id="{ value }">
-          <span v-if="isGroupMissing(value)" class="text-sm">
+        <template #cell-group_id="{ value, row }">
+          <span v-if="row.wallet_quota_usd != null" class="inline-flex flex-col text-xs">
+            <span class="font-medium text-gray-900 dark:text-white">{{ t('payment.admin.walletPlan') }}</span>
+            <span class="text-gray-500 dark:text-gray-400">${{ Number(row.wallet_quota_usd).toLocaleString() }}</span>
+          </span>
+          <span v-else-if="isGroupMissing(value)" class="text-sm">
             <span class="text-gray-400">#{{ value }}</span>
             <span class="ml-1 badge badge-danger">{{ t('payment.admin.groupMissing') }}</span>
           </span>
@@ -26,6 +30,21 @@
             :rate-multiplier="getGroup(value)!.rate_multiplier"
           />
           <span v-else class="text-sm text-gray-400">-</span>
+        </template>
+        <template #cell-plan_group_ids="{ value }">
+          <div v-if="Array.isArray(value) && value.length" class="flex max-w-xs flex-wrap gap-1.5">
+            <template v-for="groupId in value" :key="groupId">
+              <GroupBadge
+                v-if="getGroup(groupId)"
+                :name="getGroup(groupId)!.name"
+                :platform="getGroup(groupId)!.platform"
+                :rate-multiplier="getGroup(groupId)!.rate_multiplier"
+                :subscription-type="getGroup(groupId)!.subscription_type"
+              />
+              <span v-else class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-dark-700 dark:text-gray-400">#{{ groupId }}</span>
+            </template>
+          </div>
+          <span v-else class="text-xs text-gray-400">{{ t('payment.admin.coveredGroupsEmptyShort') }}</span>
         </template>
         <template #cell-price="{ value, row }">
           <div class="text-sm">
@@ -117,15 +136,17 @@ async function loadGroups() {
   } catch { /* ignore */ }
 }
 
-function getGroup(id: number): AdminGroup | undefined {
+function getGroup(id: number | null): AdminGroup | undefined {
+  if (id == null) return undefined
   return groups.value.find(g => g.id === id)
 }
 
-function isGroupMissing(id: number): boolean {
+function isGroupMissing(id: number | null): boolean {
+  if (id == null) return false
   return id > 0 && !groups.value.find(g => g.id === id)
 }
 
-function getPlanNameClass(groupId: number): string {
+function getPlanNameClass(groupId: number | null): string {
   const group = getGroup(groupId)
   return group ? platformTextClass(group.platform) : 'text-gray-900 dark:text-white'
 }
@@ -145,6 +166,7 @@ const planColumns = computed((): Column[] => [
   { key: 'name', label: t('payment.admin.planName') },
   { key: 'plan_type', label: t('payment.admin.planType') },
   { key: 'group_id', label: t('payment.admin.group') },
+  { key: 'plan_group_ids', label: t('payment.admin.coveredGroups') },
   { key: 'price', label: t('payment.admin.price') },
   { key: 'validity_days', label: t('payment.admin.validityDays') },
   { key: 'for_sale', label: t('payment.admin.forSale') },

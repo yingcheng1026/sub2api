@@ -54,6 +54,125 @@
         </div>
 
         <div class="card">
+          <div class="flex flex-col gap-4 border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.abuse.title') }}</h2>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.hint') }}</p>
+              </div>
+              <button type="button" class="btn btn-secondary inline-flex items-center gap-2" :disabled="abuseEventsLoading" @click="loadAbuseRiskEvents">
+                <Icon name="refresh" size="sm" :class="abuseEventsLoading ? 'animate-spin' : ''" />
+                {{ t('admin.riskControl.refresh') }}
+              </button>
+            </div>
+
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
+              <Select v-model="abuseFilters.source" :options="abuseSourceOptions" @change="reloadAbuseRiskEventsFromFirstPage" />
+              <Select v-model="abuseFilters.severity" :options="abuseSeverityOptions" @change="reloadAbuseRiskEventsFromFirstPage" />
+              <Select v-model="abuseFilters.status" :options="abuseStatusOptions" @change="reloadAbuseRiskEventsFromFirstPage" />
+              <input v-model.trim="abuseFilters.search" type="search" class="input" :placeholder="t('admin.riskControl.abuse.search')" @keyup.enter="reloadAbuseRiskEventsFromFirstPage" />
+              <input v-model="abuseFilters.from" type="datetime-local" class="input" :title="t('admin.riskControl.filters.from')" @change="reloadAbuseRiskEventsFromFirstPage" />
+              <input v-model="abuseFilters.to" type="datetime-local" class="input" :title="t('admin.riskControl.filters.to')" @change="reloadAbuseRiskEventsFromFirstPage" />
+            </div>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-dark-700">
+              <thead class="bg-gray-50 dark:bg-dark-800">
+                <tr>
+                  <th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.table.time') }}</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.table.risk') }}</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.table.user') }}</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.table.apiKey') }}</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.table.evidence') }}</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.table.review') }}</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100 bg-white dark:divide-dark-800 dark:bg-dark-800">
+                <tr v-if="abuseEventsLoading">
+                  <td colspan="6" class="px-5 py-12 text-center text-sm text-gray-500 dark:text-gray-400">{{ t('common.loading') }}</td>
+                </tr>
+                <tr v-else-if="abuseEvents.length === 0">
+                  <td colspan="6" class="px-5 py-12 text-center text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.abuse.empty') }}</td>
+                </tr>
+                <template v-else>
+                  <tr v-for="event in abuseEvents" :key="event.id" class="hover:bg-gray-50 dark:hover:bg-dark-700/60">
+                    <td class="whitespace-nowrap px-5 py-4 text-sm text-gray-700 dark:text-gray-300">
+                      <div>{{ formatDateTime(event.created_at) }}</div>
+                      <div class="text-xs text-gray-400">#{{ event.id }}</div>
+                    </td>
+                    <td class="whitespace-nowrap px-5 py-4">
+                      <div class="flex flex-col items-start gap-2">
+                        <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="abuseSeverityClass(event.severity)">
+                          {{ abuseSeverityLabel(event.severity) }}
+                        </span>
+                        <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="abuseStatusClass(event.status)">
+                          {{ abuseStatusLabel(event.status) }}
+                        </span>
+                        <span class="text-xs text-gray-400">{{ abuseSourceLabel(event.source) }} · {{ event.risk_score }}</span>
+                      </div>
+                    </td>
+                    <td class="whitespace-nowrap px-5 py-4 text-sm text-gray-700 dark:text-gray-300">
+                      <div>{{ event.user_email || '-' }}</div>
+                      <div v-if="event.user_id" class="text-xs text-gray-400">UID {{ event.user_id }}</div>
+                      <div v-if="event.signup_ip_prefix" class="text-xs text-gray-400">{{ event.signup_ip_prefix }}</div>
+                    </td>
+                    <td class="whitespace-nowrap px-5 py-4 text-sm text-gray-700 dark:text-gray-300">
+                      <div>{{ event.api_key_name || '-' }}</div>
+                      <div v-if="event.api_key_id" class="text-xs text-gray-400">Key {{ event.api_key_id }}</div>
+                      <div v-if="event.group_name" class="text-xs text-gray-400">{{ event.group_name }}</div>
+                    </td>
+                    <td class="min-w-[280px] max-w-xl px-5 py-4 text-sm text-gray-700 dark:text-gray-300">
+                      <div class="font-medium text-gray-900 dark:text-white">{{ event.summary || '-' }}</div>
+                      <div class="mt-2 flex flex-wrap gap-1.5">
+                        <span
+                          v-for="item in abuseEvidencePreview(event)"
+                          :key="`${event.id}-${item.key}-${item.value}`"
+                          class="inline-flex max-w-full rounded-md bg-gray-100 px-2 py-1 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300"
+                        >
+                          <span class="truncate">{{ item.label || item.key }}: {{ item.value || '-' }}</span>
+                        </span>
+                      </div>
+                    </td>
+                    <td class="min-w-[260px] px-5 py-4 text-sm">
+                      <div v-if="event.action_taken" class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+                        {{ abuseActionLabel(event.action_taken) }}
+                        <span v-if="event.reviewed_at"> · {{ formatDateTime(event.reviewed_at) }}</span>
+                      </div>
+                      <div class="flex flex-wrap gap-2">
+                        <button
+                          v-for="action in abuseActionButtons(event)"
+                          :key="`${event.id}-${action.action}`"
+                          type="button"
+                          class="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                          :class="action.className"
+                          :disabled="abuseActionLoadingID === event.id"
+                          @click="applyAbuseRiskAction(event, action.action)"
+                        >
+                          <Icon :name="action.icon" size="xs" :class="abuseActionLoadingID === event.id ? 'animate-spin' : ''" />
+                          {{ action.label }}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="border-t border-gray-100 px-6 py-4 dark:border-dark-700">
+            <Pagination
+              v-if="abusePagination.total > 0"
+              :page="abusePagination.page"
+              :total="abusePagination.total"
+              :page-size="abusePagination.page_size"
+              @update:page="onAbusePageChange"
+              @update:pageSize="onAbusePageSizeChange"
+            />
+          </div>
+        </div>
+
+        <div class="card">
           <div class="flex flex-col gap-4 border-b border-gray-100 px-6 py-4 dark:border-dark-700 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.workerStatus') }}</h2>
@@ -830,6 +949,10 @@ import type {
   ContentModerationLog,
   ContentModerationRuntimeStatus,
   ContentModerationTestAuditResult,
+  HFCAbuseRiskAction,
+  HFCAbuseRiskEvent,
+  HFCAbuseRiskSeverity,
+  HFCAbuseRiskStatus,
   ModerationMode,
   UpdateContentModerationConfig,
 } from '@/api/admin/riskControl'
@@ -842,6 +965,13 @@ type SettingsTab = 'basic' | 'scope' | 'runtime' | 'response' | 'retention'
 type WorkerSlotState = 'active' | 'idle' | 'disabled'
 type APIKeysWriteMode = 'append' | 'replace'
 type OverviewIcon = 'shield' | 'key' | 'users' | 'document'
+type AbuseActionIcon = 'checkCircle' | 'xCircle' | 'shield' | 'key' | 'users' | 'ban'
+type AbuseActionButton = {
+  action: HFCAbuseRiskAction
+  label: string
+  icon: AbuseActionIcon
+  className: string
+}
 type OverviewItem = {
   key: string
   label: string
@@ -869,16 +999,19 @@ const appStore = useAppStore()
 const loading = ref(true)
 const saving = ref(false)
 const logsLoading = ref(false)
+const abuseEventsLoading = ref(false)
 const statusLoading = ref(false)
 const apiKeyTesting = ref(false)
 const hashActionLoading = ref(false)
 const unbanningUserID = ref<number | null>(null)
+const abuseActionLoadingID = ref<number | null>(null)
 const settingsOpen = ref(false)
 const activeSettingsTab = ref<SettingsTab>('basic')
 const groupSearch = ref('')
 const flaggedHashInput = ref('')
 const groups = ref<AdminGroup[]>([])
 const logs = ref<ContentModerationLog[]>([])
+const abuseEvents = ref<HFCAbuseRiskEvent[]>([])
 const status = ref<ContentModerationRuntimeStatus | null>(null)
 const testedApiKeyStatuses = ref<ContentModerationAPIKeyStatus[]>([])
 const pendingDeleteApiKeyHashes = ref<string[]>([])
@@ -928,10 +1061,26 @@ const pagination = reactive({
   pages: 1,
 })
 
+const abusePagination = reactive({
+  page: 1,
+  page_size: 20,
+  total: 0,
+  pages: 1,
+})
+
 const filters = reactive({
   result: '',
   group_id: 0,
   endpoint: '',
+  search: '',
+  from: '',
+  to: '',
+})
+
+const abuseFilters = reactive({
+  source: '',
+  severity: '',
+  status: 'open',
   search: '',
   from: '',
   to: '',
@@ -975,6 +1124,28 @@ const groupFilterOptions = computed<SelectOption[]>(() => [
     value: group.id,
     label: `${group.name} (${group.platform})`,
   })),
+])
+
+const abuseSourceOptions = computed<SelectOption[]>(() => [
+  { value: '', label: t('admin.riskControl.abuse.filters.allSources') },
+  { value: 'signup_risk', label: t('admin.riskControl.abuse.source.signupRisk') },
+  { value: 'content_moderation_auto_ban', label: t('admin.riskControl.abuse.source.contentAutoBan') },
+])
+
+const abuseSeverityOptions = computed<SelectOption[]>(() => [
+  { value: '', label: t('admin.riskControl.abuse.filters.allSeverities') },
+  { value: 'low', label: t('admin.riskControl.abuse.severity.low') },
+  { value: 'medium', label: t('admin.riskControl.abuse.severity.medium') },
+  { value: 'high', label: t('admin.riskControl.abuse.severity.high') },
+  { value: 'critical', label: t('admin.riskControl.abuse.severity.critical') },
+])
+
+const abuseStatusOptions = computed<SelectOption[]>(() => [
+  { value: '', label: t('admin.riskControl.abuse.filters.allStatuses') },
+  { value: 'open', label: t('admin.riskControl.abuse.status.open') },
+  { value: 'reviewing', label: t('admin.riskControl.abuse.status.reviewing') },
+  { value: 'resolved', label: t('admin.riskControl.abuse.status.resolved') },
+  { value: 'false_positive', label: t('admin.riskControl.abuse.status.falsePositive') },
 ])
 
 const selectedGroupCount = computed(() => String(configForm.group_ids.length))
@@ -1212,7 +1383,7 @@ async function loadAll() {
       configForm.api_key_statuses = [...runtimeStatus.api_key_statuses]
       prunePendingDeleteAPIKeyHashes()
     }
-    await loadLogs()
+    await Promise.all([loadLogs(), loadAbuseRiskEvents()])
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.riskControl.loadFailed')))
   } finally {
@@ -1317,6 +1488,32 @@ async function loadLogs() {
   }
 }
 
+async function loadAbuseRiskEvents() {
+  abuseEventsLoading.value = true
+  try {
+    const params = {
+      page: abusePagination.page,
+      page_size: abusePagination.page_size,
+      source: abuseFilters.source || undefined,
+      severity: abuseFilters.severity || undefined,
+      status: abuseFilters.status || undefined,
+      search: abuseFilters.search || undefined,
+      from: normalizeDateTimeLocal(abuseFilters.from),
+      to: normalizeDateTimeLocal(abuseFilters.to),
+    }
+    const result = await adminAPI.riskControl.listAbuseRiskEvents(params)
+    abuseEvents.value = result.items
+    abusePagination.total = result.total
+    abusePagination.page = result.page
+    abusePagination.page_size = result.page_size
+    abusePagination.pages = result.pages
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.riskControl.abuse.loadFailed')))
+  } finally {
+    abuseEventsLoading.value = false
+  }
+}
+
 function canUnbanRow(row: ContentModerationLog): boolean {
   return Boolean(row.auto_banned && row.user_id && row.user_status === 'disabled')
 }
@@ -1347,6 +1544,25 @@ async function unbanUser(row: ContentModerationLog) {
     appStore.showError(extractApiErrorMessage(err, t('admin.riskControl.unbanFailed')))
   } finally {
     unbanningUserID.value = null
+  }
+}
+
+async function applyAbuseRiskAction(event: HFCAbuseRiskEvent, action: HFCAbuseRiskAction) {
+  if (abuseActionLoadingID.value !== null) return
+  const confirmText = abuseActionConfirmText(action, event)
+  if (confirmText && !window.confirm(confirmText)) return
+  abuseActionLoadingID.value = event.id
+  try {
+    const result = await adminAPI.riskControl.applyAbuseRiskAction(event.id, { action })
+    abuseEvents.value = abuseEvents.value.map((item) => (item.id === event.id ? result.event : item))
+    if (result.disabled_api_keys > 0 || result.frozen_user) {
+      await Promise.all([loadLogs(), loadStatus(true)])
+    }
+    appStore.showSuccess(t('admin.riskControl.abuse.actionSuccess'))
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.riskControl.abuse.actionFailed')))
+  } finally {
+    abuseActionLoadingID.value = null
   }
 }
 
@@ -1391,6 +1607,11 @@ function reloadLogsFromFirstPage() {
   void loadLogs()
 }
 
+function reloadAbuseRiskEventsFromFirstPage() {
+  abusePagination.page = 1
+  void loadAbuseRiskEvents()
+}
+
 function onPageChange(page: number) {
   pagination.page = page
   void loadLogs()
@@ -1400,6 +1621,17 @@ function onPageSizeChange(pageSize: number) {
   pagination.page = 1
   pagination.page_size = pageSize
   void loadLogs()
+}
+
+function onAbusePageChange(page: number) {
+  abusePagination.page = page
+  void loadAbuseRiskEvents()
+}
+
+function onAbusePageSizeChange(pageSize: number) {
+  abusePagination.page = 1
+  abusePagination.page_size = pageSize
+  void loadAbuseRiskEvents()
 }
 
 function toggleClearApiKey() {
@@ -1546,6 +1778,116 @@ function toggleGroup(groupID: number) {
 
 function isGroupSelected(groupID: number): boolean {
   return configForm.group_ids.includes(groupID)
+}
+
+function abuseEvidencePreview(event: HFCAbuseRiskEvent) {
+  const evidence = Array.isArray(event.evidence) ? event.evidence : []
+  return evidence.filter((item) => item.value || item.label || item.key).slice(0, 6)
+}
+
+function abuseActionButtons(event: HFCAbuseRiskEvent): AbuseActionButton[] {
+  const buttons: AbuseActionButton[] = []
+  if (event.status === 'open') {
+    buttons.push({
+      action: 'mark_reviewing',
+      label: t('admin.riskControl.abuse.actions.markReviewing'),
+      icon: 'shield',
+      className: 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-900/60 dark:bg-sky-900/20 dark:text-sky-300',
+    })
+  }
+  if (event.status !== 'resolved') {
+    buttons.push({
+      action: 'resolve_no_action',
+      label: t('admin.riskControl.abuse.actions.resolveNoAction'),
+      icon: 'checkCircle',
+      className: 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-900/20 dark:text-emerald-300',
+    })
+  }
+  if (event.status !== 'false_positive') {
+    buttons.push({
+      action: 'mark_false_positive',
+      label: t('admin.riskControl.abuse.actions.falsePositive'),
+      icon: 'xCircle',
+      className: 'border-gray-200 bg-gray-50 text-gray-700 hover:bg-gray-100 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300',
+    })
+  }
+  if (event.api_key_id) {
+    buttons.push({
+      action: 'disable_api_key',
+      label: t('admin.riskControl.abuse.actions.disableKey'),
+      icon: 'key',
+      className: 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-300',
+    })
+  }
+  if (event.user_id) {
+    buttons.push({
+      action: 'disable_user_api_keys',
+      label: t('admin.riskControl.abuse.actions.disableAllKeys'),
+      icon: 'users',
+      className: 'border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-100 dark:border-orange-900/60 dark:bg-orange-900/20 dark:text-orange-300',
+    })
+    buttons.push({
+      action: 'freeze_user',
+      label: t('admin.riskControl.abuse.actions.freezeUser'),
+      icon: 'ban',
+      className: 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-300',
+    })
+  }
+  return buttons
+}
+
+function abuseActionConfirmText(action: HFCAbuseRiskAction, event: HFCAbuseRiskEvent): string {
+  if (action === 'disable_api_key') return t('admin.riskControl.abuse.confirmDisableKey', { id: event.api_key_id ?? '-' })
+  if (action === 'disable_user_api_keys') return t('admin.riskControl.abuse.confirmDisableAllKeys', { id: event.user_id ?? '-' })
+  if (action === 'freeze_user') return t('admin.riskControl.abuse.confirmFreezeUser', { id: event.user_id ?? '-' })
+  return ''
+}
+
+function abuseActionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    mark_reviewing: t('admin.riskControl.abuse.actions.markReviewing'),
+    resolve_no_action: t('admin.riskControl.abuse.actions.resolveNoAction'),
+    mark_false_positive: t('admin.riskControl.abuse.actions.falsePositive'),
+    disable_api_key: t('admin.riskControl.abuse.actions.disableKey'),
+    disable_user_api_keys: t('admin.riskControl.abuse.actions.disableAllKeys'),
+    freeze_user: t('admin.riskControl.abuse.actions.freezeUser'),
+  }
+  return labels[action] ?? action
+}
+
+function abuseSourceLabel(source: string): string {
+  if (source === 'signup_risk') return t('admin.riskControl.abuse.source.signupRisk')
+  if (source === 'content_moderation_auto_ban') return t('admin.riskControl.abuse.source.contentAutoBan')
+  return source || '-'
+}
+
+function abuseSeverityLabel(severity: HFCAbuseRiskSeverity): string {
+  return t(`admin.riskControl.abuse.severity.${severity}`)
+}
+
+function abuseStatusLabel(status: HFCAbuseRiskStatus): string {
+  if (status === 'false_positive') return t('admin.riskControl.abuse.status.falsePositive')
+  return t(`admin.riskControl.abuse.status.${status}`)
+}
+
+function abuseSeverityClass(severity: HFCAbuseRiskSeverity): string {
+  const classes: Record<HFCAbuseRiskSeverity, string> = {
+    low: 'bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300',
+    medium: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+    high: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
+    critical: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+  }
+  return classes[severity] ?? classes.high
+}
+
+function abuseStatusClass(status: HFCAbuseRiskStatus): string {
+  const classes: Record<HFCAbuseRiskStatus, string> = {
+    open: 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300',
+    reviewing: 'bg-sky-50 text-sky-700 dark:bg-sky-900/20 dark:text-sky-300',
+    resolved: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300',
+    false_positive: 'bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300',
+  }
+  return classes[status] ?? classes.open
 }
 
 function modeLabel(mode: ModerationMode): string {

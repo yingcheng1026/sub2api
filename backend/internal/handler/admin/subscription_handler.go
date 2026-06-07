@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
@@ -29,18 +30,21 @@ func toResponsePagination(p *pagination.PaginationResult) *response.PaginationRe
 // SubscriptionHandler handles admin subscription management
 type SubscriptionHandler struct {
 	subscriptionService *service.SubscriptionService
+	affiliateService    *service.AffiliateService
 }
 
 // NewSubscriptionHandler creates a new admin subscription handler
-func NewSubscriptionHandler(subscriptionService *service.SubscriptionService) *SubscriptionHandler {
+func NewSubscriptionHandler(subscriptionService *service.SubscriptionService, affiliateService *service.AffiliateService) *SubscriptionHandler {
 	return &SubscriptionHandler{
 		subscriptionService: subscriptionService,
+		affiliateService:    affiliateService,
 	}
 }
 
 // AssignSubscriptionRequest represents assign subscription request.
 //
-// 两种模式二选一：
+// 三种模式三选一：
+//   - Plan 模式：填 plan_id，由 plan 读取钱包额度/有效期
 //   - Group 模式（v3）：填 group_id，wallet_initial_usd 留空
 //   - 钱包模式 (v4)：填 wallet_initial_usd（>0），group_id 忽略；用户级钱包
 //     additionally 可填 plan_id → 自动按 plan 关联 groups 建 N 把分组 key
@@ -148,9 +152,9 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 		return
 	}
 
-	// 钱包模式 ↔ group 模式互斥校验：必须提供其一
-	if req.WalletInitialUSD == nil && req.GroupID <= 0 {
-		response.BadRequest(c, "either group_id or wallet_initial_usd is required")
+	// Plan / 钱包 / group 模式：必须提供其一。
+	if req.PlanID == nil && req.WalletInitialUSD == nil && req.GroupID <= 0 {
+		response.BadRequest(c, "one of plan_id, group_id, or wallet_initial_usd is required")
 		return
 	}
 
@@ -169,6 +173,18 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+
+	// Trigger affiliate rebate for the invitee's first admin-assigned subscription.
+	// Non-blocking: a rebate failure must never roll back a successful assignment.
+	if h.affiliateService != nil {
+		if baseAmount := adminAssignBaseAmount(subscription); baseAmount > 0 {
+			// 差异化返利：余额卡 10% / 月卡及其它 0%（与兑换码口径一致，月卡不给佣金）。
+			override := service.AffiliateRebateOverrideForAdminAssign(req.PlanID)
+			if _, rebateErr := h.affiliateService.AccrueInviteRebateForOrderWithOverride(c.Request.Context(), subscription.UserID, baseAmount, override, nil); rebateErr != nil {
+				slog.Warn("admin assign: affiliate rebate failed", "userID", subscription.UserID, "subscriptionID", subscription.ID, "err", rebateErr)
+			}
+		}
 	}
 
 	response.Success(c, dto.UserSubscriptionFromServiceAdmin(subscription))
@@ -335,4 +351,21 @@ func getAdminIDFromContext(c *gin.Context) int64 {
 		return 0
 	}
 	return subject.UserID
+}
+
+// adminAssignBaseAmount returns the USD value of an admin-assigned subscription,
+// used as the base amount for affiliate rebate calculation.
+// Wallet subscriptions use the initial wallet balance; group subscriptions use
+// the group monthly quota. Returns 0 when the value cannot be determined.
+func adminAssignBaseAmount(sub *service.UserSubscription) float64 {
+	if sub == nil {
+		return 0
+	}
+	if sub.WalletInitialUSD != nil && *sub.WalletInitialUSD > 0 {
+		return *sub.WalletInitialUSD
+	}
+	if sub.Group != nil && sub.Group.MonthlyLimitUSD != nil && *sub.Group.MonthlyLimitUSD > 0 {
+		return *sub.Group.MonthlyLimitUSD
+	}
+	return 0
 }

@@ -108,6 +108,9 @@ func (r *userSubscriptionRepository) GetActiveByUserIDAndGroupID(ctx context.Con
 	return userSubscriptionEntityToService(m), nil
 }
 
+// GetActiveWalletByUserID 返回最快到期的 active 钱包订阅（先到期先消费）。
+// 多条月卡叠加场景下，计费侧优先消费最快到期的那张。
+// 使用 First() 而非 Only()，兼容多条并存。
 func (r *userSubscriptionRepository) GetActiveWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
 	client := clientFromContext(ctx, r.client)
 	m, err := client.UserSubscription.Query().
@@ -117,8 +120,9 @@ func (r *userSubscriptionRepository) GetActiveWalletByUserID(ctx context.Context
 			usersubscription.StatusEQ(service.SubscriptionStatusActive),
 			usersubscription.ExpiresAtGT(time.Now()),
 		).
+		Order(dbent.Asc(usersubscription.FieldExpiresAt), dbent.Asc(usersubscription.FieldID)).
 		WithGroup().
-		Only(ctx)
+		First(ctx)
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
 	}

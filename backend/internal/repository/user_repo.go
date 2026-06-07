@@ -19,6 +19,7 @@ import (
 	dbuser "github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
@@ -111,9 +112,43 @@ func (r *userRepository) Create(ctx context.Context, userIn *service.User) error
 			return err
 		}
 	}
+	if err := r.persistSignupRiskFields(ctx, r.client, created.ID, userIn); err != nil {
+		logger.LegacyPrintf("repository.user", "[UserRepo] Failed to persist signup risk fields user_id=%d: %v", created.ID, err)
+	}
 
 	applyUserEntityToService(userIn, created)
 	return nil
+}
+
+func (r *userRepository) persistSignupRiskFields(ctx context.Context, client *dbent.Client, userID int64, userIn *service.User) error {
+	if userIn == nil || !userIn.SignupRiskRecorded || userID <= 0 {
+		return nil
+	}
+	exec := txAwareSQLExecutor(ctx, r.sql, client)
+	if exec == nil {
+		return fmt.Errorf("sql executor is not configured")
+	}
+	_, err := exec.ExecContext(ctx, `
+UPDATE users
+SET signup_ip = $2,
+    signup_ip_prefix = $3,
+    signup_user_agent_hash = $4,
+    signup_device_fingerprint_hash = $5,
+    trial_bonus_eligible = $6,
+    trial_bonus_hold_reason = $7,
+    trial_bonus_risk_score = $8,
+    updated_at = NOW()
+WHERE id = $1
+`, userID,
+		userIn.SignupIP,
+		userIn.SignupIPPrefix,
+		userIn.SignupUserAgentHash,
+		userIn.SignupDeviceFingerprintHash,
+		userIn.TrialBonusEligible,
+		userIn.TrialBonusHoldReason,
+		userIn.TrialBonusRiskScore,
+	)
+	return err
 }
 
 func (r *userRepository) GetByID(ctx context.Context, id int64) (*service.User, error) {

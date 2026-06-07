@@ -136,13 +136,21 @@ export interface ContentModerationLog {
   endpoint: string
   provider: string
   model: string
+  stage: 'input' | 'output'
   mode: string
   action: string
   flagged: boolean
   highest_category: string
   highest_score: number
   category_scores: Record<string, number>
+  category_flags: Record<string, boolean>
+  category_applied_input_types: Record<string, string[]>
   threshold_snapshot: Record<string, number>
+  input_hash: string
+  output_hashes: string[]
+  policy_rule: string
+  upstream_request_id: string
+  safety_identifier: string
   input_excerpt: string
   upstream_latency_ms: number | null
   error: string
@@ -171,6 +179,84 @@ export interface ContentModerationLogsResponse {
   page: number
   page_size: number
   pages: number
+}
+
+export type HFCAbuseRiskSeverity = 'low' | 'medium' | 'high' | 'critical'
+export type HFCAbuseRiskStatus = 'open' | 'reviewing' | 'resolved' | 'false_positive'
+export type HFCAbuseRiskAction =
+  | 'mark_reviewing'
+  | 'resolve_no_action'
+  | 'mark_false_positive'
+  | 'disable_api_key'
+  | 'disable_user_api_keys'
+  | 'freeze_user'
+
+export interface HFCAbuseRiskEvidence {
+  key: string
+  label: string
+  value: string
+}
+
+export interface HFCAbuseRiskEvent {
+  id: number
+  source: string
+  severity: HFCAbuseRiskSeverity
+  status: HFCAbuseRiskStatus
+  user_id: number | null
+  user_email: string
+  api_key_id: number | null
+  api_key_name: string
+  group_id: number | null
+  group_name: string
+  risk_score: number
+  signup_ip_prefix: string
+  device_fingerprint_hash: string
+  signup_user_agent_hash: string
+  payment_order_id: number | null
+  redeem_code_id: number | null
+  referral_user_id: number | null
+  content_moderation_log_id: number | null
+  summary: string
+  evidence: HFCAbuseRiskEvidence[]
+  action_taken: string
+  action_note: string
+  reviewed_by: number | null
+  reviewed_at?: string
+  telegram_sent: boolean
+  telegram_sent_at?: string
+  telegram_error: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ListHFCAbuseRiskEventsParams {
+  page?: number
+  page_size?: number
+  source?: string
+  severity?: string
+  status?: string
+  search?: string
+  from?: string
+  to?: string
+}
+
+export interface HFCAbuseRiskEventsResponse {
+  items: HFCAbuseRiskEvent[]
+  total: number
+  page: number
+  page_size: number
+  pages: number
+}
+
+export interface ApplyHFCAbuseRiskActionPayload {
+  action: HFCAbuseRiskAction
+  note?: string
+}
+
+export interface ApplyHFCAbuseRiskActionResponse {
+  event: HFCAbuseRiskEvent
+  disabled_api_keys: number
+  frozen_user: boolean
 }
 
 export interface ContentModerationUnbanUserResponse {
@@ -220,6 +306,26 @@ export async function listLogs(
   return data
 }
 
+export async function listAbuseRiskEvents(
+  params: ListHFCAbuseRiskEventsParams = {}
+): Promise<HFCAbuseRiskEventsResponse> {
+  const { data } = await apiClient.get<HFCAbuseRiskEventsResponse>('/admin/risk-control/abuse/events', {
+    params,
+  })
+  return data
+}
+
+export async function applyAbuseRiskAction(
+  eventID: number,
+  payload: ApplyHFCAbuseRiskActionPayload
+): Promise<ApplyHFCAbuseRiskActionResponse> {
+  const { data } = await apiClient.post<ApplyHFCAbuseRiskActionResponse>(
+    `/admin/risk-control/abuse/events/${eventID}/actions`,
+    payload
+  )
+  return data
+}
+
 export async function unbanUser(userID: number): Promise<ContentModerationUnbanUserResponse> {
   const { data } = await apiClient.post<ContentModerationUnbanUserResponse>(
     `/admin/risk-control/users/${userID}/unban`
@@ -245,6 +351,8 @@ export const riskControlAPI = {
   getStatus,
   testAPIKeys,
   listLogs,
+  listAbuseRiskEvents,
+  applyAbuseRiskAction,
   unbanUser,
   deleteFlaggedHash,
   clearFlaggedHashes,

@@ -22,7 +22,7 @@ func NormalizeModelSource(source string) string {
 	if IsValidModelSource(source) {
 		return source
 	}
-	return ModelSourceRequested
+	return ModelSourceUpstream
 }
 
 // DashboardStats 仪表盘统计

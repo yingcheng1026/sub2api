@@ -168,6 +168,42 @@ assert_account_stats_modal_initial_load_guard() {
     fi
 }
 
+assert_admin_wallet_display_guard() {
+    local view="${REPO_ROOT}/frontend/src/views/admin/SubscriptionsView.vue"
+    local helper="${REPO_ROOT}/frontend/src/utils/subscriptionWallet.ts"
+    local spec="${REPO_ROOT}/frontend/src/utils/__tests__/subscriptionWallet.spec.ts"
+
+    if ! grep -Fq "hasWalletBalance(row)" "${view}"; then
+        echo "Admin wallet display guard failed: SubscriptionsView must branch on hasWalletBalance(row)." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "!hasWalletBalance(row)" "${view}"; then
+        echo "Admin wallet display guard failed: unlimited fallback must exclude wallet subscriptions." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "data-hfc-wallet-balance-field=\"wallet_balance_usd\"" "${view}"; then
+        echo "Admin wallet display guard failed: missing wallet balance anti-overwrite marker." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "data-hfc-wallet-initial-field=\"wallet_initial_usd\"" "${view}"; then
+        echo "Admin wallet display guard failed: missing wallet initial anti-overwrite marker." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "wallet_balance_usd != null" "${helper}"; then
+        echo "Admin wallet display guard failed: helper must treat zero balance as wallet mode." >&2
+        return 1
+    fi
+
+    if ! grep -Fq "ANTI_OVERWRITE_WALLET_MARKER" "${spec}"; then
+        echo "Admin wallet display guard failed: missing wallet helper anti-overwrite regression test." >&2
+        return 1
+    fi
+}
+
 main() {
     local image="${SUB2API_IMAGE:-${IMAGE:-}}"
     local repository
@@ -188,6 +224,7 @@ main() {
 
     assert_account_test_modal_initial_load_guard
     assert_account_stats_modal_initial_load_guard
+    assert_admin_wallet_display_guard
 
     SUB2API_BUILD_IMAGE_SH=1 docker build -t "${image}" \
         --build-arg GOPROXY=https://goproxy.cn,direct \

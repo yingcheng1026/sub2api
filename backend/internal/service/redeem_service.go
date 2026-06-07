@@ -6,10 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
+	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/internal/payment"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -319,11 +324,18 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	// 将事务放入 context，使 repository 方法能够使用同一事务
 	txCtx := dbent.NewTxContext(ctx, tx)
 
+	if err := s.checkPaidTrialRedeemLimit(txCtx, tx, userID, redeemCode); err != nil {
+		return nil, err
+	}
+
 	// 【关键】先标记兑换码为已使用，确保并发安全
 	// 利用数据库乐观锁（WHERE status = 'unused'）保证原子性
 	if err := s.redeemRepo.Use(txCtx, redeemCode.ID, userID); err != nil {
 		if errors.Is(err, ErrRedeemCodeNotFound) || errors.Is(err, ErrRedeemCodeUsed) {
 			return nil, ErrRedeemCodeUsed
+		}
+		if isPaidTrialRedeemCode(redeemCode) && dbent.IsConstraintError(err) {
+			return nil, paidTrialRedeemLimitReachedError("redeem_code_constraint", *redeemCode.GroupID, redeemCode.ID)
 		}
 		return nil, fmt.Errorf("mark code as used: %w", err)
 	}
@@ -411,9 +423,15 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	// 事务提交成功后失效缓存
 	s.invalidateRedeemCaches(ctx, userID, redeemCode)
 
-	// 余额类正数兑换码触发邀请返利（best-effort，失败不影响兑换结果）
-	if redeemCode.Type == RedeemTypeBalance && redeemCode.Value > 0 {
-		s.tryAccrueAffiliateRebateForRedeem(ctx, userID, redeemCode.Value)
+	// 邀请返利触发（best-effort，失败不影响兑换结果）
+	// 触发范围：balance / wallet / subscription 正数码，subscription 缩短/退款码（ValidityDays<0）除外。
+	if redeemCode.Value > 0 && isAffiliateRebateTriggerRedeem(redeemCode) {
+		override := inviterRebateOverrideForRedeem(redeemCode)
+		s.tryAccrueAffiliateRebateForRedeemWithOverride(ctx, userID, redeemCode.Value, override)
+		// 新人首单 5% 仅 wallet 类型（余额卡/¥99）触发；月卡 subscription 整档零佣金，不触发首单
+		if redeemCode.Type == RedeemTypeWallet {
+			s.tryAccrueInviteeFirstOrderRebateForRedeem(ctx, userID, redeemCode.Value)
+		}
 	}
 
 	// 重新获取更新后的兑换码
@@ -423,6 +441,78 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	}
 
 	return redeemCode, nil
+}
+
+func (s *RedeemService) checkPaidTrialRedeemLimit(ctx context.Context, tx *dbent.Tx, userID int64, code *RedeemCode) error {
+	if !isPaidTrialRedeemCode(code) {
+		return nil
+	}
+
+	groupID := *code.GroupID
+	usedCodeExists, err := tx.RedeemCode.Query().
+		Where(
+			redeemcode.TypeEQ(RedeemTypeSubscription),
+			redeemcode.GroupIDEQ(groupID),
+			redeemcode.StatusEQ(StatusUsed),
+			redeemcode.UsedByEQ(userID),
+			redeemcode.IDNEQ(code.ID),
+		).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check paid trial redeem history: %w", err)
+	}
+	if usedCodeExists {
+		return paidTrialRedeemLimitReachedError("redeem_code", groupID, code.ID)
+	}
+
+	subExists, err := tx.UserSubscription.Query().
+		Where(
+			usersubscription.UserIDEQ(userID),
+			usersubscription.GroupIDEQ(groupID),
+			usersubscription.DeletedAtIsNil(),
+		).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check paid trial subscription history: %w", err)
+	}
+	if subExists {
+		return paidTrialRedeemLimitReachedError("subscription", groupID, code.ID)
+	}
+
+	orderExists, err := tx.PaymentOrder.Query().
+		Where(
+			paymentorder.UserIDEQ(userID),
+			paymentorder.OrderTypeEQ(payment.OrderTypeSubscription),
+			paymentorder.PlanIDEQ(paidTrialOncePlanID),
+			paymentorder.StatusIn(paidTrialOnceBlockingStatuses...),
+		).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("check paid trial order history: %w", err)
+	}
+	if orderExists {
+		return paidTrialRedeemLimitReachedError("payment_order", groupID, code.ID)
+	}
+
+	return nil
+}
+
+func isPaidTrialRedeemCode(code *RedeemCode) bool {
+	return code != nil &&
+		code.Type == RedeemTypeSubscription &&
+		code.GroupID != nil &&
+		*code.GroupID == paidTrialRedeemGroupID &&
+		code.ValidityDays >= 0
+}
+
+func paidTrialRedeemLimitReachedError(source string, groupID, codeID int64) error {
+	return infraerrors.Conflict("PLAN_PURCHASE_LIMIT_REACHED", "this plan can only be purchased once per user").
+		WithMetadata(map[string]string{
+			"plan_name":      paidTrialOncePlanName,
+			"group_id":       strconv.FormatInt(groupID, 10),
+			"redeem_code_id": strconv.FormatInt(codeID, 10),
+			"source":         source,
+		})
 }
 
 // invalidateRedeemCaches 失效兑换相关的缓存
@@ -465,7 +555,39 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 	}
 }
 
-func (s *RedeemService) tryAccrueAffiliateRebateForRedeem(ctx context.Context, userID int64, amount float64) {
+// isAffiliateRebateTriggerRedeem 判断该兑换码是否触发邀请返利。
+// subscription 缩短/退款码（ValidityDays<0）不触发。
+func isAffiliateRebateTriggerRedeem(code *RedeemCode) bool {
+	switch code.Type {
+	case RedeemTypeBalance, RedeemTypeWallet:
+		return true
+	case RedeemTypeSubscription:
+		return code.ValidityDays >= 0
+	default:
+		return false
+	}
+}
+
+// inviterRebateOverrideForRedeem 根据兑换码类型返回邀请人差异化比例 override。
+// balance 类返回 nil（走全局 20%），wallet/subscription 类返回对应比例。
+func inviterRebateOverrideForRedeem(code *RedeemCode) *float64 {
+	switch code.Type {
+	case RedeemTypeWallet:
+		if code.PlanID != nil && affiliateCreditsPlanIDs[*code.PlanID] {
+			rate := AffiliateRebateCreditsCardRate // 余额卡 10%
+			return &rate
+		}
+		rate := AffiliateRebatePackageRate // plan18 ¥99 → 5%
+		return &rate
+	case RedeemTypeSubscription:
+		rate := AffiliateRebateSubscriptionRate // 月卡 0%（返回 0 而非 nil，避免落回全局 20%）
+		return &rate
+	default:
+		return nil // balance → 全局率
+	}
+}
+
+func (s *RedeemService) tryAccrueAffiliateRebateForRedeemWithOverride(ctx context.Context, userID int64, amount float64, override *float64) {
 	if ctx.Value(ctxKeySkipRedeemAffiliate{}) != nil {
 		return
 	}
@@ -475,13 +597,34 @@ func (s *RedeemService) tryAccrueAffiliateRebateForRedeem(ctx context.Context, u
 	if !s.affiliateService.IsEnabled(ctx) {
 		return
 	}
-	rebate, err := s.affiliateService.AccrueInviteRebate(ctx, userID, amount)
+	rebate, err := s.affiliateService.AccrueInviteRebateForOrderWithOverride(ctx, userID, amount, override, nil)
 	if err != nil {
 		logger.LegacyPrintf("service.redeem", "[Redeem] affiliate rebate failed for user %d amount %.2f: %v", userID, amount, err)
 		return
 	}
 	if rebate > 0 {
 		logger.LegacyPrintf("service.redeem", "[Redeem] affiliate rebate accrued %.8f for inviter of user %d", rebate, userID)
+	}
+}
+
+// tryAccrueInviteeFirstOrderRebateForRedeem 新人首单 5%：被邀请人兑换首张正价链动卡时，
+// 按面值 5% 入本人余额。per-user 锁防重入，只触发一次。
+func (s *RedeemService) tryAccrueInviteeFirstOrderRebateForRedeem(ctx context.Context, userID int64, amount float64) {
+	if ctx.Value(ctxKeySkipRedeemAffiliate{}) != nil {
+		return
+	}
+	if s.affiliateService == nil || !s.affiliateService.IsEnabled(ctx) {
+		return
+	}
+	// 检查是否已有过返利（首单判定：此前无其他 used 且 value>0 的非 balance 码）
+	// 用 redis / DB 锁，这里通过 AffiliateService 的首单专属接口实现
+	rebate, err := s.affiliateService.AccrueInviteeFirstOrderRebate(ctx, userID, amount)
+	if err != nil {
+		logger.LegacyPrintf("service.redeem", "[Redeem] invitee first-order rebate failed for user %d: %v", userID, err)
+		return
+	}
+	if rebate > 0 {
+		logger.LegacyPrintf("service.redeem", "[Redeem] invitee first-order rebate %.8f accrued for user %d", rebate, userID)
 	}
 }
 

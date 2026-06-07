@@ -2364,6 +2364,12 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		// 风控中心功能（默认关闭，显式启用）
 		SettingKeyRiskControlEnabled: "false",
 
+		// HFC Telegram 风控告警（默认关闭，显式启用）
+		SettingKeyHFCTelegramRiskAlertEnabled: "false",
+		SettingKeyHFCTelegramBotToken:         "",
+		SettingKeyHFCTelegramChatID:           "",
+		SettingKeyHFCTelegramMinSeverity:      "high",
+
 		// Claude Code version check (default: empty = disabled)
 		SettingKeyMinClaudeCodeVersion: "",
 		SettingKeyMaxClaudeCodeVersion: "",

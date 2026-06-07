@@ -1971,6 +1971,10 @@ func billingErrorDetails(err error) (status int, code, message string, retryAfte
 		msg := pkgerrors.Message(err)
 		return http.StatusPaymentRequired, "wallet_insufficient", msg, 0
 	}
+	if errors.Is(err, service.ErrTrialPaymentBindingRequired) {
+		msg := pkgerrors.Message(err)
+		return http.StatusPaymentRequired, "trial_payment_binding_required", msg, 0
+	}
 	msg := pkgerrors.Message(err)
 	if msg == "" {
 		logger.L().With(

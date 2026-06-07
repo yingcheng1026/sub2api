@@ -142,35 +142,39 @@ type UpdateProviderInstanceRequest struct {
 	AllowUserRefund *bool             `json:"allow_user_refund"`
 }
 type CreatePlanRequest struct {
-	GroupID       int64    `json:"group_id"`
-	Name          string   `json:"name"`
-	Description   string   `json:"description"`
-	Price         float64  `json:"price"`
-	OriginalPrice *float64 `json:"original_price"`
-	ValidityDays  int      `json:"validity_days"`
-	ValidityUnit  string   `json:"validity_unit"`
-	Features      string   `json:"features"`
-	ProductName   string   `json:"product_name"`
-	ForSale       bool     `json:"for_sale"`
-	SortOrder     int      `json:"sort_order"`
+	GroupID        *int64   `json:"group_id"`
+	PlanGroupIDs   []int64  `json:"plan_group_ids"`
+	WalletQuotaUSD *float64 `json:"wallet_quota_usd"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	Price          float64  `json:"price"`
+	OriginalPrice  *float64 `json:"original_price"`
+	ValidityDays   int      `json:"validity_days"`
+	ValidityUnit   string   `json:"validity_unit"`
+	Features       string   `json:"features"`
+	ProductName    string   `json:"product_name"`
+	ForSale        bool     `json:"for_sale"`
+	SortOrder      int      `json:"sort_order"`
 	// PlanType 区分月卡 / 额度卡。空串默认 "subscription"。
 	// 取值：subscription | credits。见 docs/plans/2026-05-13-wallet-multikey-credits-design.md §2.2。
 	PlanType string `json:"plan_type"`
 }
 
 type UpdatePlanRequest struct {
-	GroupID       *int64   `json:"group_id"`
-	Name          *string  `json:"name"`
-	Description   *string  `json:"description"`
-	Price         *float64 `json:"price"`
-	OriginalPrice *float64 `json:"original_price"`
-	ValidityDays  *int     `json:"validity_days"`
-	ValidityUnit  *string  `json:"validity_unit"`
-	Features      *string  `json:"features"`
-	ProductName   *string  `json:"product_name"`
-	ForSale       *bool    `json:"for_sale"`
-	SortOrder     *int     `json:"sort_order"`
-	PlanType      *string  `json:"plan_type"`
+	GroupID        *int64   `json:"group_id"`
+	PlanGroupIDs   *[]int64 `json:"plan_group_ids"`
+	WalletQuotaUSD *float64 `json:"wallet_quota_usd"`
+	Name           *string  `json:"name"`
+	Description    *string  `json:"description"`
+	Price          *float64 `json:"price"`
+	OriginalPrice  *float64 `json:"original_price"`
+	ValidityDays   *int     `json:"validity_days"`
+	ValidityUnit   *string  `json:"validity_unit"`
+	Features       *string  `json:"features"`
+	ProductName    *string  `json:"product_name"`
+	ForSale        *bool    `json:"for_sale"`
+	SortOrder      *int     `json:"sort_order"`
+	PlanType       *string  `json:"plan_type"`
 }
 
 // PaymentConfigService manages payment configuration and CRUD for

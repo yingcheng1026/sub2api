@@ -7,16 +7,18 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
 type ContentModerationHandler struct {
-	service *service.ContentModerationService
+	service          *service.ContentModerationService
+	abuseRiskService *service.HFCAbuseRiskService
 }
 
-func NewContentModerationHandler(svc *service.ContentModerationService) *ContentModerationHandler {
-	return &ContentModerationHandler{service: svc}
+func NewContentModerationHandler(svc *service.ContentModerationService, abuseRiskSvc *service.HFCAbuseRiskService) *ContentModerationHandler {
+	return &ContentModerationHandler{service: svc, abuseRiskService: abuseRiskSvc}
 }
 
 type contentModerationConfigRequest struct {
@@ -59,6 +61,11 @@ type contentModerationAPIKeyTestRequest struct {
 
 type contentModerationHashRequest struct {
 	InputHash string `json:"input_hash"`
+}
+
+type hfcAbuseRiskActionRequest struct {
+	Action string `json:"action"`
+	Note   string `json:"note"`
 }
 
 func (h *ContentModerationHandler) GetConfig(c *gin.Context) {
@@ -188,6 +195,85 @@ func (h *ContentModerationHandler) ListLogs(c *gin.Context) {
 	response.Paginated(c, items, pageResult.Total, pageResult.Page, pageResult.PageSize)
 }
 
+func (h *ContentModerationHandler) ListAbuseRiskEvents(c *gin.Context) {
+	page, pageSize := response.ParsePagination(c)
+	filter := service.HFCAbuseRiskEventFilter{
+		Pagination: pagination.PaginationParams{
+			Page:      page,
+			PageSize:  pageSize,
+			SortOrder: pagination.SortOrderDesc,
+		},
+		Source:   c.Query("source"),
+		Severity: c.Query("severity"),
+		Status:   c.Query("status"),
+		Search:   c.Query("search"),
+	}
+	if raw := strings.TrimSpace(c.Query("from")); raw != "" {
+		t, _, err := parseContentModerationDate(raw)
+		if err != nil {
+			response.BadRequest(c, "Invalid from")
+			return
+		}
+		filter.From = &t
+	}
+	if raw := strings.TrimSpace(c.Query("to")); raw != "" {
+		t, dateOnly, err := parseContentModerationDate(raw)
+		if err != nil {
+			response.BadRequest(c, "Invalid to")
+			return
+		}
+		if dateOnly {
+			t = t.Add(24*time.Hour - time.Nanosecond)
+		}
+		filter.To = &t
+	}
+	items, pageResult, err := h.abuseRiskService.ListEvents(c.Request.Context(), filter)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Paginated(c, items, pageResult.Total, pageResult.Page, pageResult.PageSize)
+}
+
+func (h *ContentModerationHandler) GetAbuseRiskEvent(c *gin.Context) {
+	id, err := parsePositiveIDParam(c, "id")
+	if err != nil {
+		response.BadRequest(c, "Invalid id")
+		return
+	}
+	event, err := h.abuseRiskService.GetEvent(c.Request.Context(), id)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, event)
+}
+
+func (h *ContentModerationHandler) ApplyAbuseRiskAction(c *gin.Context) {
+	id, err := parsePositiveIDParam(c, "id")
+	if err != nil {
+		response.BadRequest(c, "Invalid id")
+		return
+	}
+	var req hfcAbuseRiskActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	subject, _ := middleware2.GetAuthSubjectFromContext(c)
+	result, err := h.abuseRiskService.ApplyAction(c.Request.Context(), service.HFCAbuseRiskActionInput{
+		EventID:     id,
+		Action:      req.Action,
+		AdminUserID: subject.UserID,
+		Note:        req.Note,
+	})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 func (h *ContentModerationHandler) UnbanUser(c *gin.Context) {
 	userID, err := strconv.ParseInt(strings.TrimSpace(c.Param("user_id")), 10, 64)
 	if err != nil || userID <= 0 {
@@ -223,6 +309,17 @@ func (h *ContentModerationHandler) ClearFlaggedHashes(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+func parsePositiveIDParam(c *gin.Context, name string) (int64, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(c.Param(name)), 10, 64)
+	if err != nil || id <= 0 {
+		if err == nil {
+			err = strconv.ErrSyntax
+		}
+		return 0, err
+	}
+	return id, nil
 }
 
 func parseContentModerationDate(raw string) (time.Time, bool, error) {
