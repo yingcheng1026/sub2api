@@ -428,8 +428,8 @@ func (s *RedeemService) Redeem(ctx context.Context, userID int64, code string) (
 	if redeemCode.Value > 0 && isAffiliateRebateTriggerRedeem(redeemCode) {
 		override := inviterRebateOverrideForRedeem(redeemCode)
 		s.tryAccrueAffiliateRebateForRedeemWithOverride(ctx, userID, redeemCode.Value, override)
-		// 非散装 balance 码额外触发新人首单 5%
-		if redeemCode.Type != RedeemTypeBalance {
+		// 新人首单 5% 仅 wallet 类型（余额卡/¥99）触发；月卡 subscription 整档零佣金，不触发首单
+		if redeemCode.Type == RedeemTypeWallet {
 			s.tryAccrueInviteeFirstOrderRebateForRedeem(ctx, userID, redeemCode.Value)
 		}
 	}
@@ -574,13 +574,13 @@ func inviterRebateOverrideForRedeem(code *RedeemCode) *float64 {
 	switch code.Type {
 	case RedeemTypeWallet:
 		if code.PlanID != nil && affiliateCreditsPlanIDs[*code.PlanID] {
-			rate := AffiliateRebateCreditsCardRate // 余额卡 15%
+			rate := AffiliateRebateCreditsCardRate // 余额卡 10%
 			return &rate
 		}
-		rate := AffiliateRebatePackageRate // plan18 等归套餐档 10%
+		rate := AffiliateRebatePackageRate // plan18 ¥99 → 5%
 		return &rate
 	case RedeemTypeSubscription:
-		rate := AffiliateRebatePackageRate // 月卡 10%
+		rate := AffiliateRebateSubscriptionRate // 月卡 0%（返回 0 而非 nil，避免落回全局 20%）
 		return &rate
 	default:
 		return nil // balance → 全局率

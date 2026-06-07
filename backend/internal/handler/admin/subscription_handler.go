@@ -179,7 +179,9 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 	// Non-blocking: a rebate failure must never roll back a successful assignment.
 	if h.affiliateService != nil {
 		if baseAmount := adminAssignBaseAmount(subscription); baseAmount > 0 {
-			if _, rebateErr := h.affiliateService.AccrueInviteRebateForOrder(c.Request.Context(), subscription.UserID, baseAmount, nil); rebateErr != nil {
+			// 差异化返利：余额卡 10% / 月卡及其它 0%（与兑换码口径一致，月卡不给佣金）。
+			override := service.AffiliateRebateOverrideForAdminAssign(req.PlanID)
+			if _, rebateErr := h.affiliateService.AccrueInviteRebateForOrderWithOverride(c.Request.Context(), subscription.UserID, baseAmount, override, nil); rebateErr != nil {
 				slog.Warn("admin assign: affiliate rebate failed", "userID", subscription.UserID, "subscriptionID", subscription.ID, "err", rebateErr)
 			}
 		}

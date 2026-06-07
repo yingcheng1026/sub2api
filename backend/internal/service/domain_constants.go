@@ -30,15 +30,30 @@ const (
 	AffiliateRebateDurationDaysMax      = 3650  // ~10 年
 	AffiliateRebatePerInviteeCapDefault = 0.0   // 0 = 无上限
 
-	// 差异化邀请返利比例（王哥 5/31 定稿，6/6 重申）
-	AffiliateRebateCreditsCardRate = 15.0 // 余额卡（wallet type，plan 11/12/13）
-	AffiliateRebatePackageRate     = 10.0 // 套餐月卡 + plan18（wallet/subscription）
-	AffiliateRebateInviteeFirst    = 5.0  // 新人首单（被邀请人，链动卡都给）
+	// 差异化邀请返利比例（6/7 成本收口定稿：月卡整档零佣金，¥99 砍半，余额卡省到 10%）
+	AffiliateRebateCreditsCardRate  = 10.0 // 余额卡（wallet type，plan 11/12/13），15%→10% 省成本
+	AffiliateRebatePackageRate      = 5.0  // ¥99 轻量版 plan18（wallet 非余额卡），10%→5%
+	AffiliateRebateSubscriptionRate = 0.0  // 月卡 subscription，10%→0%（不保本 SKU 不给佣金）
+	AffiliateRebateInviteeFirst     = 5.0  // 新人首单（被邀请人，仅 wallet 类型：余额卡/¥99；月卡不给）
 )
 
-// affiliateCreditsPlanIDs 是余额卡套餐 ID 集合，这类 wallet 码走 15% 邀请人返利。
+// affiliateCreditsPlanIDs 是余额卡套餐 ID 集合，这类 wallet 码走余额卡邀请人返利率。
 // plan 11=credits-30, plan 12=credits-100, plan 13=credits-500
 var affiliateCreditsPlanIDs = map[int64]bool{11: true, 12: true, 13: true}
+
+// AffiliateRebateOverrideForAdminAssign 决定 admin 后台分配订阅时的邀请人返利 override。
+// 后台分配只有 planID 可判类型（拿不到兑换码的 wallet/subscription 区分），故采用最稳口径：
+//   - 余额卡 plan 11/12/13 → 余额卡率（当前 10%）
+//   - 其余（月卡及其它）→ 订阅率 0%（不保本 SKU 不给佣金；后台手动发 ¥99 极罕见，归 0 也是省成本方向）
+// 返回 0 而非 nil，避免落回全局 20% 率。
+func AffiliateRebateOverrideForAdminAssign(planID *int64) *float64 {
+	if planID != nil && affiliateCreditsPlanIDs[*planID] {
+		rate := AffiliateRebateCreditsCardRate
+		return &rate
+	}
+	rate := AffiliateRebateSubscriptionRate
+	return &rate
+}
 
 // Platform constants
 const (
