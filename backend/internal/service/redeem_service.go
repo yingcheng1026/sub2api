@@ -628,10 +628,6 @@ func (s *RedeemService) tryAccrueInviteeFirstOrderRebateForRedeem(ctx context.Co
 	}
 }
 
-func (s *RedeemService) tryAccrueAffiliateRebateForRedeem(ctx context.Context, userID int64, amount float64) {
-	s.tryAccrueAffiliateRebateForRedeemWithOverride(ctx, userID, amount, nil)
-}
-
 // GetByID 根据ID获取兑换码
 func (s *RedeemService) GetByID(ctx context.Context, id int64) (*RedeemCode, error) {
 	code, err := s.redeemRepo.GetByID(ctx, id)

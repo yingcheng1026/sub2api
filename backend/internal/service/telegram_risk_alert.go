@@ -146,7 +146,7 @@ func (n *TelegramRiskNotifier) SendHFCAbuseRisk(ctx context.Context, alert HFCAb
 	if err != nil {
 		return errors.New("send telegram request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var apiResp struct {

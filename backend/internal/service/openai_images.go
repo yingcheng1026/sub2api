@@ -974,10 +974,6 @@ func buildOpenAIImagesURL(base string, endpoint string) string {
 	return normalized + endpoint
 }
 
-func rewriteOpenAIImagesModel(body []byte, contentType string, model string) ([]byte, string, error) {
-	return rewriteOpenAIImagesForwardBody(body, contentType, model, "")
-}
-
 func rewriteOpenAIImagesForwardBody(body []byte, contentType string, model string, safetyIdentifier string) ([]byte, string, error) {
 	model = strings.TrimSpace(model)
 	safetyIdentifier = strings.TrimSpace(safetyIdentifier)
@@ -1004,10 +1000,6 @@ func rewriteOpenAIImagesForwardBody(body []byte, contentType string, model strin
 		}
 	}
 	return rewritten, contentType, nil
-}
-
-func rewriteOpenAIImagesMultipartModel(body []byte, contentType string, model string) ([]byte, string, error) {
-	return rewriteOpenAIImagesMultipartSafetyFields(body, contentType, model, "")
 }
 
 func rewriteOpenAIImagesMultipartSafetyFields(body []byte, contentType string, model string, safetyIdentifier string) ([]byte, string, error) {
