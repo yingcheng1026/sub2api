@@ -3603,6 +3603,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	failedMessage := ""
 	clientOutputStarted := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
+	// Buffer raw SSE so an empty terminal output array can be reconstructed from
+	// streamed deltas (some upstreams emit response.completed with output:[]).
+	var responsesSSEAccum strings.Builder
+	responsesOutputReconstructable := true
 	pendingLines := make([]string, 0, 8)
 	writePendingLines := func() bool {
 		for _, pending := range pendingLines {
@@ -3667,6 +3671,22 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				firstTokenMs = &ms
 			}
 			s.parseSSEUsageBytes(dataBytes, usage)
+
+			// Reconstruct an empty terminal output array from accumulated deltas
+			// (upstream quirk). No-op unless output is empty and reconstructable.
+			if responsesOutputReconstructable {
+				if eventType == "response.completed" || eventType == "response.done" {
+					if patched, ok := patchEmptyResponsesTerminalOutput(dataBytes, responsesSSEAccum.String()); ok {
+						line = "data: " + string(patched)
+					}
+				} else if responsesSSEAccum.Len()+len(line)+1 > maxResponsesTerminalReconstructBytes {
+					responsesOutputReconstructable = false
+					responsesSSEAccum.Reset()
+				} else {
+					_, _ = responsesSSEAccum.WriteString(line)
+					_ = responsesSSEAccum.WriteByte('\n')
+				}
+			}
 		}
 
 		if !clientDisconnected {
@@ -4367,6 +4387,10 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 	clientOutputStarted := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	var streamFailoverErr error
+	// Buffer raw SSE so an empty terminal output array can be reconstructed from
+	// streamed deltas (some upstreams emit response.completed with output:[]).
+	var responsesSSEAccum strings.Builder
+	responsesOutputReconstructable := true
 	sendErrorEvent := func(reason string) {
 		if errorEventSent || clientDisconnected {
 			return
@@ -4495,6 +4519,25 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 				line = "data: " + data
 				eventType = strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
 			}
+
+			// Reconstruct an empty terminal output array from accumulated deltas
+			// (upstream quirk). No-op unless output is empty and reconstructable.
+			if responsesOutputReconstructable {
+				if eventType == "response.completed" || eventType == "response.done" {
+					if patched, ok := patchEmptyResponsesTerminalOutput(dataBytes, responsesSSEAccum.String()); ok {
+						dataBytes = patched
+						data = string(patched)
+						line = "data: " + data
+					}
+				} else if responsesSSEAccum.Len()+len(line)+1 > maxResponsesTerminalReconstructBytes {
+					responsesOutputReconstructable = false
+					responsesSSEAccum.Reset()
+				} else {
+					_, _ = responsesSSEAccum.WriteString(line)
+					_ = responsesSSEAccum.WriteByte('\n')
+				}
+			}
+
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
 
 			// 写入客户端（客户端断开后继续 drain 上游）
@@ -4974,6 +5017,38 @@ func reconstructResponseOutputFromSSE(bodyText string) ([]byte, bool) {
 		return nil, false
 	}
 	return outputJSON, true
+}
+
+// maxResponsesTerminalReconstructBytes caps how much raw SSE we buffer per
+// stream to reconstruct an empty terminal output array. Beyond this the
+// reconstruction is abandoned (the terminal event is forwarded unchanged) so a
+// pathological stream cannot blow up memory.
+const maxResponsesTerminalReconstructBytes = 16 << 20 // 16 MiB
+
+// patchEmptyResponsesTerminalOutput rebuilds an empty `response.output` array on
+// a streaming terminal event (response.completed / response.done) from the
+// accumulated SSE deltas. Some upstreams (notably third-party Codex relays) emit
+// the terminal event with output:[] even though the content was streamed via
+// deltas; without this, clients that read the terminal object instead of the
+// deltas (any non-streaming-style consumer) see an empty response. This mirrors
+// the reconstruction already performed on the non-streaming paths
+// (handleSSEToJSON / handlePassthroughSSEToJSON).
+//
+// It is a strict no-op unless the terminal output is empty AND content was
+// reconstructable, so upstreams that already populate output are untouched.
+func patchEmptyResponsesTerminalOutput(dataBytes []byte, accumulatedSSE string) ([]byte, bool) {
+	if output := gjson.GetBytes(dataBytes, "response.output"); output.Exists() && len(output.Array()) > 0 {
+		return dataBytes, false
+	}
+	outputJSON, reconstructed := reconstructResponseOutputFromSSE(accumulatedSSE)
+	if !reconstructed {
+		return dataBytes, false
+	}
+	patched, err := sjson.SetRawBytes(dataBytes, "response.output", outputJSON)
+	if err != nil {
+		return dataBytes, false
+	}
+	return patched, true
 }
 
 func extractImageGenerationOutputFromSSEData(data []byte, seen map[string]struct{}) (json.RawMessage, bool) {
