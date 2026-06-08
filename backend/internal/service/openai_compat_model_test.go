@@ -124,6 +124,28 @@ func TestApplyOpenAICompatModelNormalization(t *testing.T) {
 	})
 }
 
+func TestShouldApplyOpenAICompatKnowledgeCutoffGuard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		originalModel string
+		upstreamModel string
+		want          bool
+	}{
+		{name: "claude compat shell to gpt adds guard", originalModel: "claude-sonnet-4-6", upstreamModel: "gpt-5.4", want: true},
+		{name: "native gpt request skips guard", originalModel: "gpt-5.4", upstreamModel: "gpt-5.4", want: false},
+		{name: "real claude upstream skips guard", originalModel: "claude-sonnet-4-6", upstreamModel: "claude-sonnet-4-6", want: false},
+		{name: "empty upstream skips guard", originalModel: "claude-sonnet-4-6", upstreamModel: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, shouldApplyOpenAICompatKnowledgeCutoffGuard(tt.originalModel, tt.upstreamModel))
+		})
+	}
+}
+
 func TestForwardAsAnthropic_NormalizesRoutingAndEffortForGpt54XHigh(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -226,6 +248,10 @@ func TestForwardAsAnthropic_InjectsPromptCacheKeyForAPIKeyMessagesDispatch(t *te
 	require.NotNil(t, result)
 	require.Equal(t, "stable-cache-key", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, "gpt-5.3-codex", gjson.GetBytes(upstream.lastBody, "model").String())
+	instructions := gjson.GetBytes(upstream.lastBody, "instructions").String()
+	require.Contains(t, instructions, openAICompatKnowledgeCutoffGuardMarker)
+	require.Contains(t, instructions, "upstream model gpt-5.3-codex")
+	require.Contains(t, instructions, "cannot be confirmed")
 	require.Equal(t, 3, result.Usage.CacheReadInputTokens)
 }
 
@@ -951,7 +977,10 @@ func TestForwardAsAnthropic_OAuthKeepsSystemAsDeveloperInput(t *testing.T) {
 	require.Equal(t, "project instructions", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
 	instructions := gjson.GetBytes(upstream.lastBody, "instructions")
 	require.True(t, instructions.Exists())
-	require.Empty(t, instructions.String())
+	require.Contains(t, instructions.String(), openAICompatKnowledgeCutoffGuardMarker)
+	require.Contains(t, instructions.String(), "upstream model gpt-5.4")
+	require.Contains(t, instructions.String(), "cannot be confirmed")
+	require.NotContains(t, instructions.String(), "project instructions")
 	require.Empty(t, upstream.requests[0].Header.Get("OpenAI-Beta"))
 	require.Empty(t, upstream.requests[0].Header.Get("originator"))
 }

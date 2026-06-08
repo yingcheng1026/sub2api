@@ -218,6 +218,13 @@
 - This is only a skip/cooldown/clear fast path. It does not auto-delete accounts, does not change HFC LoadFactor weighting, does not rewrite dispatch priority, and does not touch billing, wallet, monthly-card logic, ledger, model pricing, multipliers, payment, platform quota, group coverage, production data, migrations, or deployment.
 - Verification: `git diff --check` passed. Backend Go tests and `gofmt` were not run locally because this machine has no `go`/`gofmt`.
 
+## 2026-06-09 - HFC GPT compatibility visible model closure prep
+
+- Added a server-side OpenAI `/v1/messages` compatibility guard for Claude-compatible request model names that actually execute on GPT upstream models. The guard tells the upstream model to answer identity, knowledge cutoff, training cutoff, and built-in knowledge date questions from the real upstream GPT model instead of the Claude-compatible protocol shell.
+- Scoped the guard to `Claude-compatible request -> gpt* upstream` only, preserving native GPT requests, real Claude upstreams, customer request JSON, response shape, billing fields, routing model, `requested_model`, and `model_mapping_chain`.
+- Added production replay SQL `deploy/backfill_gpt_compat_usage_model_20260609.sql` plus rollback SQL to back up and update historical OpenAI/GPT `/v1/messages` rows where `usage_logs.model` still showed `claude*` while `upstream_model` was `gpt*`.
+- Verification: `gofmt` passed for changed Go files; `go test -tags=unit ./internal/service ./internal/repository ./internal/handler/admin ./internal/pkg/usagestats` passed locally with temporary Go 1.26.3.
+
 ## 2026-06-01 - HFC OpenAI image moderation error passthrough fusion
 
 - Fused the HFC-safe subset of the official OpenAI image moderation error surfacing change.

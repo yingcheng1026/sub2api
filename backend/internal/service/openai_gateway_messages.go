@@ -202,6 +202,12 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		}
 	}
 
+	if updatedBody, applied, err := applyOpenAICompatKnowledgeCutoffGuardToResponsesBody(responsesBody, originalModel, upstreamModel); err != nil {
+		return nil, err
+	} else if applied {
+		responsesBody = updatedBody
+	}
+
 	// For API key accounts (including OpenAI-compatible upstream gateways),
 	// ensure promptCacheKey is also propagated via the request body so that
 	// upstreams using the Responses API can derive a stable session identifier
