@@ -51,6 +51,10 @@
               <div class="flex items-center gap-2">
                 <span class="font-semibold text-gray-900 dark:text-white">{{ tier.name }}</span>
                 <span
+                  v-if="tier.purchaseBadge"
+                  class="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200 dark:bg-amber-400/10 dark:text-amber-200 dark:ring-amber-300/20"
+                >{{ tier.purchaseBadge }}</span>
+                <span
                   v-if="recommendedTier?.url === tier.url"
                   class="rounded bg-primary-500 px-1.5 py-0.5 text-[10px] font-medium text-white"
                 >同档推荐</span>
