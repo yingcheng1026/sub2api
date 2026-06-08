@@ -130,33 +130,20 @@ func (r *userSubscriptionRepository) GetActiveWalletByUserID(ctx context.Context
 }
 
 // GetActiveByPlanCoveringGroup 查询用户 active 月卡订阅，其 plan 通过
-// subscription_plan_groups 覆盖目标 group。两步查询：
-//  1. 查 plan_groups 反向定位所有覆盖 targetGroupID 的 plan，取出它们的 plan.group_id（主 group）
-//  2. 查用户 active 非钱包订阅，其 group_id 在上一步集合中
+// subscription_plan_groups 覆盖目标 group。兼容两种 plan 形态：
+//  1. 老 v3 plan.group_id = 订阅主 group；
+//  2. 新 M:N plan.group_id = NULL，由 plan_groups 中 subscription 类型 group 作为订阅锚点。
 //
 // 见 docs/plans/2026-05-16-wallet-v4-group-switch-billing-fix.md §4.1。
 func (r *userSubscriptionRepository) GetActiveByPlanCoveringGroup(ctx context.Context, userID, targetGroupID int64) (*service.UserSubscription, error) {
 	client := clientFromContext(ctx, r.client)
 
-	coveringPrimaryGroupIDs, err := client.SubscriptionPlan.Query().
-		Where(
-			subscriptionplan.GroupIDNotNil(),
-			subscriptionplan.HasPlanGroupsWith(
-				subscriptionplangroup.GroupIDEQ(targetGroupID),
-			),
-		).
-		Select(subscriptionplan.FieldGroupID).
-		Ints(ctx)
+	primaryGroupIDs, err := r.coveringSubscriptionGroupIDs(ctx, client, targetGroupID)
 	if err != nil {
 		return nil, err
 	}
-	if len(coveringPrimaryGroupIDs) == 0 {
+	if len(primaryGroupIDs) == 0 {
 		return nil, service.ErrSubscriptionNotFound
-	}
-
-	primaryGroupIDs := make([]int64, len(coveringPrimaryGroupIDs))
-	for i, v := range coveringPrimaryGroupIDs {
-		primaryGroupIDs[i] = int64(v)
 	}
 
 	m, err := client.UserSubscription.Query().
@@ -174,6 +161,72 @@ func (r *userSubscriptionRepository) GetActiveByPlanCoveringGroup(ctx context.Co
 		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
 	}
 	return userSubscriptionEntityToService(m), nil
+}
+
+func (r *userSubscriptionRepository) coveringSubscriptionGroupIDs(ctx context.Context, client *dbent.Client, targetGroupID int64) ([]int64, error) {
+	seen := make(map[int64]struct{})
+	primaryGroupIDs := make([]int64, 0)
+
+	coveringPrimaryGroupIDs, err := client.SubscriptionPlan.Query().
+		Where(
+			subscriptionplan.GroupIDNotNil(),
+			subscriptionplan.HasPlanGroupsWith(
+				subscriptionplangroup.GroupIDEQ(targetGroupID),
+			),
+		).
+		Select(subscriptionplan.FieldGroupID).
+		Ints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	primaryGroupIDs = appendUniqueIntIDs(primaryGroupIDs, seen, coveringPrimaryGroupIDs)
+
+	coveringPlanIDs, err := client.SubscriptionPlanGroup.Query().
+		Where(subscriptionplangroup.GroupIDEQ(targetGroupID)).
+		Select(subscriptionplangroup.FieldPlanID).
+		Ints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(coveringPlanIDs) == 0 {
+		return primaryGroupIDs, nil
+	}
+
+	planIDs := intIDsToInt64(coveringPlanIDs)
+	anchorGroupIDs, err := client.SubscriptionPlanGroup.Query().
+		Where(
+			subscriptionplangroup.PlanIDIn(planIDs...),
+			subscriptionplangroup.HasGroupWith(
+				group.SubscriptionTypeEQ(service.SubscriptionTypeSubscription),
+				group.DeletedAtIsNil(),
+			),
+		).
+		Select(subscriptionplangroup.FieldGroupID).
+		Ints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return appendUniqueIntIDs(primaryGroupIDs, seen, anchorGroupIDs), nil
+}
+
+func appendUniqueIntIDs(out []int64, seen map[int64]struct{}, values []int) []int64 {
+	for _, value := range values {
+		id := int64(value)
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func intIDsToInt64(values []int) []int64 {
+	out := make([]int64, len(values))
+	for i, value := range values {
+		out[i] = int64(value)
+	}
+	return out
 }
 
 // HasAnyActiveSubscription 用户是否有任何 active 订阅（含钱包 / 月卡）。

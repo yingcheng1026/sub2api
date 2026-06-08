@@ -204,6 +204,62 @@ func (s *UserSubscriptionRepoSuite) TestGetActiveByUserIDAndGroupID_ExpiredIgnor
 	s.Require().Error(err, "expected error for expired subscription")
 }
 
+func (s *UserSubscriptionRepoSuite) TestGetActiveByPlanCoveringGroup_MNPlanUsesSubscriptionAnchor() {
+	user := s.mustCreateUser("mn-plan-cover@test.com", service.RoleUser)
+	standardOnlyUser := s.mustCreateUser("mn-plan-standard-only@test.com", service.RoleUser)
+
+	subscriptionGroup, err := s.client.Group.Create().
+		SetName("paid-lite-v3-mn-anchor").
+		SetStatus(service.StatusActive).
+		SetSubscriptionType(service.SubscriptionTypeSubscription).
+		SetRateMultiplier(1).
+		Save(s.ctx)
+	s.Require().NoError(err, "create subscription anchor group")
+
+	openAIGroup, err := s.client.Group.Create().
+		SetName("openai-default-mn-target").
+		SetPlatform(service.PlatformOpenAI).
+		SetStatus(service.StatusActive).
+		SetSubscriptionType(service.SubscriptionTypeStandard).
+		SetRateMultiplier(0.001).
+		Save(s.ctx)
+	s.Require().NoError(err, "create openai target group")
+
+	claudeGroup, err := s.client.Group.Create().
+		SetName("claude-default-mn-target").
+		SetStatus(service.StatusActive).
+		SetSubscriptionType(service.SubscriptionTypeStandard).
+		SetRateMultiplier(1).
+		Save(s.ctx)
+	s.Require().NoError(err, "create claude target group")
+
+	plan, err := s.client.SubscriptionPlan.Create().
+		SetName("paid-lite-v3-mn").
+		SetPrice(99).
+		SetWalletQuotaUsd(400).
+		SetValidityDays(30).
+		SetValidityUnit("day").
+		Save(s.ctx)
+	s.Require().NoError(err, "create M:N subscription plan")
+
+	for _, groupID := range []int64{subscriptionGroup.ID, openAIGroup.ID, claudeGroup.ID} {
+		_, err = s.client.SubscriptionPlanGroup.Create().
+			SetPlanID(plan.ID).
+			SetGroupID(groupID).
+			Save(s.ctx)
+		s.Require().NoError(err, "bind plan group")
+	}
+
+	sub := s.mustCreateSubscription(user.ID, subscriptionGroup.ID, nil)
+	got, err := s.repo.GetActiveByPlanCoveringGroup(s.ctx, user.ID, openAIGroup.ID)
+	s.Require().NoError(err, "M:N plan coverage should resolve through subscription anchor group")
+	s.Require().Equal(sub.ID, got.ID)
+
+	s.mustCreateSubscription(standardOnlyUser.ID, openAIGroup.ID, nil)
+	_, err = s.repo.GetActiveByPlanCoveringGroup(s.ctx, standardOnlyUser.ID, claudeGroup.ID)
+	s.Require().ErrorIs(err, service.ErrSubscriptionNotFound, "standard plan groups must not become subscription anchors")
+}
+
 // --- ListByUserID / ListActiveByUserID ---
 
 func (s *UserSubscriptionRepoSuite) TestListByUserID() {
