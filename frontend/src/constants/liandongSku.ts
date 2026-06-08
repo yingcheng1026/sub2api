@@ -24,6 +24,8 @@ export interface LiandongMonthlyTier {
   tagline: string
   /** 用户购买页展示要点 */
   features: readonly string[]
+  /** 购买卡片额外标记 */
+  purchaseBadge?: string
   /** 首页推荐标记 */
   recommended?: boolean
 }
@@ -46,7 +48,8 @@ export const LIANDONG_MONTHLY_TIERS: readonly LiandongMonthlyTier[] = [
     originalPriceCny: 49.9,
     name: '体验版',
     url: 'https://pay.ldxp.cn/item/z80wd7',
-    tagline: '注册送 $15,先试再买',
+    tagline: '低门槛体验,先试再买',
+    purchaseBadge: '限购一次',
     features: ['先把链路验证一遍', '低频使用 / 评估迁移', '先用 $100 月额度验证链路']
   },
   {

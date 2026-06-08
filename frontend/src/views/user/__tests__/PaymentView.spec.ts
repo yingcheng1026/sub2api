@@ -429,6 +429,10 @@ describe('PaymentView WeChat JSAPI flow', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-hfc-purchase-liandong-subscription="monthly"]').exists()).toBe(true)
+    const trialCardText = wrapper.get('[data-hfc-liandong-tier="trial"]').text()
+    expect(trialCardText).toContain('限购一次')
+    expect(trialCardText).toContain('低门槛体验,先试再买')
+    expect(trialCardText).not.toContain('注册送 $15')
     expect(wrapper.text()).toContain('轻量正式版')
     expect(wrapper.text()).toContain('$400')
     expect(wrapper.text()).toContain('$50')

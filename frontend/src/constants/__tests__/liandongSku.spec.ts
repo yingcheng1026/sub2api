@@ -11,6 +11,15 @@ describe('liandongSku', () => {
       4500,
     ])
 
+    expect(matchMonthlyTier(100)).toMatchObject({
+      id: 'trial',
+      name: '体验版',
+      purchaseBadge: '限购一次',
+      tagline: '低门槛体验,先试再买',
+    })
+    expect(matchMonthlyTier(100)?.tagline).not.toContain('$15')
+    expect(matchMonthlyTier(100)?.tagline).not.toContain('注册送')
+
     expect(matchMonthlyTier(400)).toMatchObject({
       id: 'lite',
       quotaUsd: 400,

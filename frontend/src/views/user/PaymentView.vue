@@ -125,9 +125,17 @@
                   </div>
                   <div class="flex flex-1 flex-col p-4">
                     <div class="mb-3 pr-10">
-                      <h4 class="text-base font-bold text-gray-900 dark:text-white">
-                        {{ tier.name }}
-                      </h4>
+                      <div class="flex flex-wrap items-center gap-2">
+                        <h4 class="text-base font-bold text-gray-900 dark:text-white">
+                          {{ tier.name }}
+                        </h4>
+                        <span
+                          v-if="tier.purchaseBadge"
+                          class="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200 dark:bg-amber-400/10 dark:text-amber-200 dark:ring-amber-300/20"
+                        >
+                          {{ tier.purchaseBadge }}
+                        </span>
+                      </div>
                       <p class="mt-1 min-h-[32px] text-xs leading-relaxed text-gray-500 dark:text-dark-400">
                         {{ tier.tagline }}
                       </p>
