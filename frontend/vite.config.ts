@@ -34,20 +34,19 @@ function injectPublicSettings(backendUrl: string): Plugin {
   }
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   // 加载环境变量
   const env = loadEnv(mode, process.cwd(), '')
   const backendUrl = env.VITE_DEV_PROXY_TARGET || 'http://localhost:8080'
   const devPort = Number(env.VITE_DEV_PORT || 3000)
+  const enableChecker = command === 'serve' || env.VITE_ENABLE_BUILD_CHECKER === '1'
+  const plugins: Plugin[] = [vue(), injectPublicSettings(backendUrl)]
+  if (enableChecker) {
+    plugins.splice(1, 0, checker({ vueTsc: true }))
+  }
 
   return {
-    plugins: [
-      vue(),
-      checker({
-        vueTsc: true
-      }),
-      injectPublicSettings(backendUrl)
-    ],
+    plugins,
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
