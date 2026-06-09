@@ -1039,7 +1039,7 @@
 
     <template #footer>
       <div class="flex justify-end gap-3">
-        <button type="button" class="btn btn-secondary" @click="handleClose">
+        <button type="button" class="btn btn-secondary" :disabled="submitting" @click="handleClose">
           {{ t('common.cancel') }}
         </button>
         <button
@@ -1068,9 +1068,7 @@
               d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
             />
           </svg>
-          {{
-            submitting ? t('admin.accounts.bulkEdit.updating') : t('admin.accounts.bulkEdit.submit')
-          }}
+          {{ bulkUpdateSubmitLabel }}
         </button>
       </div>
     </template>
@@ -1225,6 +1223,7 @@ const enableRpmLimit = ref(false)
 
 // State - field values
 const submitting = ref(false)
+const bulkUpdateProgress = ref({ processed: 0, total: 0 })
 const showMixedChannelWarning = ref(false)
 const mixedChannelWarningMessage = ref('')
 const pendingUpdatesForConfirm = ref<Record<string, unknown> | null>(null)
@@ -1541,6 +1540,13 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
 }
 
 const mixedChannelConfirmed = ref(false)
+const bulkUpdateSubmitLabel = computed(() => {
+  if (!submitting.value) return t('admin.accounts.bulkEdit.submit')
+  if (bulkUpdateProgress.value.total > 0) {
+    return `${t('admin.accounts.bulkEdit.updating')} ${bulkUpdateProgress.value.processed}/${bulkUpdateProgress.value.total}`
+  }
+  return t('admin.accounts.bulkEdit.updating')
+})
 
 // 是否需要预检查：改了分组 + 全是单一的 antigravity 或 anthropic 平台
 // 多平台混合的情况由 submitBulkUpdate 的 409 catch 兜底
@@ -1550,11 +1556,17 @@ const canPreCheck = () =>
   targetSelectedPlatforms.value.length === 1 &&
   (targetSelectedPlatforms.value[0] === 'antigravity' || targetSelectedPlatforms.value[0] === 'anthropic')
 
+const resetBulkUpdateProgress = () => {
+  bulkUpdateProgress.value = { processed: 0, total: 0 }
+}
+
 const handleClose = () => {
+  if (submitting.value) return
   showMixedChannelWarning.value = false
   mixedChannelWarningMessage.value = ''
   pendingUpdatesForConfirm.value = null
   mixedChannelConfirmed.value = false
+  resetBulkUpdateProgress()
   emit('close')
 }
 
@@ -1631,6 +1643,10 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
     : baseUpdates
 
   submitting.value = true
+  bulkUpdateProgress.value = {
+    processed: 0,
+    total: targetMode.value === 'selected' ? props.accountIds.length : 0
+  }
 
   try {
     const res = targetMode.value === 'filtered' && props.target?.filters
@@ -1638,7 +1654,11 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
         filters: props.target.filters,
         ...updates
       })
-      : await adminAPI.accounts.bulkUpdate(props.accountIds, updates)
+      : await adminAPI.accounts.bulkUpdate(props.accountIds, updates, {
+        onProgress: ({ processed, total }) => {
+          bulkUpdateProgress.value = { processed, total }
+        }
+      })
     const success = res.success || 0
     const failed = res.failed || 0
 
@@ -1653,7 +1673,10 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
     if (success > 0) {
       pendingUpdatesForConfirm.value = null
       emit('updated')
-      handleClose()
+      showMixedChannelWarning.value = false
+      mixedChannelWarningMessage.value = ''
+      mixedChannelConfirmed.value = false
+      emit('close')
     }
   } catch (error: any) {
     // 兜底：多平台混合场景下，预检查跳过，由后端 409 触发确认框
@@ -1667,6 +1690,7 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
     }
   } finally {
     submitting.value = false
+    resetBulkUpdateProgress()
   }
 }
 
@@ -1740,6 +1764,7 @@ watch(
       mixedChannelWarningMessage.value = ''
       pendingUpdatesForConfirm.value = null
       mixedChannelConfirmed.value = false
+      resetBulkUpdateProgress()
     }
   }
 )

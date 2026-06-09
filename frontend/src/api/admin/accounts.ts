@@ -23,14 +23,90 @@ import type {
 } from '@/types'
 
 export const ACCOUNT_BULK_UPDATE_TIMEOUT_MS = 180000
+export const ACCOUNT_BULK_UPDATE_CHUNK_SIZE = 10
 const ACCOUNT_BULK_UPDATE_TIMEOUT_MESSAGE =
   'Bulk account update timed out. The server may still be processing; refresh the account list before retrying.'
+
+type BulkUpdateAccountResult = { account_id: number; success: boolean; error?: string }
+
+export type BulkUpdateProgress = {
+  processed: number
+  total: number
+  chunkIndex: number
+  chunkCount: number
+}
+
+export type BulkUpdateOptions = {
+  chunkSize?: number
+  onProgress?: (progress: BulkUpdateProgress) => void
+}
+
+export type BulkUpdateResult = {
+  success: number
+  failed: number
+  success_ids?: number[]
+  failed_ids?: number[]
+  results: BulkUpdateAccountResult[]
+}
 
 function isTimeoutError(error: unknown): boolean {
   const candidate = error as { code?: unknown; message?: unknown }
   const code = String(candidate?.code || '')
   const message = String(candidate?.message || '')
   return code === 'ECONNABORTED' || code === 'ETIMEDOUT' || /(timeout|timed out)/i.test(message)
+}
+
+function chunkAccountIDs(accountIds: number[], chunkSize: number = ACCOUNT_BULK_UPDATE_CHUNK_SIZE): number[][] {
+  if (accountIds.length === 0) {
+    return []
+  }
+  if (accountIds.length <= chunkSize) {
+    return [accountIds]
+  }
+  const chunks: number[][] = []
+  for (let index = 0; index < accountIds.length; index += chunkSize) {
+    chunks.push(accountIds.slice(index, index + chunkSize))
+  }
+  return chunks
+}
+
+function mergeBulkUpdateResults(results: BulkUpdateResult[]): BulkUpdateResult {
+  return results.reduce<BulkUpdateResult>(
+    (merged, current) => ({
+      success: merged.success + (current.success || 0),
+      failed: merged.failed + (current.failed || 0),
+      success_ids: [...(merged.success_ids ?? []), ...(current.success_ids ?? [])],
+      failed_ids: [...(merged.failed_ids ?? []), ...(current.failed_ids ?? [])],
+      results: [...merged.results, ...(current.results ?? [])],
+    }),
+    {
+      success: 0,
+      failed: 0,
+      success_ids: [],
+      failed_ids: [],
+      results: [],
+    },
+  )
+}
+
+async function postBulkUpdate(payload: Record<string, unknown>): Promise<BulkUpdateResult> {
+  try {
+    const { data } = await apiClient.post<BulkUpdateResult>(
+      '/admin/accounts/bulk-update',
+      payload,
+      { timeout: ACCOUNT_BULK_UPDATE_TIMEOUT_MS },
+    )
+    return data
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      throw {
+        ...(typeof error === 'object' && error !== null ? error : {}),
+        status: 0,
+        message: ACCOUNT_BULK_UPDATE_TIMEOUT_MESSAGE
+      }
+    }
+    throw error
+  }
 }
 
 /**
@@ -391,39 +467,30 @@ export async function batchUpdateCredentials(request: {
  */
 export async function bulkUpdate(
   accountIdsOrPayload: number[] | Record<string, unknown>,
-  updates?: Record<string, unknown>
-): Promise<{
-  success: number
-  failed: number
-  success_ids?: number[]
-  failed_ids?: number[]
-  results: Array<{ account_id: number; success: boolean; error?: string }>
-  }> {
-  const payload = Array.isArray(accountIdsOrPayload)
-    ? {
-        account_ids: accountIdsOrPayload,
-        ...(updates ?? {})
-      }
-    : accountIdsOrPayload
-  try {
-    const { data } = await apiClient.post<{
-      success: number
-      failed: number
-      success_ids?: number[]
-      failed_ids?: number[]
-      results: Array<{ account_id: number; success: boolean; error?: string }>
-    }>('/admin/accounts/bulk-update', payload, { timeout: ACCOUNT_BULK_UPDATE_TIMEOUT_MS })
-    return data
-  } catch (error) {
-    if (isTimeoutError(error)) {
-      throw {
-        ...(typeof error === 'object' && error !== null ? error : {}),
-        status: 0,
-        message: ACCOUNT_BULK_UPDATE_TIMEOUT_MESSAGE
-      }
-    }
-    throw error
+  updates?: Record<string, unknown>,
+  options?: BulkUpdateOptions
+): Promise<BulkUpdateResult> {
+  if (!Array.isArray(accountIdsOrPayload)) {
+    return postBulkUpdate(accountIdsOrPayload)
   }
+
+  const chunks = chunkAccountIDs(accountIdsOrPayload, options?.chunkSize ?? ACCOUNT_BULK_UPDATE_CHUNK_SIZE)
+  const results: BulkUpdateResult[] = []
+  let processed = 0
+  for (const [chunkIndex, chunk] of chunks.entries()) {
+    results.push(await postBulkUpdate({
+      account_ids: chunk,
+      ...(updates ?? {})
+    }))
+    processed += chunk.length
+    options?.onProgress?.({
+      processed,
+      total: accountIdsOrPayload.length,
+      chunkIndex: chunkIndex + 1,
+      chunkCount: chunks.length,
+    })
+  }
+  return mergeBulkUpdateResults(results)
 }
 
 /**
