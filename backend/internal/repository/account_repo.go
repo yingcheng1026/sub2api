@@ -908,6 +908,23 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 		return nil
 	}
 
+	bindableAccountIDs, err := r.loadActiveSchedulableAccountIDs(ctx, txClient, []int64{accountID})
+	if err != nil {
+		return err
+	}
+	if len(bindableAccountIDs) == 0 {
+		if tx != nil {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+		}
+		payload := buildSchedulerGroupPayload(existingGroupIDs)
+		if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountGroupsChanged, &accountID, nil, payload); err != nil {
+			logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue bind groups failed: account=%d err=%v", accountID, err)
+		}
+		return nil
+	}
+
 	builders := make([]*dbent.AccountGroupCreate, 0, len(groupIDs))
 	for i, groupID := range groupIDs {
 		builders = append(builders, txClient.AccountGroup.Create().
@@ -966,6 +983,11 @@ func (r *accountRepository) BulkBindGroups(ctx context.Context, accountIDs []int
 	}
 
 	if len(groupIDs) > 0 {
+		bindableAccountIDs, err := r.loadActiveSchedulableAccountIDs(ctx, txClient, accountIDs)
+		if err != nil {
+			return err
+		}
+
 		builders := make([]*dbent.AccountGroupCreate, 0, bulkBindGroupCreateChunkSize)
 		flush := func() error {
 			if len(builders) == 0 {
@@ -976,7 +998,7 @@ func (r *accountRepository) BulkBindGroups(ctx context.Context, accountIDs []int
 			return err
 		}
 
-		for _, accountID := range accountIDs {
+		for _, accountID := range bindableAccountIDs {
 			for priority, groupID := range groupIDs {
 				builders = append(builders, txClient.AccountGroup.Create().
 					SetAccountID(accountID).
@@ -1009,6 +1031,36 @@ func (r *accountRepository) BulkBindGroups(ctx context.Context, accountIDs []int
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue bulk bind groups failed: accounts=%d err=%v", len(accountIDs), err)
 	}
 	return nil
+}
+
+func (r *accountRepository) loadActiveSchedulableAccountIDs(ctx context.Context, client *dbent.Client, accountIDs []int64) ([]int64, error) {
+	accountIDs = uniquePositiveInt64s(accountIDs)
+	if len(accountIDs) == 0 {
+		return nil, nil
+	}
+
+	ids, err := client.Account.Query().
+		Where(
+			dbaccount.IDIn(accountIDs...),
+			dbaccount.DeletedAtIsNil(),
+			dbaccount.StatusEQ(service.StatusActive),
+			dbaccount.SchedulableEQ(true),
+		).
+		IDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		allowed[id] = struct{}{}
+	}
+	out := make([]int64, 0, len(accountIDs))
+	for _, id := range accountIDs {
+		if _, ok := allowed[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 func (r *accountRepository) ListSchedulable(ctx context.Context) ([]service.Account, error) {

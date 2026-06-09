@@ -552,6 +552,31 @@ func (s *AccountRepoSuite) TestBulkBindGroups_ReplacesBindingsForManyAccounts() 
 	}
 }
 
+func (s *AccountRepoSuite) TestBulkBindGroups_ClearsButDoesNotInsertUnschedulableAccounts() {
+	oldGroup := mustCreateGroup(s.T(), s.client, &service.Group{Name: "bulk-unsched-old"})
+	nextGroup := mustCreateGroup(s.T(), s.client, &service.Group{Name: "bulk-unsched-next"})
+	activeAccount := mustCreateAccount(s.T(), s.client, &service.Account{Name: "bulk-unsched-active"})
+	unschedulableAccount := mustCreateAccount(s.T(), s.client, &service.Account{Name: "bulk-unsched-disabled"})
+	_, err := s.client.Account.UpdateOneID(unschedulableAccount.ID).
+		SetSchedulable(false).
+		Save(s.ctx)
+	s.Require().NoError(err)
+
+	mustBindAccountToGroup(s.T(), s.client, activeAccount.ID, oldGroup.ID, 1)
+	mustBindAccountToGroup(s.T(), s.client, unschedulableAccount.ID, oldGroup.ID, 1)
+
+	err = s.repo.BulkBindGroups(s.ctx, []int64{activeAccount.ID, unschedulableAccount.ID}, []int64{nextGroup.ID})
+	s.Require().NoError(err)
+
+	activeGroups, err := s.repo.GetGroups(s.ctx, activeAccount.ID)
+	s.Require().NoError(err)
+	s.Require().ElementsMatch([]int64{nextGroup.ID}, idsOfGroups(activeGroups))
+
+	unschedulableGroups, err := s.repo.GetGroups(s.ctx, unschedulableAccount.ID)
+	s.Require().NoError(err)
+	s.Require().Empty(unschedulableGroups)
+}
+
 // --- Schedulable ---
 
 func (s *AccountRepoSuite) TestListSchedulable() {
