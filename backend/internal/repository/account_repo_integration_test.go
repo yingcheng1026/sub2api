@@ -532,6 +532,26 @@ func (s *AccountRepoSuite) TestBindGroups_EmptyList() {
 	s.Require().Empty(groups, "expected 0 groups after binding empty list")
 }
 
+func (s *AccountRepoSuite) TestBulkBindGroups_ReplacesBindingsForManyAccounts() {
+	oldGroup := mustCreateGroup(s.T(), s.client, &service.Group{Name: "bulk-old"})
+	nextGroup := mustCreateGroup(s.T(), s.client, &service.Group{Name: "bulk-next"})
+	finalGroup := mustCreateGroup(s.T(), s.client, &service.Group{Name: "bulk-final"})
+	a1 := mustCreateAccount(s.T(), s.client, &service.Account{Name: "bulk-bind-1"})
+	a2 := mustCreateAccount(s.T(), s.client, &service.Account{Name: "bulk-bind-2"})
+	a3 := mustCreateAccount(s.T(), s.client, &service.Account{Name: "bulk-bind-3"})
+	mustBindAccountToGroup(s.T(), s.client, a1.ID, oldGroup.ID, 1)
+	mustBindAccountToGroup(s.T(), s.client, a2.ID, oldGroup.ID, 1)
+
+	err := s.repo.BulkBindGroups(s.ctx, []int64{a1.ID, a2.ID, a3.ID}, []int64{nextGroup.ID, finalGroup.ID})
+	s.Require().NoError(err)
+
+	for _, accountID := range []int64{a1.ID, a2.ID, a3.ID} {
+		groups, err := s.repo.GetGroups(s.ctx, accountID)
+		s.Require().NoError(err)
+		s.Require().ElementsMatch([]int64{nextGroup.ID, finalGroup.ID}, idsOfGroups(groups))
+	}
+}
+
 // --- Schedulable ---
 
 func (s *AccountRepoSuite) TestListSchedulable() {
@@ -990,6 +1010,14 @@ func idsOfAccounts(accounts []service.Account) []int64 {
 	out := make([]int64, 0, len(accounts))
 	for i := range accounts {
 		out = append(out, accounts[i].ID)
+	}
+	return out
+}
+
+func idsOfGroups(groups []service.Group) []int64 {
+	out := make([]int64, 0, len(groups))
+	for i := range groups {
+		out = append(out, groups[i].ID)
 	}
 	return out
 }

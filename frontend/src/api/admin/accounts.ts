@@ -22,6 +22,17 @@ import type {
   ProvisionCursorAccountResponse
 } from '@/types'
 
+export const ACCOUNT_BULK_UPDATE_TIMEOUT_MS = 180000
+const ACCOUNT_BULK_UPDATE_TIMEOUT_MESSAGE =
+  'Bulk account update timed out. The server may still be processing; refresh the account list before retrying.'
+
+function isTimeoutError(error: unknown): boolean {
+  const candidate = error as { code?: unknown; message?: unknown }
+  const code = String(candidate?.code || '')
+  const message = String(candidate?.message || '')
+  return code === 'ECONNABORTED' || code === 'ETIMEDOUT' || /(timeout|timed out)/i.test(message)
+}
+
 /**
  * List all accounts with pagination
  * @param page - Page number (default: 1)
@@ -394,14 +405,25 @@ export async function bulkUpdate(
         ...(updates ?? {})
       }
     : accountIdsOrPayload
-  const { data } = await apiClient.post<{
-    success: number
-    failed: number
-    success_ids?: number[]
-    failed_ids?: number[]
-    results: Array<{ account_id: number; success: boolean; error?: string }>
-  }>('/admin/accounts/bulk-update', payload)
-  return data
+  try {
+    const { data } = await apiClient.post<{
+      success: number
+      failed: number
+      success_ids?: number[]
+      failed_ids?: number[]
+      results: Array<{ account_id: number; success: boolean; error?: string }>
+    }>('/admin/accounts/bulk-update', payload, { timeout: ACCOUNT_BULK_UPDATE_TIMEOUT_MS })
+    return data
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      throw {
+        ...(typeof error === 'object' && error !== null ? error : {}),
+        status: 0,
+        message: ACCOUNT_BULK_UPDATE_TIMEOUT_MESSAGE
+      }
+    }
+    throw error
+  }
 }
 
 /**

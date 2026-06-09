@@ -121,6 +121,19 @@ func (s *accountRepoStubForBulkUpdate) ListWithFilters(_ context.Context, params
 	return s.listData, &pagination.PaginationResult{Total: int64(len(s.listData))}, nil
 }
 
+type bulkBindAccountRepoStubForBulkUpdate struct {
+	*accountRepoStubForBulkUpdate
+	bulkBindAccountIDs []int64
+	bulkBindGroupIDs   []int64
+	bulkBindErr        error
+}
+
+func (s *bulkBindAccountRepoStubForBulkUpdate) BulkBindGroups(_ context.Context, accountIDs []int64, groupIDs []int64) error {
+	s.bulkBindAccountIDs = append([]int64{}, accountIDs...)
+	s.bulkBindGroupIDs = append([]int64{}, groupIDs...)
+	return s.bulkBindErr
+}
+
 // TestAdminService_BulkUpdateAccounts_AllSuccessIDs 验证批量更新成功时返回 success_ids/failed_ids。
 func TestAdminService_BulkUpdateAccounts_AllSuccessIDs(t *testing.T) {
 	repo := &accountRepoStubForBulkUpdate{}
@@ -139,6 +152,36 @@ func TestAdminService_BulkUpdateAccounts_AllSuccessIDs(t *testing.T) {
 	require.ElementsMatch(t, []int64{1, 2, 3}, result.SuccessIDs)
 	require.Empty(t, result.FailedIDs)
 	require.Len(t, result.Results, 3)
+}
+
+func TestAdminService_BulkUpdateAccounts_UsesBulkGroupBindingRepository(t *testing.T) {
+	baseRepo := &accountRepoStubForBulkUpdate{
+		getByIDsAccounts: []*Account{
+			{ID: 1, Platform: PlatformOpenAI},
+			{ID: 2, Platform: PlatformOpenAI},
+			{ID: 3, Platform: PlatformOpenAI},
+		},
+	}
+	repo := &bulkBindAccountRepoStubForBulkUpdate{accountRepoStubForBulkUpdate: baseRepo}
+	svc := &adminServiceImpl{
+		accountRepo: repo,
+		groupRepo:   &groupRepoStubForAdmin{getByID: &Group{ID: 10, Name: "g10", Platform: PlatformOpenAI}},
+	}
+
+	groupIDs := []int64{10}
+	input := &BulkUpdateAccountsInput{
+		AccountIDs:            []int64{1, 2, 3},
+		GroupIDs:              &groupIDs,
+		SkipMixedChannelCheck: true,
+	}
+
+	result, err := svc.BulkUpdateAccounts(context.Background(), input)
+	require.NoError(t, err)
+	require.Equal(t, 3, result.Success)
+	require.Equal(t, 0, result.Failed)
+	require.Equal(t, []int64{1, 2, 3}, repo.bulkBindAccountIDs)
+	require.Equal(t, []int64{10}, repo.bulkBindGroupIDs)
+	require.Empty(t, baseRepo.bindGroupsCalls)
 }
 
 // TestAdminService_BulkUpdateAccounts_PartialFailureIDs 验证部分失败时 success_ids/failed_ids 正确。

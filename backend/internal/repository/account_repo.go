@@ -66,6 +66,8 @@ var schedulerNeutralExtraKeys = map[string]struct{}{
 	"session_window_utilization": {},
 }
 
+const bulkBindGroupCreateChunkSize = 500
+
 // NewAccountRepository 创建账户仓储实例。
 // 这是对外暴露的构造函数，返回接口类型以便于依赖注入。
 func NewAccountRepository(client *dbent.Client, sqlDB *sql.DB, schedulerCache service.SchedulerCache, credentialEncryptor service.SecretEncryptor) service.AccountRepository {
@@ -931,6 +933,84 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 	return nil
 }
 
+// BulkBindGroups replaces group bindings for many accounts in one transaction.
+func (r *accountRepository) BulkBindGroups(ctx context.Context, accountIDs []int64, groupIDs []int64) error {
+	accountIDs = uniquePositiveInt64s(accountIDs)
+	groupIDs = uniquePositiveInt64s(groupIDs)
+	if len(accountIDs) == 0 {
+		return nil
+	}
+
+	existingGroupIDs, err := r.loadAccountGroupIDsForAccounts(ctx, accountIDs)
+	if err != nil {
+		return err
+	}
+
+	tx, err := r.client.Tx(ctx)
+	if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+		return err
+	}
+
+	var txClient *dbent.Client
+	if err == nil {
+		defer func() { _ = tx.Rollback() }()
+		txClient = tx.Client()
+	} else {
+		txClient = r.client
+	}
+
+	if _, err := txClient.AccountGroup.Delete().
+		Where(dbaccountgroup.AccountIDIn(accountIDs...)).
+		Exec(ctx); err != nil {
+		return err
+	}
+
+	if len(groupIDs) > 0 {
+		builders := make([]*dbent.AccountGroupCreate, 0, bulkBindGroupCreateChunkSize)
+		flush := func() error {
+			if len(builders) == 0 {
+				return nil
+			}
+			_, err := txClient.AccountGroup.CreateBulk(builders...).Save(ctx)
+			builders = builders[:0]
+			return err
+		}
+
+		for _, accountID := range accountIDs {
+			for priority, groupID := range groupIDs {
+				builders = append(builders, txClient.AccountGroup.Create().
+					SetAccountID(accountID).
+					SetGroupID(groupID).
+					SetPriority(priority+1),
+				)
+				if len(builders) >= bulkBindGroupCreateChunkSize {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if err := flush(); err != nil {
+			return err
+		}
+	}
+
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+
+	payload := map[string]any{"account_ids": accountIDs}
+	if groupPayload := buildSchedulerGroupPayload(mergeGroupIDs(existingGroupIDs, groupIDs)); groupPayload != nil {
+		payload["group_ids"] = groupPayload["group_ids"]
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountBulkChanged, nil, nil, payload); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue bulk bind groups failed: accounts=%d err=%v", len(accountIDs), err)
+	}
+	return nil
+}
+
 func (r *accountRepository) ListSchedulable(ctx context.Context) ([]service.Account, error) {
 	now := time.Now()
 	accounts, err := r.client.Account.Query().
@@ -1711,6 +1791,24 @@ func (r *accountRepository) loadAccountGroupIDs(ctx context.Context, accountID i
 	return ids, nil
 }
 
+func (r *accountRepository) loadAccountGroupIDsForAccounts(ctx context.Context, accountIDs []int64) ([]int64, error) {
+	if len(accountIDs) == 0 {
+		return nil, nil
+	}
+	entries, err := r.client.AccountGroup.
+		Query().
+		Where(dbaccountgroup.AccountIDIn(accountIDs...)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.GroupID)
+	}
+	return uniquePositiveInt64s(ids), nil
+}
+
 func mergeGroupIDs(a []int64, b []int64) []int64 {
 	seen := make(map[int64]struct{}, len(a)+len(b))
 	out := make([]int64, 0, len(a)+len(b))
@@ -1733,6 +1831,25 @@ func mergeGroupIDs(a []int64, b []int64) []int64 {
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)
+	}
+	return out
+}
+
+func uniquePositiveInt64s(values []int64) []int64 {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(values))
+	out := make([]int64, 0, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }

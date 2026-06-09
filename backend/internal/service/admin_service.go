@@ -372,6 +372,10 @@ type BulkUpdateAccountsResult struct {
 	Results    []BulkUpdateAccountResult `json:"results"`
 }
 
+type bulkGroupBindingRepository interface {
+	BulkBindGroups(ctx context.Context, accountIDs []int64, groupIDs []int64) error
+}
+
 type CreateProxyInput struct {
 	Name     string
 	Protocol string
@@ -2722,8 +2726,39 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 
 	// Run bulk update for column/jsonb fields first.
-	if _, err := s.accountRepo.BulkUpdate(ctx, input.AccountIDs, repoUpdates); err != nil {
-		return nil, err
+	if hasAccountBulkUpdateFields(repoUpdates) {
+		if _, err := s.accountRepo.BulkUpdate(ctx, input.AccountIDs, repoUpdates); err != nil {
+			return nil, err
+		}
+	}
+
+	if input.GroupIDs != nil {
+		if bulkRepo, ok := s.accountRepo.(bulkGroupBindingRepository); ok {
+			if err := bulkRepo.BulkBindGroups(ctx, input.AccountIDs, *input.GroupIDs); err != nil {
+				return nil, err
+			}
+			for _, accountID := range input.AccountIDs {
+				result.Success++
+				result.SuccessIDs = append(result.SuccessIDs, accountID)
+				result.Results = append(result.Results, BulkUpdateAccountResult{
+					AccountID: accountID,
+					Success:   true,
+				})
+			}
+			return result, nil
+		}
+	}
+
+	if input.GroupIDs == nil {
+		for _, accountID := range input.AccountIDs {
+			result.Success++
+			result.SuccessIDs = append(result.SuccessIDs, accountID)
+			result.Results = append(result.Results, BulkUpdateAccountResult{
+				AccountID: accountID,
+				Success:   true,
+			})
+		}
+		return result, nil
 	}
 
 	// Handle group bindings per account (requires individual operations).
@@ -2748,6 +2783,19 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 
 	return result, nil
+}
+
+func hasAccountBulkUpdateFields(updates AccountBulkUpdate) bool {
+	return updates.Name != nil ||
+		updates.ProxyID != nil ||
+		updates.Concurrency != nil ||
+		updates.Priority != nil ||
+		updates.RateMultiplier != nil ||
+		updates.LoadFactor != nil ||
+		updates.Status != nil ||
+		updates.Schedulable != nil ||
+		len(updates.Credentials) > 0 ||
+		len(updates.Extra) > 0
 }
 
 func (s *adminServiceImpl) resolveBulkUpdateTargetIDs(ctx context.Context, filters *BulkUpdateAccountFilters) ([]int64, error) {

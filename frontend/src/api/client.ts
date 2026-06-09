@@ -279,9 +279,14 @@ apiClient.interceptors.response.use(
     }
 
     // Network error
+    const isTimeout =
+      error.code === 'ECONNABORTED' ||
+      error.code === 'ETIMEDOUT' ||
+      /(timeout|timed out)/i.test(String(error.message || ''))
     return Promise.reject({
       status: 0,
-      message: 'Network error. Please check your connection.'
+      code: error.code,
+      message: isTimeout ? 'Request timed out. Please try again later.' : 'Network error. Please check your connection.'
     })
   }
 )
