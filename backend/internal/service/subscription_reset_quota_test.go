@@ -43,13 +43,21 @@ func (r *resetQuotaUserSubRepoStub) ResetDailyUsage(_ context.Context, _ int64, 
 	return r.resetDailyErr
 }
 
-func (r *resetQuotaUserSubRepoStub) ResetWeeklyUsage(_ context.Context, _ int64, _ time.Time) error {
+func (r *resetQuotaUserSubRepoStub) ResetWeeklyUsage(_ context.Context, _ int64, windowStart time.Time) error {
 	r.resetWeeklyCalled = true
+	if r.resetWeeklyErr == nil && r.sub != nil {
+		r.sub.WeeklyUsageUSD = 0
+		r.sub.WeeklyWindowStart = &windowStart
+	}
 	return r.resetWeeklyErr
 }
 
-func (r *resetQuotaUserSubRepoStub) ResetMonthlyUsage(_ context.Context, _ int64, _ time.Time) error {
+func (r *resetQuotaUserSubRepoStub) ResetMonthlyUsage(_ context.Context, _ int64, windowStart time.Time) error {
 	r.resetMonthlyCalled = true
+	if r.resetMonthlyErr == nil && r.sub != nil {
+		r.sub.MonthlyUsageUSD = 0
+		r.sub.MonthlyWindowStart = &windowStart
+	}
 	return r.resetMonthlyErr
 }
 
@@ -212,4 +220,48 @@ func TestAdminResetQuota_ReturnsRefreshedSub(t *testing.T) {
 	// 服务应返回第二次 GetByID 的刷新值而非初始的 99.9
 	require.Equal(t, float64(0), result.DailyUsageUSD, "返回的订阅应反映已归零的用量")
 	require.True(t, stub.resetDailyCalled)
+}
+
+func TestCheckAndActivateWindow_UsesSubscriptionStartForMonthlyWindow(t *testing.T) {
+	startsAt := time.Date(2026, 6, 8, 16, 38, 8, 612528000, time.Local)
+	stub := &resetQuotaUserSubRepoStub{
+		sub: &UserSubscription{ID: 10, UserID: 211, GroupID: ptrInt64(13), StartsAt: startsAt},
+	}
+	svc := newResetQuotaSvc(stub)
+
+	err := svc.CheckAndActivateWindow(context.Background(), stub.sub)
+
+	require.NoError(t, err)
+	require.True(t, stub.resetDailyCalled)
+	require.True(t, stub.resetWeeklyCalled)
+	require.True(t, stub.resetMonthlyCalled)
+	require.NotNil(t, stub.sub.MonthlyWindowStart)
+	require.Equal(t, startsAt, *stub.sub.MonthlyWindowStart)
+	require.NotEqual(t, startOfDay(startsAt), *stub.sub.MonthlyWindowStart)
+}
+
+func TestCheckAndResetWindows_UsesCurrentInstantForMonthlyWindow(t *testing.T) {
+	oldMonthlyStart := time.Now().Add(-30*24*time.Hour - time.Second)
+	stub := &resetQuotaUserSubRepoStub{
+		sub: &UserSubscription{
+			ID:                 11,
+			UserID:             211,
+			GroupID:            ptrInt64(13),
+			MonthlyWindowStart: &oldMonthlyStart,
+			MonthlyUsageUSD:    100,
+		},
+	}
+	svc := newResetQuotaSvc(stub)
+	before := time.Now()
+
+	err := svc.CheckAndResetWindows(context.Background(), stub.sub)
+	after := time.Now()
+
+	require.NoError(t, err)
+	require.True(t, stub.resetMonthlyCalled)
+	require.NotNil(t, stub.sub.MonthlyWindowStart)
+	require.False(t, stub.sub.MonthlyWindowStart.Before(before))
+	require.False(t, stub.sub.MonthlyWindowStart.After(after))
+	require.NotEqual(t, startOfDay(after), *stub.sub.MonthlyWindowStart)
+	require.Zero(t, stub.sub.MonthlyUsageUSD)
 }
