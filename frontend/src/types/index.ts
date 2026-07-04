@@ -1536,7 +1536,7 @@ export interface AssignSubscriptionRequest {
   group_id?: number
   validity_days?: number
   notes?: string
-  /** 钱包模式 (v4)：>0 时走钱包路径，group_id 忽略；用户级钱包，与具体 group 解耦 */
+  /** 钱包充值模式：>0 时进入用户级永久 credits 钱包，group_id / validity_days 忽略 */
   wallet_initial_usd?: number
 }
 

@@ -663,7 +663,7 @@
           />
           <p class="input-hint">{{ t('admin.subscriptions.form.walletInitialHint') }}</p>
         </div>
-        <div v-if="assignForm.mode !== 'plan'">
+        <div v-if="assignForm.mode === 'group'">
           <label class="input-label">{{ t('admin.subscriptions.form.validityDays') }}</label>
           <input v-model.number="assignForm.validity_days" type="number" min="1" class="input" />
           <p class="input-hint">{{ t('admin.subscriptions.validityHint') }}</p>
@@ -1405,7 +1405,7 @@ const handleAssignSubscription = async () => {
       return
     }
   }
-  if (assignForm.mode !== 'plan' && (!assignForm.validity_days || assignForm.validity_days < 1)) {
+  if (assignForm.mode === 'group' && (!assignForm.validity_days || assignForm.validity_days < 1)) {
     appStore.showError(t('admin.subscriptions.validityDaysRequired'))
     return
   }
@@ -1419,7 +1419,6 @@ const handleAssignSubscription = async () => {
       payload.plan_id = assignForm.plan_id ?? undefined
     } else if (assignForm.mode === 'wallet') {
       payload.wallet_initial_usd = assignForm.wallet_initial_usd ?? undefined
-      payload.validity_days = assignForm.validity_days
     } else {
       payload.group_id = assignForm.group_id ?? undefined
       payload.validity_days = assignForm.validity_days
