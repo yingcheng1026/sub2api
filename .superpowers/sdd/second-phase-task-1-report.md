@@ -59,7 +59,7 @@ PASS
 ## 数据库与安全审查
 
 - 173 迁移使用三个 `ADD COLUMN IF NOT EXISTS`，均 nullable；历史行保持 NULL，回滚可删除新增列但本轮不提供 destructive down。
-- PostgreSQL integration 测试已补充幂等与历史 NULL 断言，但按任务边界没有启动 Docker/testcontainer 镜像，因此真实 PostgreSQL 执行证据为：`信息缺失`。
+- PostgreSQL integration 已在隔离的 Testcontainers `postgres:18.1-alpine3.23` 与 `redis:8.4-alpine` 上执行：`TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate`、`TestUsageLogPricingEvidenceMigration173IsIdempotentAndLeavesHistoricalRowsNull` 均通过；repository 包结果 `ok ... 5.248s`。测试容器由 harness 创建并回收，未连接生产数据库。
 - `git diff --check` 通过；迁移 172 的 `git diff --exit-code` 通过。
 - 仓库 `make secret-scan` 失败，原因是 Makefile 引用的 `tools/secret_scan.py` 不存在；替代执行了本轮 diff 的常见 token、Bearer、AWS key、private key 和敏感文件名扫描，未命中。
 - 定价证据只保存 source/revision/hash，不保存请求体、token、Authorization、API key 或价格原文。
@@ -69,7 +69,7 @@ PASS
 ## 残余风险
 
 1. 本任务不解决“上游成功但 worker/进程在持久化前失败”的扣费可靠性；这是第二阶段 Task 2 的范围，生产保持 NO-GO。
-2. 真实 PostgreSQL 迁移幂等/历史 NULL 未在本轮启动容器验证。
+2. 真实 PostgreSQL 迁移幂等/历史 NULL 已用隔离 Testcontainers 验证；生产迁移 rehearsal 仍未执行，继续保持 NO-GO。
 3. 没有执行生产配置修改、镜像运行、部署、推送或 canary。
 
 ## 提交
@@ -179,5 +179,7 @@ ok github.com/Wei-Shaw/sub2api/internal/handler 0.951s
 ```
 
 最终独立代码复审：PASS。最终独立安全复审：PASS。`git diff --check` 通过；迁移 172 未修改；私有 503 报告未读取、未修改、未暂存。
+
+合并状态 `0100cc4c` 的任务级最终复审：PASS。复审定向测试为 service unit `1.428s`、service `0.884s`、handler `0.792s`；Task 1 阻断项全部关闭。
 
 修复提交标题：`fix: preserve zero-image and zero-tier billing semantics`。
