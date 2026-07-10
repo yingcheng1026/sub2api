@@ -24,6 +24,8 @@ coverage.html
 
 # 依赖（使用 go mod）
 vendor/
+!frontend/vendor/
+!frontend/vendor/xlsx-0.20.3.tgz
 
 # Go 编译缓存
 backend/.gocache/
