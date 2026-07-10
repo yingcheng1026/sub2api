@@ -23,7 +23,7 @@ import (
 var (
 	openAIModelDatePattern     = regexp.MustCompile(`-\d{8}$`)
 	openAIModelBasePattern     = regexp.MustCompile(`^(gpt-\d+(?:\.\d+)?)(?:-|$)`)
-	openAIGPT56FallbackPricing = map[string]*LiteLLMModelPricing{
+	openAIGPT56FallbackPricing = map[string]LiteLLMModelPricing{
 		"gpt-5.6-sol": {
 			InputCostPerToken:           5e-6,
 			OutputCostPerToken:          30e-6,
@@ -565,10 +565,13 @@ func (s *PricingService) GetModelPricing(modelName string) *LiteLLMModelPricing 
 		if normalizedGPT56 == "" {
 			return nil
 		}
-		if pricing, ok := s.pricingData[normalizedGPT56]; ok {
-			return pricing
+		pricing, ok := openAIGPT56FallbackPricing[normalizedGPT56]
+		if !ok {
+			return nil
 		}
-		return openAIGPT56FallbackPricing[normalizedGPT56]
+		// Preview tier pricing is a policy lock: dynamic/local data must not
+		// override it, and callers receive a fresh copy they cannot mutate.
+		return cloneLiteLLMModelPricing(pricing)
 	}
 	lookupCandidates := s.buildModelLookupCandidates(modelLower)
 
@@ -612,6 +615,11 @@ func (s *PricingService) GetModelPricing(modelName string) *LiteLLMModelPricing 
 	}
 
 	return nil
+}
+
+func cloneLiteLLMModelPricing(pricing LiteLLMModelPricing) *LiteLLMModelPricing {
+	cloned := pricing
+	return &cloned
 }
 
 func (s *PricingService) buildModelLookupCandidates(modelLower string) []string {

@@ -426,6 +426,72 @@ func TestResolveOpenAIMessagesDispatchMappedModel(t *testing.T) {
 	})
 }
 
+func TestResolveOpenAIAccountRoutingModel_ChannelMappingPrecedesProtocolDefault(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		requestedModel  string
+		preferredModel  string
+		channelMapping  service.ChannelMappingResult
+		expectedRouting string
+	}{
+		{
+			name:            "responses channel mapping routes preview entitlement",
+			requestedModel:  "gpt-5.4",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "openai/gpt-5.6-sol-high"},
+			expectedRouting: "gpt-5.6-sol",
+		},
+		{
+			name:            "messages channel mapping wins over legacy dispatch default",
+			requestedModel:  "claude-sonnet-4-6",
+			preferredModel:  "gpt-5.4",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6-terra-medium"},
+			expectedRouting: "gpt-5.6-terra",
+		},
+		{
+			name:            "websocket channel mapping routes preview entitlement",
+			requestedModel:  "gpt-5.4",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "OPENAI/GPT-5.6-LUNA-XHIGH"},
+			expectedRouting: "gpt-5.6-luna",
+		},
+		{
+			name:            "chat completions channel mapping keeps non preview behavior",
+			requestedModel:  "gpt-4.1",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.4"},
+			expectedRouting: "gpt-5.4",
+		},
+		{
+			name:            "messages dispatch default used without channel mapping",
+			requestedModel:  "claude-sonnet-4-6",
+			preferredModel:  "gpt-5.4",
+			channelMapping:  service.ChannelMappingResult{MappedModel: "claude-sonnet-4-6"},
+			expectedRouting: "gpt-5.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expectedRouting, resolveOpenAIAccountRoutingModel(tt.requestedModel, tt.preferredModel, tt.channelMapping))
+		})
+	}
+}
+
+func TestOpenAISelectedAccountSupportsRoutingModel(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, openAISelectedAccountSupportsRoutingModel(&service.Account{
+		Platform:    service.PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-terra": "openai/gpt-5.6-terra-high"}},
+	}, "gpt-5.6-terra"))
+	require.False(t, openAISelectedAccountSupportsRoutingModel(&service.Account{
+		Platform:    service.PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-terra": "gpt-5.6-sol"}},
+	}, "gpt-5.6-terra"))
+	require.True(t, openAISelectedAccountSupportsRoutingModel(&service.Account{Platform: service.PlatformOpenAI}, "gpt-5.4"))
+	require.False(t, openAISelectedAccountSupportsRoutingModel(nil, "gpt-5.4"))
+}
+
 func TestPreserveOpenAIMessagesDispatchSub2BillingSource(t *testing.T) {
 	t.Run("claude_dispatch_keeps_native_sub2_billing_basis", func(t *testing.T) {
 		fields := preserveOpenAIMessagesDispatchSub2BillingSource(service.ChannelUsageFields{}, "claude-opus-4-7", "gpt-5.5")

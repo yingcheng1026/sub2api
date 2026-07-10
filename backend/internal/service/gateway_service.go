@@ -3726,6 +3726,9 @@ func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedMo
 	}
 	// OpenAI 透传模式：仅替换认证，允许所有模型
 	if account.Platform == PlatformOpenAI && account.IsOpenAIPassthroughEnabled() {
+		if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(requestedModel); isGPT56Family {
+			return account.IsModelSupported(requestedModel)
+		}
 		return true
 	}
 	if account.Platform == PlatformKiro {

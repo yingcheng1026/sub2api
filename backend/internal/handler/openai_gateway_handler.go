@@ -47,6 +47,30 @@ func resolveOpenAIMessagesDispatchMappedModel(apiKey *service.APIKey, requestedM
 	return strings.TrimSpace(apiKey.Group.ResolveMessagesDispatchModel(requestedModel))
 }
 
+// resolveOpenAIAccountRoutingModel returns the final model whose account
+// entitlement must be checked. Channel mapping is the last routing decision,
+// so it takes precedence over the Messages dispatch default and client model.
+func resolveOpenAIAccountRoutingModel(requestedModel, preferredMappedModel string, channelMapping service.ChannelMappingResult) string {
+	candidates := []string{preferredMappedModel, requestedModel}
+	if channelMapping.Mapped {
+		candidates = append([]string{channelMapping.MappedModel}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if normalized := service.NormalizeOpenAICompatRequestedModel(candidate); strings.TrimSpace(normalized) != "" {
+			return strings.TrimSpace(normalized)
+		}
+	}
+	return ""
+}
+
+func openAISelectedAccountSupportsRoutingModel(account *service.Account, routingModel string) bool {
+	if account == nil {
+		return false
+	}
+	routingModel = strings.TrimSpace(routingModel)
+	return routingModel == "" || account.IsModelSupported(routingModel)
+}
+
 // NewOpenAIGatewayHandler creates a new OpenAIGatewayHandler
 func NewOpenAIGatewayHandler(
 	gatewayService *service.OpenAIGatewayService,
@@ -217,6 +241,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	routingModel := resolveOpenAIAccountRoutingModel(reqModel, "", channelMapping)
 
 	// 提前校验 function_call_output 是否具备可关联上下文，避免上游 400。
 	if !h.validateFunctionCallOutputRequest(c, body, reqLog) {
@@ -272,7 +297,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			apiKey.GroupID,
 			previousResponseID,
 			sessionHash,
-			reqModel,
+			routingModel,
 			failedAccountIDs,
 			service.OpenAIUpstreamTransportAny,
 			requireCompact,
@@ -314,6 +339,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		if !openAISelectedAccountSupportsRoutingModel(account, routingModel) {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			reqLog.Warn("openai.account_rejected_after_routing_check",
+				zap.Int64("account_id", account.ID),
+				zap.String("routing_model", routingModel),
+			)
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
@@ -632,7 +668,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
-	routingModel := service.NormalizeOpenAICompatRequestedModel(reqModel)
 	preferredMappedModel := resolveOpenAIMessagesDispatchMappedModel(apiKey, reqModel)
 	reqStream := gjson.GetBytes(body, "stream").Bool()
 
@@ -648,6 +683,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMappingMsg, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	routingModel := resolveOpenAIAccountRoutingModel(reqModel, preferredMappedModel, channelMappingMsg)
 
 	// 绑定错误透传服务，允许 service 层在非 failover 错误场景复用规则。
 	if h.errorPassthroughService != nil {
@@ -690,9 +726,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	for {
 		currentRoutingModel := routingModel
-		if effectiveMappedModel != "" {
-			currentRoutingModel = effectiveMappedModel
-		}
 		reqLog.Debug("openai_messages.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
 			c.Request.Context(),
@@ -736,6 +769,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			return
 		}
 		account := selection.Account
+		if !openAISelectedAccountSupportsRoutingModel(account, currentRoutingModel) {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			reqLog.Warn("openai_messages.account_rejected_after_routing_check",
+				zap.Int64("account_id", account.ID),
+				zap.String("routing_model", currentRoutingModel),
+			)
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_messages.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision
@@ -1239,6 +1283,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
+	routingModel := resolveOpenAIAccountRoutingModel(reqModel, "", channelMappingWS)
 
 	var currentUserRelease func()
 	var currentAccountRelease func()
@@ -1284,7 +1329,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		apiKey.GroupID,
 		previousResponseID,
 		sessionHash,
-		reqModel,
+		routingModel,
 		nil,
 		service.OpenAIUpstreamTransportResponsesWebsocketV2,
 		false,
@@ -1300,6 +1345,17 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	account := selection.Account
+	if !openAISelectedAccountSupportsRoutingModel(account, routingModel) {
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		reqLog.Warn("openai.websocket_account_rejected_after_routing_check",
+			zap.Int64("account_id", account.ID),
+			zap.String("routing_model", routingModel),
+		)
+		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
+		return
+	}
 	accountMaxConcurrency := account.Concurrency
 	if selection.WaitPlan != nil && selection.WaitPlan.MaxConcurrency > 0 {
 		accountMaxConcurrency = selection.WaitPlan.MaxConcurrency

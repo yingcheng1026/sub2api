@@ -621,8 +621,12 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 			if normalizedGPT56 == "" {
 				return false
 			}
-			_, hasExactTier := mapping[normalizedGPT56]
-			return hasExactTier
+			mappedModel, hasExactTier := mapping[normalizedGPT56]
+			if !hasExactTier {
+				return false
+			}
+			normalizedMappedModel, mappedIsGPT56Family := classifyOpenAIGPT56PreviewModel(mappedModel)
+			return mappedIsGPT56Family && normalizedMappedModel == normalizedGPT56
 		}
 	}
 	if len(mapping) == 0 {

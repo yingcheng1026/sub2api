@@ -638,6 +638,8 @@ func usageLogModelFamily(model string) string {
 		return "gpt"
 	case strings.HasPrefix(normalized, "claude-"):
 		return "claude"
+	case normalized == "opus", normalized == "sonnet", normalized == "haiku", normalized == "default":
+		return "claude"
 	default:
 		return "other"
 	}

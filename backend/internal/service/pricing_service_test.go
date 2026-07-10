@@ -10,11 +10,27 @@ import (
 )
 
 func TestPricingServiceGetModelPricing_GPT56ExactFallbacks(t *testing.T) {
-	t.Parallel()
-
 	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
-		"gpt-5.4":         {InputCostPerToken: 99},
-		"gpt-5.6":         {InputCostPerToken: 98},
+		"gpt-5.4": {InputCostPerToken: 99},
+		"gpt-5.6": {InputCostPerToken: 98},
+		"gpt-5.6-sol": {
+			InputCostPerToken:           101,
+			OutputCostPerToken:          102,
+			CacheCreationInputTokenCost: 103,
+			CacheReadInputTokenCost:     104,
+		},
+		"gpt-5.6-terra": {
+			InputCostPerToken:           201,
+			OutputCostPerToken:          202,
+			CacheCreationInputTokenCost: 203,
+			CacheReadInputTokenCost:     204,
+		},
+		"gpt-5.6-luna": {
+			InputCostPerToken:           301,
+			OutputCostPerToken:          302,
+			CacheCreationInputTokenCost: 303,
+			CacheReadInputTokenCost:     304,
+		},
 		"gpt-5.6-unknown": {InputCostPerToken: 97},
 	}}
 	tests := []struct {
@@ -37,6 +53,18 @@ func TestPricingServiceGetModelPricing_GPT56ExactFallbacks(t *testing.T) {
 			require.InDelta(t, tt.output, pricing.OutputCostPerToken, 1e-12)
 			require.InDelta(t, tt.cacheWrite, pricing.CacheCreationInputTokenCost, 1e-12)
 			require.InDelta(t, tt.cacheRead, pricing.CacheReadInputTokenCost, 1e-12)
+
+			pricing.InputCostPerToken = 401
+			pricing.OutputCostPerToken = 402
+			pricing.CacheCreationInputTokenCost = 403
+			pricing.CacheReadInputTokenCost = 404
+
+			fresh := svc.GetModelPricing(tt.model)
+			require.NotSame(t, pricing, fresh)
+			require.InDelta(t, tt.input, fresh.InputCostPerToken, 1e-12)
+			require.InDelta(t, tt.output, fresh.OutputCostPerToken, 1e-12)
+			require.InDelta(t, tt.cacheWrite, fresh.CacheCreationInputTokenCost, 1e-12)
+			require.InDelta(t, tt.cacheRead, fresh.CacheReadInputTokenCost, 1e-12)
 		})
 	}
 
