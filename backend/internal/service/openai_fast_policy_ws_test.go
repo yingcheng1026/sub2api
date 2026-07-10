@@ -1056,6 +1056,33 @@ func TestPassthroughUsageMeta_TracksReasoningEffortAcrossTurns(t *testing.T) {
 	require.Nil(t, meta.reasoningEffort.Load(), "新的 response.create 无 effort 且无可推导后缀时必须清空旧值")
 }
 
+func TestWSPassthroughSessionUpdateGPT56SuffixAppliesToModelLessResponseCreate(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"gpt-5.6-luna": "gpt-5.6-luna"},
+		},
+	}
+	meta := newOpenAIWSPassthroughUsageMeta("gpt-5.4", nil)
+	sessionFrame := []byte(`{"type":"session.update","session":{"model":"gpt-5.6-luna-xhigh"}}`)
+	meta.updateSessionRequestModel(sessionFrame)
+
+	rewrittenSession, err := rewriteOpenAIWSPassthroughMappedModel(account, sessionFrame)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-5.6-luna", gjson.GetBytes(rewrittenSession, "session.model").String())
+
+	responseCreate := []byte(`{"type":"response.create","input":[]}`)
+	effectiveModel := meta.requestModelForFrame(responseCreate)
+	rewrittenCreate, err := rewriteOpenAIWSPassthroughMappedModelForRequest(account, responseCreate, effectiveModel)
+	require.NoError(t, err)
+	require.Equal(t, "xhigh", gjson.GetBytes(rewrittenCreate, "reasoning.effort").String())
+
+	meta.updateFromResponseCreate(rewrittenCreate, "")
+	require.NotNil(t, meta.reasoningEffort.Load())
+	require.Equal(t, "xhigh", *meta.reasoningEffort.Load())
+}
+
 // TestPassthroughBilling_BlockedFrameDoesNotMutateServiceTier locks in the
 // "block keeps previous" semantic: when policy returns block on a
 // response.create frame, that frame is never sent upstream, so billing tier

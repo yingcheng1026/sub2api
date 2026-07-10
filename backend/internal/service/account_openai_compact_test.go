@@ -352,8 +352,22 @@ func TestAccountResolveCompactMappedModel(t *testing.T) {
 			expectedMatch:  true,
 		},
 		{
-			name: "legacy compact mapping to exact preview remains allowed",
+			name: "legacy compact mapping to exact preview without entitlement fails closed",
 			credentials: map[string]any{
+				"compact_model_mapping": map[string]any{
+					"gpt-5.4": "gpt-5.6-luna",
+				},
+			},
+			requestedModel: "gpt-5.4",
+			expectedModel:  "",
+			expectedMatch:  true,
+		},
+		{
+			name: "legacy compact mapping to exact preview with entitlement remains allowed",
+			credentials: map[string]any{
+				"model_mapping": map[string]any{
+					"gpt-5.6-luna": "gpt-5.6-luna",
+				},
 				"compact_model_mapping": map[string]any{
 					"gpt-5.4": "gpt-5.6-luna",
 				},

@@ -121,6 +121,30 @@ func TestResolveOpenAIForwardModel(t *testing.T) {
 			defaultMappedModel: "gpt-5.4",
 			expectedModel:      "gpt-5.5-openai-compact",
 		},
+		{
+			name: "gpt56 messages dispatch fails without exact entitlement",
+			account: &Account{
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{"model_mapping": map[string]any{
+					"claude-sonnet-4-6": "gpt-5.4",
+				}},
+			},
+			requestedModel:     "claude-sonnet-4-6",
+			defaultMappedModel: "gpt-5.6-terra",
+			expectedModel:      "",
+		},
+		{
+			name: "gpt56 messages dispatch fails on cross tier entitlement target",
+			account: &Account{
+				Platform: PlatformOpenAI,
+				Credentials: map[string]any{"model_mapping": map[string]any{
+					"gpt-5.6-terra": "gpt-5.6-sol",
+				}},
+			},
+			requestedModel:     "claude-sonnet-4-6",
+			defaultMappedModel: "gpt-5.6-terra",
+			expectedModel:      "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -221,23 +245,28 @@ func TestResolveOpenAICompactForwardModelWithValidity_GPT56SameTierGuard(t *test
 		name          string
 		requested     string
 		target        string
+		entitlement   string
 		expectedModel string
 		expectedValid bool
 	}{
-		{name: "same tier provider suffix accepted", requested: "gpt-5.6-sol", target: "openai/gpt-5.6-sol-high", expectedModel: "openai/gpt-5.6-sol-high", expectedValid: true},
+		{name: "same tier provider suffix accepted", requested: "gpt-5.6-sol", target: "openai/gpt-5.6-sol-high", entitlement: "gpt-5.6-sol", expectedModel: "openai/gpt-5.6-sol-high", expectedValid: true},
 		{name: "downgrade rejected", requested: "gpt-5.6-sol", target: "gpt-5.4", expectedValid: false},
 		{name: "cross tier rejected", requested: "gpt-5.6-terra", target: "gpt-5.6-sol", expectedValid: false},
 		{name: "malformed suffix rejected", requested: "gpt-5.6-luna", target: "gpt-5.6-luna-minimal", expectedValid: false},
 		{name: "malformed requested family rejected", requested: "gpt-5.6-unknown", target: "gpt-5.6-sol", expectedValid: false},
 		{name: "empty target rejected", requested: "gpt-5.6-sol", target: "", expectedValid: false},
-		{name: "legacy to exact preview accepted", requested: "gpt-5.4", target: "gpt-5.6-terra", expectedModel: "gpt-5.6-terra", expectedValid: true},
+		{name: "legacy to exact preview without entitlement rejected", requested: "gpt-5.4", target: "gpt-5.6-terra", expectedValid: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			account := &Account{Credentials: map[string]any{
+			credentials := map[string]any{
 				"compact_model_mapping": map[string]any{tt.requested: tt.target},
-			}}
+			}
+			if tt.entitlement != "" {
+				credentials["model_mapping"] = map[string]any{tt.entitlement: tt.entitlement}
+			}
+			account := &Account{Platform: PlatformOpenAI, Credentials: credentials}
 			gotModel, gotValid := resolveOpenAICompactForwardModelWithValidity(account, tt.requested)
 			if gotModel != tt.expectedModel || gotValid != tt.expectedValid {
 				t.Fatalf("resolveOpenAICompactForwardModelWithValidity(...) = (%q, %v), want (%q, %v)", gotModel, gotValid, tt.expectedModel, tt.expectedValid)

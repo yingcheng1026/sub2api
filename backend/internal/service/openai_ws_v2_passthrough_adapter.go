@@ -126,6 +126,14 @@ func openAIWSPassthroughPolicyModelFromSessionFrame(account *Account, payload []
 }
 
 func rewriteOpenAIWSPassthroughMappedModel(account *Account, payload []byte) ([]byte, error) {
+	requestModel := openAIWSPassthroughRequestModelForFrame(payload)
+	if requestModel == "" {
+		requestModel = openAIWSPassthroughRequestModelFromSessionFrame(payload)
+	}
+	return rewriteOpenAIWSPassthroughMappedModelForRequest(account, payload, requestModel)
+}
+
+func rewriteOpenAIWSPassthroughMappedModelForRequest(account *Account, payload []byte, requestModel string) ([]byte, error) {
 	if account == nil || len(payload) == 0 {
 		return payload, nil
 	}
@@ -142,20 +150,27 @@ func rewriteOpenAIWSPassthroughMappedModel(account *Account, payload []byte) ([]
 	}
 
 	originalModel := strings.TrimSpace(gjson.GetBytes(payload, modelPath).String())
-	if originalModel == "" {
+	effectiveModel := strings.TrimSpace(requestModel)
+	if effectiveModel == "" {
+		effectiveModel = originalModel
+	}
+	if originalModel == "" && effectiveModel == "" {
 		return payload, nil
 	}
-	if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(originalModel); isGPT56Family && !account.IsModelSupported(originalModel) {
+	if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(effectiveModel); isGPT56Family && !account.IsModelSupported(effectiveModel) {
 		return nil, errors.New("invalid GPT-5.6 websocket model mapping")
 	}
 
 	updated := payload
 	if modelPath == "model" {
 		var err error
-		updated, _, err = injectOpenAIGPT56ReasoningEffort(updated, originalModel, "reasoning.effort")
+		updated, _, err = injectOpenAIGPT56ReasoningEffort(updated, effectiveModel, "reasoning.effort")
 		if err != nil {
 			return nil, fmt.Errorf("inject GPT-5.6 websocket reasoning effort: %w", err)
 		}
+	}
+	if originalModel == "" {
+		return updated, nil
 	}
 
 	mappedModel := normalizeOpenAIModelForUpstream(account, account.GetMappedModel(originalModel))
@@ -481,12 +496,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			//     extractOpenAIServiceTierFromBody 返回 nil；这里有意
 			//     覆盖（Store(nil)），因为 OpenAI 上游对该帧实际不传
 			//     service_tier 时按 default 处理，billing 应如实反映。
+			if policyErr == nil && blocked == nil {
+				out, policyErr = rewriteOpenAIWSPassthroughMappedModelForRequest(account, out, requestModelForThisFrame)
+			}
 			if policyErr == nil && blocked == nil &&
 				strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
 				usageMeta.updateFromResponseCreate(out, requestModelForThisFrame)
-			}
-			if policyErr == nil && blocked == nil {
-				out, policyErr = rewriteOpenAIWSPassthroughMappedModel(account, out)
 			}
 			return out, blocked, policyErr
 		},

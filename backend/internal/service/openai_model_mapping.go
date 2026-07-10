@@ -6,6 +6,19 @@ import "strings"
 // defaultMappedModel 只服务于 /v1/messages 的 Claude 系列显式调度映射，
 // 不作为普通 OpenAI 请求的未知模型兜底。
 func resolveOpenAIForwardModel(account *Account, requestedModel, defaultMappedModel string) string {
+	defaultMappedModel = strings.TrimSpace(defaultMappedModel)
+	if defaultMappedModel != "" && claudeMessagesDispatchFamily(requestedModel) != "" {
+		if dispatchTier, isGPT56Family := classifyOpenAIGPT56PreviewModel(defaultMappedModel); isGPT56Family {
+			if dispatchTier == "" || account == nil || !account.IsModelSupported(dispatchTier) {
+				return ""
+			}
+			mappedDispatch, matched := account.ResolveMappedModel(dispatchTier)
+			if !matched || !ValidateOpenAIGPT56ModelTransition(dispatchTier, mappedDispatch) {
+				return ""
+			}
+			return strings.TrimSpace(mappedDispatch)
+		}
+	}
 	if account == nil {
 		if defaultMappedModel != "" && claudeMessagesDispatchFamily(requestedModel) != "" {
 			return defaultMappedModel

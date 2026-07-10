@@ -586,21 +586,6 @@ func normalizeRequestedModelForLookup(platform, requestedModel string) string {
 	return trimmed
 }
 
-func mappingSupportsRequestedModel(mapping map[string]string, requestedModel string) bool {
-	if requestedModel == "" {
-		return false
-	}
-	if _, exists := mapping[requestedModel]; exists {
-		return true
-	}
-	for pattern := range mapping {
-		if matchWildcard(pattern, requestedModel) {
-			return true
-		}
-	}
-	return false
-}
-
 func resolveRequestedModelInMapping(mapping map[string]string, requestedModel string) (mappedModel string, matched bool) {
 	if requestedModel == "" {
 		return "", false
@@ -609,6 +594,22 @@ func resolveRequestedModelInMapping(mapping map[string]string, requestedModel st
 		return mappedModel, true
 	}
 	return matchWildcardMappingResult(mapping, requestedModel)
+}
+
+func openAIGPT56MappingTargetEntitled(mapping map[string]string, requestedModel, mappedModel string) bool {
+	targetTier, targetIsFamily := classifyOpenAIGPT56PreviewModel(mappedModel)
+	if !targetIsFamily {
+		return true
+	}
+	if targetTier == "" || !ValidateOpenAIGPT56ModelTransition(requestedModel, mappedModel) {
+		return false
+	}
+	exactTarget, exists := mapping[targetTier]
+	if !exists {
+		return false
+	}
+	exactTier, exactIsFamily := classifyOpenAIGPT56PreviewModel(exactTarget)
+	return exactIsFamily && exactTier == targetTier
 }
 
 // IsModelSupported 检查模型是否在 model_mapping 中（支持通配符）
@@ -632,11 +633,15 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 	if len(mapping) == 0 {
 		return true // 无映射 = 允许所有
 	}
-	if mappingSupportsRequestedModel(mapping, requestedModel) {
-		return true
+	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
+		return openAIGPT56MappingTargetEntitled(mapping, requestedModel, mappedModel)
 	}
 	normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
-	return normalized != requestedModel && mappingSupportsRequestedModel(mapping, normalized)
+	if normalized == requestedModel {
+		return false
+	}
+	mappedModel, matched := resolveRequestedModelInMapping(mapping, normalized)
+	return matched && openAIGPT56MappingTargetEntitled(mapping, normalized, mappedModel)
 }
 
 // GetMappedModel 获取映射后的模型名（支持通配符，最长优先匹配）
@@ -745,6 +750,9 @@ func (a *Account) ResolveCompactMappedModel(requestedModel string) (mappedModel 
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
 		if !ValidateOpenAIGPT56ModelTransition(requestedModel, mappedModel) {
+			return "", true
+		}
+		if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(mappedModel); isGPT56Family && !a.IsModelSupported(mappedModel) {
 			return "", true
 		}
 		return mappedModel, true

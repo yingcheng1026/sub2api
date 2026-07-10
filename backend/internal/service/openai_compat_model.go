@@ -83,6 +83,7 @@ func splitOpenAICompatReasoningModel(model string) (normalizedModel string, reas
 	_, isGPT56Family := classifyOpenAIGPT56PreviewModel(trimmed)
 	switch last {
 	case "none":
+		reasoningEffort = "none"
 	case "minimal":
 		if isGPT56Family {
 			return trimmed, "", false
@@ -161,6 +162,12 @@ func injectOpenAIGPT56ReasoningEffortMap(reqBody map[string]any, model string) b
 
 func openAIReasoningEffortToClaudeOutputEffort(effort string) string {
 	switch strings.TrimSpace(effort) {
+	case "none":
+		// Anthropic's public output_config does not document "none", but this
+		// request is converted locally to OpenAI Responses. Keeping the value
+		// in the compatibility struct prevents AnthropicToResponses from
+		// replacing an explicit GPT-5.6 "-none" suffix with its medium default.
+		return "none"
 	case "low", "medium", "high":
 		return effort
 	case "xhigh":

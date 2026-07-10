@@ -554,6 +554,19 @@ func TestOpenAISelectedAccountSupportsRoutingModel(t *testing.T) {
 		Credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-terra": "gpt-5.6-sol"}},
 	}, "gpt-5.6-terra"))
 	require.True(t, openAISelectedAccountSupportsRoutingModel(&service.Account{Platform: service.PlatformOpenAI}, "gpt-5.4"))
+	require.False(t, openAISelectedAccountSupportsRoutingModel(&service.Account{
+		Platform: service.PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"gpt-5.4": "gpt-5.6-luna",
+		}},
+	}, "gpt-5.4"))
+	require.True(t, openAISelectedAccountSupportsRoutingModel(&service.Account{
+		Platform: service.PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"gpt-5.4":      "gpt-5.6-luna",
+			"gpt-5.6-luna": "gpt-5.6-luna",
+		}},
+	}, "gpt-5.4"))
 	require.False(t, openAISelectedAccountSupportsRoutingModel(nil, "gpt-5.4"))
 }
 

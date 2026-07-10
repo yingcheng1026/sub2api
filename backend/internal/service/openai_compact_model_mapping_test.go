@@ -169,6 +169,75 @@ func TestOpenAIGatewayService_Forward_CompactGPT56UnsafeMappingFailsBeforeUpstre
 	require.Nil(t, upstream.lastReq)
 }
 
+func TestOpenAIGatewayService_Forward_LegacyMappingToGPT56WithoutEntitlementFailsBeforeUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.4","stream":false,"input":"hello"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"should_not_run","model":"gpt-5.6-sol","usage":{"input_tokens":1,"output_tokens":1}}`)),
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	account := &Account{
+		ID:       12,
+		Name:     "openai-api-key",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":       "test-key",
+			"base_url":      "https://example.invalid",
+			"model_mapping": map[string]any{"gpt-5.4": "gpt-5.6-sol"},
+		},
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Nil(t, upstream.lastReq)
+}
+
+func TestOpenAIGatewayService_Forward_CompactLegacyMappingToGPT56WithoutEntitlementFailsBeforeUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.4","stream":false,"input":"hello"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"should_not_run","model":"gpt-5.6-luna","usage":{"input_tokens":1,"output_tokens":1}}`)),
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	account := &Account{
+		ID:       13,
+		Name:     "openai-api-key-compact",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":               "test-key",
+			"base_url":              "https://example.invalid",
+			"model_mapping":         map[string]any{"gpt-5.4": "gpt-5.4"},
+			"compact_model_mapping": map[string]any{"gpt-5.4": "gpt-5.6-luna"},
+		},
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Nil(t, upstream.lastReq)
+}
+
 func TestOpenAIGatewayService_Passthrough_CompactGPT56UnsafeMappingFailsBeforeUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

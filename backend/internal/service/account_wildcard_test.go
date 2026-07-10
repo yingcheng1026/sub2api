@@ -253,6 +253,8 @@ func TestAccountIsModelSupported_GPT56PreviewRequiresExactMapping(t *testing.T) 
 		{name: "openai minimal suffix fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"}}, model: "gpt-5.6-sol-minimal", want: false},
 		{name: "openai extra high suffix fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"}}, model: "gpt-5.6-sol-extrahigh", want: false},
 		{name: "openai legacy no mapping behavior unchanged", platform: PlatformOpenAI, model: "gpt-5.4", want: true},
+		{name: "openai legacy mapping to preview without exact entitlement rejected", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.4": "gpt-5.6-sol"}}, model: "gpt-5.4", want: false},
+		{name: "openai legacy mapping to preview with exact entitlement allowed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.4": "gpt-5.6-sol", "gpt-5.6-sol": "gpt-5.6-sol"}}, model: "gpt-5.4", want: true},
 		{name: "non openai wildcard behavior unchanged", platform: PlatformAnthropic, credentials: map[string]any{"model_mapping": map[string]any{"gpt-*": "gpt-5.6-sol"}}, model: "gpt-5.6-sol", want: true},
 		{name: "legacy claude no mapping behavior unchanged", platform: PlatformAnthropic, model: "claude-sonnet-4-5", want: true},
 	}

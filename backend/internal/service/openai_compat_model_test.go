@@ -295,6 +295,98 @@ func TestForwardAsAnthropic_NormalizesRoutingAndEffortForGpt54XHigh(t *testing.T
 	t.Logf("response body: %s", rec.Body.String())
 }
 
+func TestForwardAsAnthropic_GPT56NoneSuffixPreservedInFinalResponsesPayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.6-sol-none","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"type":"response.completed","response":{"id":"resp_none","object":"response","model":"gpt-5.6-sol","status":"completed","output":[{"type":"message","id":"msg_none","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+	svc := &OpenAIGatewayService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:       1,
+		Name:     "openai-api-key",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key": "test-key",
+			"model_mapping": map[string]any{
+				"gpt-5.6-sol": "gpt-5.6-sol",
+			},
+		},
+	}
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "gpt-5.6-sol", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Equal(t, "none", gjson.GetBytes(upstream.lastBody, "reasoning.effort").String())
+	require.NotNil(t, result.ReasoningEffort)
+	require.Equal(t, "none", *result.ReasoningEffort)
+}
+
+func TestForwardAsAnthropic_GPT56DispatchTargetWinsOverConflictingClaudeAliasMapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"type":"response.completed","response":{"id":"resp_dispatch","object":"response","model":"gpt-5.6-terra","status":"completed","output":[{"type":"message","id":"msg_dispatch","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+	svc := &OpenAIGatewayService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:       2,
+		Name:     "openai-conflicting-alias",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key": "test-key",
+			"model_mapping": map[string]any{
+				"claude-sonnet-4-6": "gpt-5.4",
+				"gpt-5.6-terra":     "gpt-5.6-terra",
+			},
+		},
+	}
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.6-terra")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "gpt-5.6-terra", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Equal(t, "gpt-5.6-terra", result.BillingModel)
+	require.Equal(t, "gpt-5.6-terra", result.UpstreamModel)
+}
+
 func TestForwardAsAnthropic_InjectsPromptCacheKeyForAPIKeyMessagesDispatch(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)

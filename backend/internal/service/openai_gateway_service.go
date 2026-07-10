@@ -2109,6 +2109,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	originalModel := reqModel
 	compatMessagesBridge := isOpenAICompatMessagesBridgeBody(body)
 	setOpenAICompatMessagesBridgeContext(c, compatMessagesBridge)
+	if reqModel != "" && !account.IsModelSupported(reqModel) {
+		err := errors.New("model is not supported by selected account")
+		setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type":    "invalid_request_error",
+			"message": err.Error(),
+			"param":   "model",
+		}})
+		return nil, err
+	}
 
 	isCodexCLI := openai.IsCodexOfficialClientByHeaders(c.GetHeader("User-Agent"), c.GetHeader("originator")) || (s.cfg != nil && s.cfg.Gateway.ForceCodexCLI)
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
