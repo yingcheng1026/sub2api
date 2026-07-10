@@ -25,3 +25,17 @@ func TestNormalizeOpenAIMessagesDispatchModelConfig(t *testing.T) {
 		"claude-sonnet-4-5-20250929": "gpt-5.2",
 	}, cfg.ExactModelMappings)
 }
+
+func TestResolveMessagesDispatchModel_NativeGPT56DoesNotEnterClaudeFamilyMapping(t *testing.T) {
+	t.Parallel()
+
+	group := &Group{MessagesDispatchModelConfig: OpenAIMessagesDispatchModelConfig{
+		OpusMappedModel:   "gpt-5.6-sol",
+		SonnetMappedModel: "gpt-5.6-terra",
+		HaikuMappedModel:  "gpt-5.6-luna",
+	}}
+
+	for _, model := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		require.Empty(t, group.ResolveMessagesDispatchModel(model), "native GPT model %q must bypass Claude family dispatch", model)
+	}
+}
