@@ -42,6 +42,7 @@ describe('GroupDistributionChart', () => {
       total_tokens: 1200,
       cost: 1.8,
       actual_cost: 0.1,
+      account_cost: 0.08,
     },
     {
       group_id: 2,
@@ -50,6 +51,7 @@ describe('GroupDistributionChart', () => {
       total_tokens: 600,
       cost: 0.7,
       actual_cost: 0.9,
+      account_cost: 0.3,
     },
   ]
 

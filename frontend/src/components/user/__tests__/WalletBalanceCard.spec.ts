@@ -2,22 +2,26 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import WalletBalanceCard from '../WalletBalanceCard.vue'
 
-vi.mock('vue-i18n', () => ({
-  useI18n: () => ({
-    t: (key: string, params?: Record<string, string>) =>
-      ({
-        'userSubscriptions.wallet.title': 'Wallet balance',
-        'userSubscriptions.wallet.subtitle': 'Shared wallet quota',
-        'userSubscriptions.wallet.remaining': 'Remaining',
-        'userSubscriptions.wallet.usedPercent': 'Used',
-        'userSubscriptions.wallet.lowWarning': `Only ${params?.amount} left`,
-        'userSubscriptions.wallet.exhausted': 'Wallet exhausted',
-        'userSubscriptions.status.active': 'Active',
-        'userSubscriptions.expires': 'Expires',
-        'payment.renewNow': 'Renew'
-      })[key] || key
-  })
-}))
+vi.mock('vue-i18n', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('vue-i18n')>()
+  return {
+    ...actual,
+    useI18n: () => ({
+      t: (key: string, params?: Record<string, string>) =>
+        ({
+          'userSubscriptions.wallet.title': 'Wallet balance',
+          'userSubscriptions.wallet.subtitle': 'Shared wallet quota',
+          'userSubscriptions.wallet.remaining': 'Remaining',
+          'userSubscriptions.wallet.usedPercent': 'Used',
+          'userSubscriptions.wallet.lowWarning': `Only ${params?.amount} left`,
+          'userSubscriptions.wallet.exhausted': 'Wallet exhausted',
+          'userSubscriptions.status.active': 'Active',
+          'userSubscriptions.expires': 'Expires',
+          'payment.renewNow': 'Renew'
+        })[key] || key
+    })
+  }
+})
 
 function mountWalletCard(balance = 399.4) {
   return mount(WalletBalanceCard, {
