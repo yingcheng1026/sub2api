@@ -653,6 +653,19 @@ func (a *Account) ResolveMappedModel(requestedModel string) (mappedModel string,
 	if len(mapping) == 0 {
 		return requestedModel, false
 	}
+	if a.Platform == PlatformOpenAI {
+		normalizedGPT56, isGPT56Family := classifyOpenAIGPT56PreviewModel(requestedModel)
+		if isGPT56Family {
+			if normalizedGPT56 == "" {
+				return requestedModel, false
+			}
+			mappedModel, exists := mapping[normalizedGPT56]
+			if !exists || !ValidateOpenAIGPT56ModelTransition(requestedModel, mappedModel) {
+				return requestedModel, false
+			}
+			return mappedModel, true
+		}
+	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
 		return mappedModel, true
 	}
@@ -731,6 +744,9 @@ func (a *Account) ResolveCompactMappedModel(requestedModel string) (mappedModel 
 		return requestedModel, false
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
+		if !ValidateOpenAIGPT56ModelTransition(requestedModel, mappedModel) {
+			return "", true
+		}
 		return mappedModel, true
 	}
 	return requestedModel, false

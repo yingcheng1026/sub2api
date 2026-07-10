@@ -510,7 +510,11 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	// account model mapping, and compact mode applies compact-only mapping on top.
 	testModelID = account.GetMappedModel(testModelID)
 	if mode == AccountTestModeCompact {
-		testModelID = resolveOpenAICompactForwardModel(account, testModelID)
+		var compactMappingValid bool
+		testModelID, compactMappingValid = resolveOpenAICompactForwardModelWithValidity(account, testModelID)
+		if !compactMappingValid {
+			return errors.New("invalid GPT-5.6 compact model mapping")
+		}
 		return s.testOpenAICompactConnection(c, account, testModelID)
 	}
 

@@ -109,6 +109,33 @@ func classifyOpenAIGPT56PreviewModel(model string) (normalizedModel string, isFa
 	}
 }
 
+// NormalizeOpenAIGPT56PreviewModel returns the exact canonical preview tier
+// and reports whether the input belongs to the GPT-5.6 family.
+func NormalizeOpenAIGPT56PreviewModel(model string) (normalizedModel string, isFamily bool) {
+	return classifyOpenAIGPT56PreviewModel(model)
+}
+
+// ValidateOpenAIGPT56ModelTransition enforces the preview-tier boundary for
+// any explicit model mapping. Exact preview requests may only map within the
+// same tier; malformed preview family names fail closed. Legacy models may map
+// to an exact preview tier, preserving the existing compatibility direction.
+func ValidateOpenAIGPT56ModelTransition(requestedModel, targetModel string) bool {
+	targetModel = strings.TrimSpace(targetModel)
+	if targetModel == "" {
+		return false
+	}
+
+	requestedTier, requestedIsFamily := classifyOpenAIGPT56PreviewModel(requestedModel)
+	targetTier, targetIsFamily := classifyOpenAIGPT56PreviewModel(targetModel)
+	if requestedIsFamily {
+		return requestedTier != "" && targetIsFamily && targetTier == requestedTier
+	}
+	if targetIsFamily {
+		return targetTier != ""
+	}
+	return true
+}
+
 func appendUsageBillingModelCandidate(candidates []string, seen map[string]struct{}, model string) []string {
 	trimmed := strings.TrimSpace(model)
 	if trimmed == "" {

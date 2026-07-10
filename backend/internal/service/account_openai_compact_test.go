@@ -340,6 +340,28 @@ func TestAccountResolveCompactMappedModel(t *testing.T) {
 			expectedModel:  "gpt-5.4",
 			expectedMatch:  false,
 		},
+		{
+			name: "preview cross tier compact target fails closed",
+			credentials: map[string]any{
+				"compact_model_mapping": map[string]any{
+					"gpt-5.6-sol": "gpt-5.6-terra",
+				},
+			},
+			requestedModel: "gpt-5.6-sol",
+			expectedModel:  "",
+			expectedMatch:  true,
+		},
+		{
+			name: "legacy compact mapping to exact preview remains allowed",
+			credentials: map[string]any{
+				"compact_model_mapping": map[string]any{
+					"gpt-5.4": "gpt-5.6-luna",
+				},
+			},
+			requestedModel: "gpt-5.4",
+			expectedModel:  "gpt-5.6-luna",
+			expectedMatch:  true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -2527,6 +2527,18 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				nil,
 			)
 		}
+		if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(originalModel); isGPT56Family && !account.IsModelSupported(originalModel) {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
+				coderws.StatusPolicyViolation,
+				"invalid GPT-5.6 websocket model mapping",
+				nil,
+			)
+		}
+		var effortErr error
+		normalized, _, effortErr = injectOpenAIGPT56ReasoningEffort(normalized, originalModel, "reasoning.effort")
+		if effortErr != nil {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket reasoning effort", effortErr)
+		}
 		promptCacheKey := strings.TrimSpace(values[2].String())
 		previousResponseID := strings.TrimSpace(values[3].String())
 		previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)

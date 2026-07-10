@@ -1302,6 +1302,12 @@ func isOpenAIAccountEligibleForRequest(account *Account, requestedModel string, 
 	if requireCompact && openAICompactSupportTier(account) == 0 {
 		return false
 	}
+	if requireCompact {
+		baseModel := resolveOpenAIForwardModel(account, requestedModel, "")
+		if _, valid := resolveOpenAICompactForwardModelWithValidity(account, baseModel); !valid {
+			return false
+		}
+	}
 	return true
 }
 
@@ -1341,7 +1347,11 @@ func resolveOpenAIAccountUpstreamModelForRequest(account *Account, requestedMode
 		return ""
 	}
 	if requireCompact {
-		return resolveOpenAICompactForwardModel(account, upstreamModel)
+		compactModel, valid := resolveOpenAICompactForwardModelWithValidity(account, upstreamModel)
+		if !valid {
+			return ""
+		}
+		return compactModel
 	}
 	return upstreamModel
 }
@@ -2095,7 +2105,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, errors.New("codex_cli_only restriction: only codex official clients are allowed")
 	}
 
-	originalBody := body
 	reqModel, reqStream, promptCacheKey := extractOpenAIRequestMetaFromBody(body)
 	originalModel := reqModel
 	compatMessagesBridge := isOpenAICompatMessagesBridgeBody(body)
@@ -2135,9 +2144,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	if passthroughEnabled {
+		var injectErr error
+		body, _, injectErr = injectOpenAIGPT56ReasoningEffort(body, reqModel, "reasoning.effort")
+		if injectErr != nil {
+			return nil, fmt.Errorf("inject GPT-5.6 reasoning effort: %w", injectErr)
+		}
 		// 透传分支只需要轻量提取字段，避免热路径全量 Unmarshal。
 		reasoningEffort := extractOpenAIReasoningEffortFromBody(body, reqModel)
-		return s.forwardOpenAIPassthrough(ctx, c, account, originalBody, reqModel, reasoningEffort, reqStream, startTime)
+		return s.forwardOpenAIPassthrough(ctx, c, account, body, reqModel, reasoningEffort, reqStream, startTime)
 	}
 
 	reqBody, err := getOpenAIRequestBodyMap(c, body)
@@ -2175,9 +2189,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	// Track if body needs re-serialization
-	bodyModified := false
+	reasoningEffortInjected := injectOpenAIGPT56ReasoningEffortMap(reqBody, reqModel)
+	bodyModified := reasoningEffortInjected
 	// 单字段补丁快速路径：只要整个变更集最终可归约为同一路径的 set/delete，就避免全量 Marshal。
-	patchDisabled := false
+	patchDisabled := reasoningEffortInjected
 	patchHasOp := false
 	patchDelete := false
 	patchPath := ""
@@ -2309,7 +2324,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	isCompactRequest := isOpenAIResponsesCompactPath(c)
 	compactMapped := false
 	if isCompactRequest {
-		compactMappedModel := resolveOpenAICompactForwardModel(account, billingModel)
+		compactMappedModel, compactMappingValid := resolveOpenAICompactForwardModelWithValidity(account, billingModel)
+		if !compactMappingValid {
+			err := errors.New("invalid GPT-5.6 compact model mapping")
+			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"type":    "invalid_request_error",
+				"message": err.Error(),
+				"param":   "model",
+			}})
+			return nil, err
+		}
 		if compactMappedModel != "" && compactMappedModel != billingModel {
 			compactMapped = true
 			upstreamModel = compactMappedModel
@@ -2928,9 +2953,46 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
 	upstreamPassthroughModel := ""
+	compactBaseModel := reqModel
+	if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(reqModel); isGPT56Family {
+		if account == nil || !account.IsModelSupported(reqModel) {
+			err := errors.New("invalid GPT-5.6 passthrough model mapping")
+			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"type":    "invalid_request_error",
+				"message": err.Error(),
+				"param":   "model",
+			}})
+			return nil, err
+		}
+		mappedModel := normalizeOpenAIModelForUpstream(account, account.GetMappedModel(reqModel))
+		if mappedModel == "" {
+			return nil, errors.New("empty GPT-5.6 passthrough mapped model")
+		}
+		compactBaseModel = mappedModel
+		upstreamPassthroughModel = mappedModel
+		if mappedModel != reqModel {
+			nextBody, setErr := sjson.SetBytes(body, "model", mappedModel)
+			if setErr != nil {
+				return nil, fmt.Errorf("set GPT-5.6 passthrough model: %w", setErr)
+			}
+			body = nextBody
+			upstreamPassthroughModel = mappedModel
+		}
+	}
 	if isOpenAIResponsesCompactPath(c) {
-		compactMappedModel := resolveOpenAICompactForwardModel(account, reqModel)
-		if compactMappedModel != "" && compactMappedModel != reqModel {
+		compactMappedModel, compactMappingValid := resolveOpenAICompactForwardModelWithValidity(account, compactBaseModel)
+		if !compactMappingValid {
+			err := errors.New("invalid GPT-5.6 compact model mapping")
+			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"type":    "invalid_request_error",
+				"message": err.Error(),
+				"param":   "model",
+			}})
+			return nil, err
+		}
+		if compactMappedModel != "" && compactMappedModel != compactBaseModel {
 			nextBody, setErr := sjson.SetBytes(body, "model", compactMappedModel)
 			if setErr != nil {
 				return nil, fmt.Errorf("set compact passthrough model: %w", setErr)

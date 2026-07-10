@@ -15,6 +15,7 @@ import (
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type openAIWSClientFrameConn struct {
@@ -122,6 +123,46 @@ func openAIWSPassthroughPolicyModelFromSessionFrame(account *Account, payload []
 		return ""
 	}
 	return normalizeOpenAIModelForUpstream(account, account.GetMappedModel(original))
+}
+
+func rewriteOpenAIWSPassthroughMappedModel(account *Account, payload []byte) ([]byte, error) {
+	if account == nil || len(payload) == 0 {
+		return payload, nil
+	}
+
+	frameType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	modelPath := ""
+	switch frameType {
+	case "response.create", "":
+		modelPath = "model"
+	case "session.update":
+		modelPath = "session.model"
+	default:
+		return payload, nil
+	}
+
+	originalModel := strings.TrimSpace(gjson.GetBytes(payload, modelPath).String())
+	if originalModel == "" {
+		return payload, nil
+	}
+	if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(originalModel); isGPT56Family && !account.IsModelSupported(originalModel) {
+		return nil, errors.New("invalid GPT-5.6 websocket model mapping")
+	}
+
+	updated := payload
+	if modelPath == "model" {
+		var err error
+		updated, _, err = injectOpenAIGPT56ReasoningEffort(updated, originalModel, "reasoning.effort")
+		if err != nil {
+			return nil, fmt.Errorf("inject GPT-5.6 websocket reasoning effort: %w", err)
+		}
+	}
+
+	mappedModel := normalizeOpenAIModelForUpstream(account, account.GetMappedModel(originalModel))
+	if mappedModel == "" || mappedModel == originalModel {
+		return updated, nil
+	}
+	return sjson.SetBytes(updated, modelPath, mappedModel)
 }
 
 type openAIWSPassthroughUsageMeta struct {
@@ -296,6 +337,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		}
 		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, blocked.Message, blocked)
 	}
+	updatedFirst, policyErr = rewriteOpenAIWSPassthroughMappedModel(account, updatedFirst)
+	if policyErr != nil {
+		return policyErr
+	}
 	firstClientMessage = updatedFirst
 
 	// 在 policy filter 之后再提取 service_tier / reasoning_effort 用于
@@ -439,6 +484,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if policyErr == nil && blocked == nil &&
 				strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
 				usageMeta.updateFromResponseCreate(out, requestModelForThisFrame)
+			}
+			if policyErr == nil && blocked == nil {
+				out, policyErr = rewriteOpenAIWSPassthroughMappedModel(account, out)
 			}
 			return out, blocked, policyErr
 		},

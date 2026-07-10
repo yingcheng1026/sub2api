@@ -250,6 +250,8 @@ func TestAccountIsModelSupported_GPT56PreviewRequiresExactMapping(t *testing.T) 
 		{name: "openai exact luna allows preview", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-luna": "gpt-5.6-luna"}}, model: "gpt-5.6-luna", want: true},
 		{name: "openai bare family fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6": "gpt-5.6"}}, model: "gpt-5.6", want: false},
 		{name: "openai malformed tier fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-unknown": "gpt-5.6-unknown"}}, model: "gpt-5.6-unknown", want: false},
+		{name: "openai minimal suffix fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"}}, model: "gpt-5.6-sol-minimal", want: false},
+		{name: "openai extra high suffix fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"}}, model: "gpt-5.6-sol-extrahigh", want: false},
 		{name: "openai legacy no mapping behavior unchanged", platform: PlatformOpenAI, model: "gpt-5.4", want: true},
 		{name: "non openai wildcard behavior unchanged", platform: PlatformAnthropic, credentials: map[string]any{"model_mapping": map[string]any{"gpt-*": "gpt-5.6-sol"}}, model: "gpt-5.6-sol", want: true},
 		{name: "legacy claude no mapping behavior unchanged", platform: PlatformAnthropic, model: "claude-sonnet-4-5", want: true},
@@ -295,6 +297,17 @@ func TestAccountGetMappedModel(t *testing.T) {
 			},
 			requestedModel: "claude-sonnet-4-5",
 			expected:       "target-model",
+		},
+		{
+			name:     "openai preview suffix resolves through exact base entitlement",
+			platform: PlatformOpenAI,
+			credentials: map[string]any{
+				"model_mapping": map[string]any{
+					"gpt-5.6-sol": "gpt-5.6-sol",
+				},
+			},
+			requestedModel: "openai/gpt_5.6_sol_high",
+			expected:       "gpt-5.6-sol",
 		},
 
 		// 通配符匹配（最长优先）

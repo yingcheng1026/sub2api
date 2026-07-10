@@ -50,17 +50,27 @@ func resolveOpenAIMessagesDispatchMappedModel(apiKey *service.APIKey, requestedM
 // resolveOpenAIAccountRoutingModel returns the final model whose account
 // entitlement must be checked. Channel mapping is the last routing decision,
 // so it takes precedence over the Messages dispatch default and client model.
-func resolveOpenAIAccountRoutingModel(requestedModel, preferredMappedModel string, channelMapping service.ChannelMappingResult) string {
-	candidates := []string{preferredMappedModel, requestedModel}
+func resolveOpenAIAccountRoutingModel(requestedModel, preferredMappedModel string, channelMapping service.ChannelMappingResult) (string, bool) {
+	candidate := strings.TrimSpace(requestedModel)
+	if preferred := strings.TrimSpace(preferredMappedModel); preferred != "" {
+		candidate = preferred
+	}
 	if channelMapping.Mapped {
-		candidates = append([]string{channelMapping.MappedModel}, candidates...)
+		candidate = strings.TrimSpace(channelMapping.MappedModel)
 	}
-	for _, candidate := range candidates {
-		if normalized := service.NormalizeOpenAICompatRequestedModel(candidate); strings.TrimSpace(normalized) != "" {
-			return strings.TrimSpace(normalized)
-		}
+	if candidate == "" || !service.ValidateOpenAIGPT56ModelTransition(requestedModel, candidate) {
+		return "", false
 	}
-	return ""
+	normalized := ""
+	if previewTier, isPreviewFamily := service.NormalizeOpenAIGPT56PreviewModel(candidate); isPreviewFamily {
+		normalized = previewTier
+	} else {
+		normalized = strings.TrimSpace(service.NormalizeOpenAICompatRequestedModel(candidate))
+	}
+	if normalized == "" || !service.ValidateOpenAIGPT56ModelTransition(candidate, normalized) {
+		return "", false
+	}
+	return normalized, true
 }
 
 func openAISelectedAccountSupportsRoutingModel(account *service.Account, routingModel string) bool {
@@ -241,7 +251,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
-	routingModel := resolveOpenAIAccountRoutingModel(reqModel, "", channelMapping)
+	routingModel, routingValid := resolveOpenAIAccountRoutingModel(reqModel, "", channelMapping)
+	if !routingValid {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Invalid GPT-5.6 preview model mapping")
+		return
+	}
 
 	// 提前校验 function_call_output 是否具备可关联上下文，避免上游 400。
 	if !h.validateFunctionCallOutputRequest(c, body, reqLog) {
@@ -683,7 +697,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMappingMsg, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
-	routingModel := resolveOpenAIAccountRoutingModel(reqModel, preferredMappedModel, channelMappingMsg)
+	routingModel, routingValid := resolveOpenAIAccountRoutingModel(reqModel, preferredMappedModel, channelMappingMsg)
+	if !routingValid {
+		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Invalid GPT-5.6 preview model mapping")
+		return
+	}
 
 	// 绑定错误透传服务，允许 service 层在非 failover 错误场景复用规则。
 	if h.errorPassthroughService != nil {
@@ -1283,7 +1301,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
-	routingModel := resolveOpenAIAccountRoutingModel(reqModel, "", channelMappingWS)
+	routingModel, routingValid := resolveOpenAIAccountRoutingModel(reqModel, "", channelMappingWS)
+	if !routingValid {
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "invalid GPT-5.6 preview model mapping")
+		return
+	}
 
 	var currentUserRelease func()
 	var currentAccountRelease func()

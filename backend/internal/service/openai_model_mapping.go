@@ -24,17 +24,29 @@ func resolveOpenAIForwardModel(account *Account, requestedModel, defaultMappedMo
 // for /responses/compact requests. It never affects normal /responses traffic.
 // When no compact-specific mapping matches, the input model is returned as-is.
 func resolveOpenAICompactForwardModel(account *Account, model string) string {
+	mappedModel, valid := resolveOpenAICompactForwardModelWithValidity(account, model)
+	if !valid {
+		return ""
+	}
+	return mappedModel
+}
+
+func resolveOpenAICompactForwardModelWithValidity(account *Account, model string) (string, bool) {
 	trimmedModel := strings.TrimSpace(model)
-	if trimmedModel == "" || account == nil {
-		return trimmedModel
+	if trimmedModel == "" {
+		return "", false
+	}
+	if account == nil {
+		return trimmedModel, ValidateOpenAIGPT56ModelTransition(trimmedModel, trimmedModel)
 	}
 
 	mappedModel, matched := account.ResolveCompactMappedModel(trimmedModel)
 	if !matched {
-		return trimmedModel
+		return trimmedModel, ValidateOpenAIGPT56ModelTransition(trimmedModel, trimmedModel)
 	}
-	if trimmedMapped := strings.TrimSpace(mappedModel); trimmedMapped != "" {
-		return trimmedMapped
+	trimmedMapped := strings.TrimSpace(mappedModel)
+	if !ValidateOpenAIGPT56ModelTransition(trimmedModel, trimmedMapped) {
+		return "", false
 	}
-	return trimmedModel
+	return trimmedMapped, true
 }

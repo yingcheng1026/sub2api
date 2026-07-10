@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func NormalizeOpenAICompatRequestedModel(model string) string {
@@ -78,17 +80,83 @@ func splitOpenAICompatReasoningModel(model string) (normalizedModel string, reas
 	}
 
 	last := strings.NewReplacer("-", "", "_", "", " ", "").Replace(parts[len(parts)-1])
+	_, isGPT56Family := classifyOpenAIGPT56PreviewModel(trimmed)
 	switch last {
-	case "none", "minimal":
+	case "none":
+	case "minimal":
+		if isGPT56Family {
+			return trimmed, "", false
+		}
 	case "low", "medium", "high":
 		reasoningEffort = last
-	case "xhigh", "extrahigh":
+	case "xhigh":
+		reasoningEffort = "xhigh"
+	case "extrahigh":
+		if isGPT56Family {
+			return trimmed, "", false
+		}
 		reasoningEffort = "xhigh"
 	default:
 		return trimmed, "", false
 	}
 
 	return normalizeCodexModel(modelID), reasoningEffort, true
+}
+
+func openAIGPT56ReasoningEffortFromModel(model string) (string, bool) {
+	normalized, isFamily := classifyOpenAIGPT56PreviewModel(model)
+	if !isFamily || normalized == "" {
+		return "", false
+	}
+	canonical := canonicalizeOpenAIModelAliasSpelling(model)
+	prefix := normalized + "-"
+	if !strings.HasPrefix(canonical, prefix) {
+		return "", false
+	}
+	switch effort := strings.TrimPrefix(canonical, prefix); effort {
+	case "none", "low", "medium", "high", "xhigh":
+		return effort, true
+	default:
+		return "", false
+	}
+}
+
+func injectOpenAIGPT56ReasoningEffort(body []byte, model, field string) ([]byte, bool, error) {
+	if len(body) == 0 || strings.TrimSpace(field) == "" {
+		return body, false, nil
+	}
+	if gjson.GetBytes(body, "reasoning.effort").Exists() || gjson.GetBytes(body, "reasoning_effort").Exists() {
+		return body, false, nil
+	}
+	effort, ok := openAIGPT56ReasoningEffortFromModel(model)
+	if !ok {
+		return body, false, nil
+	}
+	updated, err := sjson.SetBytes(body, field, effort)
+	if err != nil {
+		return body, false, err
+	}
+	return updated, true, nil
+}
+
+func injectOpenAIGPT56ReasoningEffortMap(reqBody map[string]any, model string) bool {
+	if reqBody == nil {
+		return false
+	}
+	if _, present := getOpenAIReasoningEffortFromReqBody(reqBody); present {
+		return false
+	}
+	effort, ok := openAIGPT56ReasoningEffortFromModel(model)
+	if !ok {
+		return false
+	}
+	reasoning, ok := reqBody["reasoning"].(map[string]any)
+	if !ok || reasoning == nil {
+		reasoning = make(map[string]any)
+		reqBody["reasoning"] = reasoning
+	}
+	reasoning["effort"] = effort
+	return true
 }
 
 func openAIReasoningEffortToClaudeOutputEffort(effort string) string {

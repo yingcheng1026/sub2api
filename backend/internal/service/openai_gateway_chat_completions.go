@@ -61,6 +61,17 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	reasoningField := "reasoning_effort"
+	if !gjson.GetBytes(body, "messages").Exists() && gjson.GetBytes(body, "input").Exists() {
+		reasoningField = "reasoning.effort"
+	}
+	requestModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if injectedBody, _, injectErr := injectOpenAIGPT56ReasoningEffort(body, requestModel, reasoningField); injectErr != nil {
+		return nil, fmt.Errorf("inject GPT-5.6 reasoning effort: %w", injectErr)
+	} else {
+		body = injectedBody
+	}
+
 	// 入口分流：APIKey 账号 + 已探测且确认上游不支持 Responses，走 CC 直转。
 	// 标记缺失（未探测）按"现状即证据"原则继续走下方原 Responses 转换路径。
 	if account.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(account.Extra) {

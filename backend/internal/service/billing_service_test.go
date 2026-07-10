@@ -166,6 +166,42 @@ func TestBillingServiceGetModelPricing_GPT56ExactFallbacks(t *testing.T) {
 	require.Nil(t, pricing)
 }
 
+func TestBillingServiceGetModelPricing_GPT56ChannelOverrideDoesNotPolluteFallback(t *testing.T) {
+	tests := []struct {
+		model      string
+		input      float64
+		output     float64
+		cacheWrite float64
+		cacheRead  float64
+	}{
+		{model: "gpt-5.6-sol", input: 5e-6, output: 30e-6, cacheWrite: 6.25e-6, cacheRead: 0.5e-6},
+		{model: "gpt-5.6-terra", input: 2.5e-6, output: 15e-6, cacheWrite: 3.125e-6, cacheRead: 0.25e-6},
+		{model: "gpt-5.6-luna", input: 1e-6, output: 6e-6, cacheWrite: 1.25e-6, cacheRead: 0.1e-6},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			svc := newTestBillingService()
+			overridden, err := svc.GetModelPricingWithChannel(tt.model, &ChannelModelPricing{
+				InputPrice:      testPtrFloat64(101),
+				OutputPrice:     testPtrFloat64(102),
+				CacheWritePrice: testPtrFloat64(103),
+				CacheReadPrice:  testPtrFloat64(104),
+			})
+			require.NoError(t, err)
+			require.InDelta(t, 101.0, overridden.InputPricePerToken, 1e-12)
+
+			fresh, err := svc.GetModelPricing(tt.model)
+			require.NoError(t, err)
+			require.NotSame(t, overridden, fresh)
+			require.InDelta(t, tt.input, fresh.InputPricePerToken, 1e-12)
+			require.InDelta(t, tt.output, fresh.OutputPricePerToken, 1e-12)
+			require.InDelta(t, tt.cacheWrite, fresh.CacheCreationPricePerToken, 1e-12)
+			require.InDelta(t, tt.cacheRead, fresh.CacheReadPricePerToken, 1e-12)
+		})
+	}
+}
+
 func TestGetModelPricing_OpenAICompactAliasesFallback(t *testing.T) {
 	svc := newTestBillingService()
 

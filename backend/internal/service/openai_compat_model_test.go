@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type openAICompatFailingWriter struct {
@@ -97,6 +98,83 @@ func TestNormalizeOpenAICompatRequestedModel_GPT56ExactTiers(t *testing.T) {
 		"openai/gpt-5.6-luna-xhigh": "gpt-5.6-luna",
 	} {
 		require.Equal(t, expected, NormalizeOpenAICompatRequestedModel(input))
+	}
+}
+
+func TestNormalizeOpenAICompatRequestedModel_GPT56RejectsUnsupportedSuffixAliases(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{
+		"gpt-5.6-sol-minimal",
+		"openai/gpt-5.6-terra-extrahigh",
+	} {
+		require.Equal(t, model, NormalizeOpenAICompatRequestedModel(model))
+
+		req := &apicompat.AnthropicRequest{Model: model}
+		applyOpenAICompatModelNormalization(req)
+		require.Equal(t, model, req.Model)
+		require.Nil(t, req.OutputConfig)
+	}
+}
+
+func TestOpenAIGatewayService_Forward_APIKeyGPT56SuffixUsesExactMappingAndReasoningEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name           string
+		explicitEffort string
+		wantEffort     string
+		passthrough    bool
+	}{
+		{name: "suffix derives effort", wantEffort: "high"},
+		{name: "explicit effort wins", explicitEffort: "low", wantEffort: "low"},
+		{name: "passthrough suffix uses exact account target", wantEffort: "high", passthrough: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			body := []byte(`{"model":"openai/gpt_5.6_sol_high","stream":false,"instructions":"test","input":"hello"}`)
+			if tt.explicitEffort != "" {
+				var err error
+				body, err = sjson.SetBytes(body, "reasoning.effort", tt.explicitEffort)
+				require.NoError(t, err)
+			}
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"resp_gpt56","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			}}
+			svc := &OpenAIGatewayService{
+				httpUpstream: upstream,
+				cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+			}
+			account := &Account{
+				ID:       21,
+				Name:     "gpt56-api-key",
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeAPIKey,
+				Credentials: map[string]any{
+					"api_key":  "test-key",
+					"base_url": "https://example.invalid",
+					"model_mapping": map[string]any{
+						"gpt-5.6-sol": "gpt-5.6-sol",
+					},
+				},
+				Extra: map[string]any{"openai_passthrough": tt.passthrough},
+			}
+
+			result, err := svc.Forward(context.Background(), c, account, body)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, "gpt-5.6-sol", result.UpstreamModel)
+			require.Equal(t, "gpt-5.6-sol", gjson.GetBytes(upstream.lastBody, "model").String())
+			require.Equal(t, tt.wantEffort, gjson.GetBytes(upstream.lastBody, "reasoning.effort").String())
+		})
 	}
 }
 

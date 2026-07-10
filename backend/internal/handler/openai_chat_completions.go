@@ -88,7 +88,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
-	routingModel := resolveOpenAIAccountRoutingModel(reqModel, "", channelMapping)
+	routingModel, routingValid := resolveOpenAIAccountRoutingModel(reqModel, "", channelMapping)
+	if !routingValid {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Invalid GPT-5.6 preview model mapping")
+		return
+	}
 
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)

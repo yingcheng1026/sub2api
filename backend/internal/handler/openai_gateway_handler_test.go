@@ -435,12 +435,14 @@ func TestResolveOpenAIAccountRoutingModel_ChannelMappingPrecedesProtocolDefault(
 		preferredModel  string
 		channelMapping  service.ChannelMappingResult
 		expectedRouting string
+		expectedValid   bool
 	}{
 		{
 			name:            "responses channel mapping routes preview entitlement",
 			requestedModel:  "gpt-5.4",
 			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "openai/gpt-5.6-sol-high"},
 			expectedRouting: "gpt-5.6-sol",
+			expectedValid:   true,
 		},
 		{
 			name:            "messages channel mapping wins over legacy dispatch default",
@@ -448,18 +450,21 @@ func TestResolveOpenAIAccountRoutingModel_ChannelMappingPrecedesProtocolDefault(
 			preferredModel:  "gpt-5.4",
 			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6-terra-medium"},
 			expectedRouting: "gpt-5.6-terra",
+			expectedValid:   true,
 		},
 		{
 			name:            "websocket channel mapping routes preview entitlement",
 			requestedModel:  "gpt-5.4",
 			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "OPENAI/GPT-5.6-LUNA-XHIGH"},
 			expectedRouting: "gpt-5.6-luna",
+			expectedValid:   true,
 		},
 		{
 			name:            "chat completions channel mapping keeps non preview behavior",
 			requestedModel:  "gpt-4.1",
 			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.4"},
 			expectedRouting: "gpt-5.4",
+			expectedValid:   true,
 		},
 		{
 			name:            "messages dispatch default used without channel mapping",
@@ -467,12 +472,72 @@ func TestResolveOpenAIAccountRoutingModel_ChannelMappingPrecedesProtocolDefault(
 			preferredModel:  "gpt-5.4",
 			channelMapping:  service.ChannelMappingResult{MappedModel: "claude-sonnet-4-6"},
 			expectedRouting: "gpt-5.4",
+			expectedValid:   true,
+		},
+		{
+			name:            "responses preview downgrade fails closed",
+			requestedModel:  "gpt-5.6-sol",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.4"},
+			expectedRouting: "",
+			expectedValid:   false,
+		},
+		{
+			name:            "messages preview cross tier fails closed",
+			requestedModel:  "gpt-5.6-terra-high",
+			preferredModel:  "gpt-5.6-terra",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6-sol"},
+			expectedRouting: "",
+			expectedValid:   false,
+		},
+		{
+			name:            "websocket empty mapped target fails closed",
+			requestedModel:  "gpt-5.4",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "  "},
+			expectedRouting: "",
+			expectedValid:   false,
+		},
+		{
+			name:            "chat malformed preview request fails closed",
+			requestedModel:  "gpt-5.6-unknown",
+			channelMapping:  service.ChannelMappingResult{MappedModel: "gpt-5.6-unknown"},
+			expectedRouting: "",
+			expectedValid:   false,
+		},
+		{
+			name:            "preview minimal suffix fails closed",
+			requestedModel:  "gpt-5.6-sol-minimal",
+			channelMapping:  service.ChannelMappingResult{MappedModel: "gpt-5.6-sol-minimal"},
+			expectedRouting: "",
+			expectedValid:   false,
+		},
+		{
+			name:            "preview extra high suffix fails closed",
+			requestedModel:  "gpt-5.6-luna-extrahigh",
+			channelMapping:  service.ChannelMappingResult{MappedModel: "gpt-5.6-luna-extrahigh"},
+			expectedRouting: "",
+			expectedValid:   false,
+		},
+		{
+			name:            "legacy request to malformed preview target fails closed",
+			requestedModel:  "gpt-5.4",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6"},
+			expectedRouting: "",
+			expectedValid:   false,
+		},
+		{
+			name:            "preview same tier provider suffix remains valid",
+			requestedModel:  "gpt-5.6-sol-high",
+			channelMapping:  service.ChannelMappingResult{Mapped: true, MappedModel: "OPENAI/GPT5.6-SOL-XHIGH"},
+			expectedRouting: "gpt-5.6-sol",
+			expectedValid:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.expectedRouting, resolveOpenAIAccountRoutingModel(tt.requestedModel, tt.preferredModel, tt.channelMapping))
+			gotRouting, gotValid := resolveOpenAIAccountRoutingModel(tt.requestedModel, tt.preferredModel, tt.channelMapping)
+			require.Equal(t, tt.expectedRouting, gotRouting)
+			require.Equal(t, tt.expectedValid, gotValid)
 		})
 	}
 }

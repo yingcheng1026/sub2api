@@ -216,6 +216,36 @@ func TestResolveOpenAICompactForwardModel(t *testing.T) {
 	}
 }
 
+func TestResolveOpenAICompactForwardModelWithValidity_GPT56SameTierGuard(t *testing.T) {
+	tests := []struct {
+		name          string
+		requested     string
+		target        string
+		expectedModel string
+		expectedValid bool
+	}{
+		{name: "same tier provider suffix accepted", requested: "gpt-5.6-sol", target: "openai/gpt-5.6-sol-high", expectedModel: "openai/gpt-5.6-sol-high", expectedValid: true},
+		{name: "downgrade rejected", requested: "gpt-5.6-sol", target: "gpt-5.4", expectedValid: false},
+		{name: "cross tier rejected", requested: "gpt-5.6-terra", target: "gpt-5.6-sol", expectedValid: false},
+		{name: "malformed suffix rejected", requested: "gpt-5.6-luna", target: "gpt-5.6-luna-minimal", expectedValid: false},
+		{name: "malformed requested family rejected", requested: "gpt-5.6-unknown", target: "gpt-5.6-sol", expectedValid: false},
+		{name: "empty target rejected", requested: "gpt-5.6-sol", target: "", expectedValid: false},
+		{name: "legacy to exact preview accepted", requested: "gpt-5.4", target: "gpt-5.6-terra", expectedModel: "gpt-5.6-terra", expectedValid: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := &Account{Credentials: map[string]any{
+				"compact_model_mapping": map[string]any{tt.requested: tt.target},
+			}}
+			gotModel, gotValid := resolveOpenAICompactForwardModelWithValidity(account, tt.requested)
+			if gotModel != tt.expectedModel || gotValid != tt.expectedValid {
+				t.Fatalf("resolveOpenAICompactForwardModelWithValidity(...) = (%q, %v), want (%q, %v)", gotModel, gotValid, tt.expectedModel, tt.expectedValid)
+			}
+		})
+	}
+}
+
 func TestNormalizeCodexModel(t *testing.T) {
 	cases := map[string]string{
 		"gpt-5.3-codex-spark":       "gpt-5.3-codex-spark",

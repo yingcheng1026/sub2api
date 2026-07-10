@@ -282,6 +282,34 @@ func TestPolicyEnforcingFrameConn_FollowupFrameWithoutModelUsesCapturedModel(t *
 	require.Equal(t, "response.create", gjson.GetBytes(payload, "type").String())
 }
 
+func TestRewriteOpenAIWSPassthroughMappedModel_GPT56SuffixAndEffort(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"gpt-5.6-luna": "gpt-5.6-luna"},
+		},
+	}
+
+	for _, tt := range []struct {
+		name       string
+		payload    string
+		wantEffort string
+	}{
+		{name: "suffix derives effort", payload: `{"type":"response.create","model":"openai/gpt_5.6_luna_high"}`, wantEffort: "high"},
+		{name: "explicit effort wins", payload: `{"type":"response.create","model":"gpt-5.6-luna-xhigh","reasoning":{"effort":"low"}}`, wantEffort: "low"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := rewriteOpenAIWSPassthroughMappedModel(account, []byte(tt.payload))
+			require.NoError(t, err)
+			require.Equal(t, "gpt-5.6-luna", gjson.GetBytes(got, "model").String())
+			require.Equal(t, tt.wantEffort, gjson.GetBytes(got, "reasoning.effort").String())
+		})
+	}
+}
+
 // TestPolicyEnforcingFrameConn_WithoutCapturedFallbackPolicyMisses pins the
 // inverse: when the wrapper has NO capturedSessionModel fallback (model is
 // empty per-frame and no fallback is wired up), the policy fails to match
