@@ -615,6 +615,16 @@ func resolveRequestedModelInMapping(mapping map[string]string, requestedModel st
 // 如果未配置 mapping，返回 true（允许所有模型）
 func (a *Account) IsModelSupported(requestedModel string) bool {
 	mapping := a.GetModelMapping()
+	if a.Platform == PlatformOpenAI {
+		normalizedGPT56, isGPT56Family := classifyOpenAIGPT56PreviewModel(requestedModel)
+		if isGPT56Family {
+			if normalizedGPT56 == "" {
+				return false
+			}
+			_, hasExactTier := mapping[normalizedGPT56]
+			return hasExactTier
+		}
+	}
 	if len(mapping) == 0 {
 		return true // 无映射 = 允许所有
 	}

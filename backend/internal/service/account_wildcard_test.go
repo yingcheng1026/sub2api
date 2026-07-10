@@ -4,6 +4,8 @@ package service
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestMatchWildcard(t *testing.T) {
@@ -218,6 +220,39 @@ func TestAccountIsModelSupported(t *testing.T) {
 			if result != tt.expected {
 				t.Errorf("IsModelSupported(%q) = %v, want %v", tt.requestedModel, result, tt.expected)
 			}
+		})
+	}
+}
+
+func TestAccountIsModelSupported_GPT56PreviewRequiresExactMapping(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		platform    string
+		credentials map[string]any
+		model       string
+		want        bool
+	}{
+		{name: "openai no mapping rejects preview", platform: PlatformOpenAI, model: "gpt-5.6-sol", want: false},
+		{name: "openai empty mapping rejects preview", platform: PlatformOpenAI, credentials: map[string]any{}, model: "gpt-5.6-sol", want: false},
+		{name: "openai star rejects preview", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"*": "gpt-5.6-sol"}}, model: "gpt-5.6-sol", want: false},
+		{name: "openai gpt wildcard rejects preview", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-*": "gpt-5.6-sol"}}, model: "gpt-5.6-sol", want: false},
+		{name: "openai exact tier allows preview", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"}}, model: "gpt-5.6-sol", want: true},
+		{name: "openai exact base tier allows reasoning suffix", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"}}, model: "gpt-5.6-sol-high", want: true},
+		{name: "openai wildcard rejects reasoning suffix", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-*": "gpt-5.6-sol"}}, model: "gpt-5.6-sol-high", want: false},
+		{name: "openai exact terra allows preview", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-terra": "gpt-5.6-terra"}}, model: "gpt-5.6-terra", want: true},
+		{name: "openai exact luna allows preview", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-luna": "gpt-5.6-luna"}}, model: "gpt-5.6-luna", want: true},
+		{name: "openai bare family fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6": "gpt-5.6"}}, model: "gpt-5.6", want: false},
+		{name: "openai malformed tier fails closed", platform: PlatformOpenAI, credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.6-unknown": "gpt-5.6-unknown"}}, model: "gpt-5.6-unknown", want: false},
+		{name: "openai legacy no mapping behavior unchanged", platform: PlatformOpenAI, model: "gpt-5.4", want: true},
+		{name: "non openai wildcard behavior unchanged", platform: PlatformAnthropic, credentials: map[string]any{"model_mapping": map[string]any{"gpt-*": "gpt-5.6-sol"}}, model: "gpt-5.6-sol", want: true},
+		{name: "legacy claude no mapping behavior unchanged", platform: PlatformAnthropic, model: "claude-sonnet-4-5", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := &Account{Platform: tt.platform, Credentials: tt.credentials}
+			require.Equal(t, tt.want, account.IsModelSupported(tt.model))
 		})
 	}
 }

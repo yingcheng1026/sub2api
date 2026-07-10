@@ -5140,6 +5140,33 @@
     "supports_vision": true,
     "supports_web_search": true
   },
+  "gpt-5.6-sol": {
+    "cache_creation_input_token_cost": 6.25e-06,
+    "cache_read_input_token_cost": 5e-07,
+    "input_cost_per_token": 5e-06,
+    "litellm_provider": "openai",
+    "mode": "responses",
+    "output_cost_per_token": 3e-05,
+    "supports_prompt_caching": true
+  },
+  "gpt-5.6-terra": {
+    "cache_creation_input_token_cost": 3.125e-06,
+    "cache_read_input_token_cost": 2.5e-07,
+    "input_cost_per_token": 2.5e-06,
+    "litellm_provider": "openai",
+    "mode": "responses",
+    "output_cost_per_token": 1.5e-05,
+    "supports_prompt_caching": true
+  },
+  "gpt-5.6-luna": {
+    "cache_creation_input_token_cost": 1.25e-06,
+    "cache_read_input_token_cost": 1e-07,
+    "input_cost_per_token": 1e-06,
+    "litellm_provider": "openai",
+    "mode": "responses",
+    "output_cost_per_token": 6e-06,
+    "supports_prompt_caching": true
+  },
   "gpt-5.4": {
     "cache_read_input_token_cost": 2.5e-07,
     "input_cost_per_token": 2.5e-06,

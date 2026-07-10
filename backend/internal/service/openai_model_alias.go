@@ -55,6 +55,9 @@ func normalizeKnownOpenAICodexModel(model string) string {
 		return ""
 	}
 
+	if normalizedGPT56, isGPT56Family := classifyOpenAIGPT56PreviewModel(normalized); isGPT56Family {
+		return normalizedGPT56
+	}
 	if mapped := getNormalizedCodexModel(normalized); mapped != "" {
 		return mapped
 	}
@@ -83,10 +86,26 @@ func normalizeKnownOpenAICodexModel(model string) string {
 		return "gpt-5.3-codex"
 	case strings.Contains(normalized, "codex"):
 		return "gpt-5.3-codex"
+	case strings.Contains(normalized, "gpt-5.7"):
+		return ""
 	case strings.Contains(normalized, "gpt-5"):
 		return "gpt-5.4"
 	default:
 		return ""
+	}
+}
+
+func classifyOpenAIGPT56PreviewModel(model string) (normalizedModel string, isFamily bool) {
+	canonical := canonicalizeOpenAIModelAliasSpelling(model)
+	if canonical == "" || !strings.Contains(canonical, "gpt-5.6") {
+		return "", false
+	}
+	mapped := getNormalizedCodexModel(canonical)
+	switch mapped {
+	case "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna":
+		return mapped, true
+	default:
+		return "", true
 	}
 }
 

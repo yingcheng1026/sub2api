@@ -23,6 +23,35 @@ import (
 var (
 	openAIModelDatePattern     = regexp.MustCompile(`-\d{8}$`)
 	openAIModelBasePattern     = regexp.MustCompile(`^(gpt-\d+(?:\.\d+)?)(?:-|$)`)
+	openAIGPT56FallbackPricing = map[string]*LiteLLMModelPricing{
+		"gpt-5.6-sol": {
+			InputCostPerToken:           5e-6,
+			OutputCostPerToken:          30e-6,
+			CacheCreationInputTokenCost: 6.25e-6,
+			CacheReadInputTokenCost:     0.5e-6,
+			LiteLLMProvider:             "openai",
+			Mode:                        "responses",
+			SupportsPromptCaching:       true,
+		},
+		"gpt-5.6-terra": {
+			InputCostPerToken:           2.5e-6,
+			OutputCostPerToken:          15e-6,
+			CacheCreationInputTokenCost: 3.125e-6,
+			CacheReadInputTokenCost:     0.25e-6,
+			LiteLLMProvider:             "openai",
+			Mode:                        "responses",
+			SupportsPromptCaching:       true,
+		},
+		"gpt-5.6-luna": {
+			InputCostPerToken:           1e-6,
+			OutputCostPerToken:          6e-6,
+			CacheCreationInputTokenCost: 1.25e-6,
+			CacheReadInputTokenCost:     0.1e-6,
+			LiteLLMProvider:             "openai",
+			Mode:                        "responses",
+			SupportsPromptCaching:       true,
+		},
+	}
 	openAIGPT54FallbackPricing = &LiteLLMModelPricing{
 		InputCostPerToken:               2.5e-06, // $2.5 per MTok
 		OutputCostPerToken:              1.5e-05, // $15 per MTok
@@ -532,6 +561,15 @@ func (s *PricingService) GetModelPricing(modelName string) *LiteLLMModelPricing 
 
 	// 标准化模型名称（同时兼容 "models/xxx"、VertexAI 资源名等前缀）
 	modelLower := strings.ToLower(strings.TrimSpace(modelName))
+	if normalizedGPT56, isGPT56Family := classifyOpenAIGPT56PreviewModel(modelLower); isGPT56Family {
+		if normalizedGPT56 == "" {
+			return nil
+		}
+		if pricing, ok := s.pricingData[normalizedGPT56]; ok {
+			return pricing
+		}
+		return openAIGPT56FallbackPricing[normalizedGPT56]
+	}
 	lookupCandidates := s.buildModelLookupCandidates(modelLower)
 
 	// 1. 精确匹配

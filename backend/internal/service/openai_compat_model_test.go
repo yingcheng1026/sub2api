@@ -88,6 +88,18 @@ func TestNormalizeOpenAICompatRequestedModel(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAICompatRequestedModel_GPT56ExactTiers(t *testing.T) {
+	t.Parallel()
+
+	for input, expected := range map[string]string{
+		"gpt-5.6-sol-none":          "gpt-5.6-sol",
+		"gpt-5.6-terra-medium":      "gpt-5.6-terra",
+		"openai/gpt-5.6-luna-xhigh": "gpt-5.6-luna",
+	} {
+		require.Equal(t, expected, NormalizeOpenAICompatRequestedModel(input))
+	}
+}
+
 func TestApplyOpenAICompatModelNormalization(t *testing.T) {
 	t.Parallel()
 

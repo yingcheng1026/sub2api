@@ -887,6 +887,18 @@ func TestNormalizeCodexModel_RemovedModelsFallbackToSupportedTargets(t *testing.
 	}
 }
 
+func TestNormalizeCodexModel_GPT56ExactTierAliases(t *testing.T) {
+	t.Parallel()
+
+	for input, expected := range map[string]string{
+		"gpt-5.6-sol-high":          "gpt-5.6-sol",
+		"openai/gpt-5.6-terra":      "gpt-5.6-terra",
+		"OPENAI/GPT-5.6-LUNA-XHIGH": "gpt-5.6-luna",
+	} {
+		require.Equal(t, expected, normalizeCodexModel(input))
+	}
+}
+
 func TestApplyCodexOAuthTransform_PreservesBareSparkModel(t *testing.T) {
 	reqBody := map[string]any{
 		"model": "gpt-5.3-codex-spark",
