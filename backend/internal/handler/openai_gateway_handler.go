@@ -81,6 +81,13 @@ func openAISelectedAccountSupportsRoutingModel(account *service.Account, routing
 	return routingModel == "" || account.IsModelSupported(routingModel)
 }
 
+func openAIWSChannelMappingKeepsCanonicalModel(requestedModel string, channelMapping service.ChannelMappingResult) bool {
+	if !channelMapping.Mapped {
+		return true
+	}
+	return service.OpenAIWSSameCanonicalModel(requestedModel, channelMapping.MappedModel)
+}
+
 // NewOpenAIGatewayHandler creates a new OpenAIGatewayHandler
 func NewOpenAIGatewayHandler(
 	gatewayService *service.OpenAIGatewayService,
@@ -1301,6 +1308,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
+	if !openAIWSChannelMappingKeepsCanonicalModel(reqModel, channelMappingWS) {
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "websocket channel model mapping cannot change the persistent connection model")
+		return
+	}
 	routingModel, routingValid := resolveOpenAIAccountRoutingModel(reqModel, "", channelMappingWS)
 	if !routingValid {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "invalid GPT-5.6 preview model mapping")

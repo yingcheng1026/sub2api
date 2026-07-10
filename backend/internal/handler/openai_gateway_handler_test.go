@@ -570,6 +570,26 @@ func TestOpenAISelectedAccountSupportsRoutingModel(t *testing.T) {
 	require.False(t, openAISelectedAccountSupportsRoutingModel(nil, "gpt-5.4"))
 }
 
+func TestOpenAIWSChannelMappingKeepsCanonicalModel(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested string
+		mapping   service.ChannelMappingResult
+		want      bool
+	}{
+		{name: "no mapping", requested: "gpt-5.4", want: true},
+		{name: "same base suffix remains compatible", requested: "gpt-5.6-luna-low", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "openai/gpt-5.6-luna-xhigh"}, want: true},
+		{name: "cross model mapping rejected", requested: "gpt-5.4", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6-luna"}, want: false},
+		{name: "custom provider namespace change rejected", requested: "provider-a/gpt-custom", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "provider-b/gpt-custom"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, openAIWSChannelMappingKeepsCanonicalModel(tt.requested, tt.mapping))
+		})
+	}
+}
+
 func TestPreserveOpenAIMessagesDispatchSub2BillingSource(t *testing.T) {
 	t.Run("claude_dispatch_keeps_native_sub2_billing_basis", func(t *testing.T) {
 		fields := preserveOpenAIMessagesDispatchSub2BillingSource(service.ChannelUsageFields{}, "claude-opus-4-7", "gpt-5.5")

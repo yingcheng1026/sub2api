@@ -227,6 +227,35 @@ type OpenAIWSIngressHooks struct {
 	AfterTurn           func(turn int, result *OpenAIForwardResult, turnErr error)
 }
 
+func canonicalOpenAIWSSessionModelSlug(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if normalized := normalizeKnownOpenAICodexModel(model); normalized != "" {
+		return normalized
+	}
+	segments := strings.Split(strings.ToLower(model), "/")
+	for i, segment := range segments {
+		segment = strings.ReplaceAll(strings.TrimSpace(segment), "_", "-")
+		segment = strings.Join(strings.Fields(segment), "-")
+		for strings.Contains(segment, "--") {
+			segment = strings.ReplaceAll(segment, "--", "-")
+		}
+		segments[i] = segment
+	}
+	return strings.Join(segments, "/")
+}
+
+// OpenAIWSSameCanonicalModel reports whether two client-visible WS models
+// resolve to the same stable model base. Unknown provider namespaces remain
+// part of the identity and therefore cannot collide by basename alone.
+func OpenAIWSSameCanonicalModel(left, right string) bool {
+	leftCanonical := canonicalOpenAIWSSessionModelSlug(left)
+	rightCanonical := canonicalOpenAIWSSessionModelSlug(right)
+	return leftCanonical != "" && leftCanonical == rightCanonical
+}
+
 func resolveOpenAIWSSessionCanonicalModel(account *Account, model string) (string, bool) {
 	model = strings.TrimSpace(model)
 	if account == nil || model == "" {
@@ -240,14 +269,8 @@ func resolveOpenAIWSSessionCanonicalModel(account *Account, model string) (strin
 	if mappedModel == "" {
 		return "", false
 	}
-	if normalized := normalizeKnownOpenAICodexModel(mappedModel); normalized != "" {
-		return normalized, true
-	}
-	if canonical := canonicalizeOpenAIModelAliasSpelling(NormalizeOpenAICompatRequestedModel(mappedModel)); canonical != "" {
-		return canonical, true
-	}
-	fallback := strings.ToLower(lastOpenAIModelSegment(NormalizeOpenAICompatRequestedModel(mappedModel)))
-	return fallback, fallback != ""
+	canonical := canonicalOpenAIWSSessionModelSlug(mappedModel)
+	return canonical, canonical != ""
 }
 
 func validateOpenAIWSSessionModel(account *Account, initialCanonicalModel, candidateModel string) error {

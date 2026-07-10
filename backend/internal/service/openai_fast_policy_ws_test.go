@@ -1099,6 +1099,22 @@ func TestOpenAIWSSessionCanonicalModelGuard(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestOpenAIWSSessionCanonicalModelGuard_PreservesUnknownProviderNamespace(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"provider-a/gpt-custom": "provider-a/gpt-custom",
+			"provider-b/gpt-custom": "provider-b/gpt-custom",
+		}},
+	}
+
+	initial, ok := resolveOpenAIWSSessionCanonicalModel(account, "provider-a/gpt-custom")
+	require.True(t, ok)
+	require.Equal(t, "provider-a/gpt-custom", initial)
+	require.NoError(t, validateOpenAIWSSessionModel(account, initial, "provider-a/gpt-custom"))
+	require.Error(t, validateOpenAIWSSessionModel(account, initial, "provider-b/gpt-custom"))
+}
+
 // TestPassthroughBilling_BlockedFrameDoesNotMutateServiceTier locks in the
 // "block keeps previous" semantic: when policy returns block on a
 // response.create frame, that frame is never sent upstream, so billing tier
