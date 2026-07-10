@@ -1105,6 +1105,10 @@ func TestOpenAIWSSessionCanonicalModelGuard_PreservesUnknownProviderNamespace(t 
 		Credentials: map[string]any{"model_mapping": map[string]any{
 			"provider-a/gpt-custom": "provider-a/gpt-custom",
 			"provider-b/gpt-custom": "provider-b/gpt-custom",
+			"provider-a/gpt-5.4":    "provider-a/gpt-5.4",
+			"provider-b/gpt-5.4":    "provider-b/gpt-5.4",
+			"provider-a/gpt-5.8":    "provider-a/gpt-5.8",
+			"provider-a/gpt-5.9":    "provider-a/gpt-5.9",
 		}},
 	}
 
@@ -1113,6 +1117,29 @@ func TestOpenAIWSSessionCanonicalModelGuard_PreservesUnknownProviderNamespace(t 
 	require.Equal(t, "provider-a/gpt-custom", initial)
 	require.NoError(t, validateOpenAIWSSessionModel(account, initial, "provider-a/gpt-custom"))
 	require.Error(t, validateOpenAIWSSessionModel(account, initial, "provider-b/gpt-custom"))
+
+	known, ok := resolveOpenAIWSSessionCanonicalModel(account, "provider-a/gpt-5.4")
+	require.True(t, ok)
+	require.Equal(t, "provider-a/gpt-5.4", known)
+	require.Error(t, validateOpenAIWSSessionModel(account, known, "provider-b/gpt-5.4"))
+
+	future, ok := resolveOpenAIWSSessionCanonicalModel(account, "provider-a/gpt-5.8")
+	require.True(t, ok)
+	require.Equal(t, "provider-a/gpt-5.8", future)
+	require.Error(t, validateOpenAIWSSessionModel(account, future, "provider-a/gpt-5.9"))
+}
+
+func TestOpenAIWSSessionFrameModelGuard_RejectsBinaryBypass(t *testing.T) {
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	initial, ok := resolveOpenAIWSSessionCanonicalModel(account, "gpt-5.4")
+	require.True(t, ok)
+
+	require.NoError(t, validateOpenAIWSSessionFrameModel(account, initial, coderws.MessageBinary,
+		[]byte(`{"type":"response.create","model":"gpt-5.4-high"}`)))
+	require.Error(t, validateOpenAIWSSessionFrameModel(account, initial, coderws.MessageBinary,
+		[]byte(`{"type":"response.create","model":"gpt-5.5"}`)))
+	require.Error(t, validateOpenAIWSSessionFrameModel(account, initial, coderws.MessageBinary,
+		[]byte{0xff, 0x00, 0x01}))
 }
 
 // TestPassthroughBilling_BlockedFrameDoesNotMutateServiceTier locks in the

@@ -232,9 +232,6 @@ func canonicalOpenAIWSSessionModelSlug(model string) string {
 	if model == "" {
 		return ""
 	}
-	if normalized := normalizeKnownOpenAICodexModel(model); normalized != "" {
-		return normalized
-	}
 	segments := strings.Split(strings.ToLower(model), "/")
 	for i, segment := range segments {
 		segment = strings.ReplaceAll(strings.TrimSpace(segment), "_", "-")
@@ -244,7 +241,31 @@ func canonicalOpenAIWSSessionModelSlug(model string) string {
 		}
 		segments[i] = segment
 	}
-	return strings.Join(segments, "/")
+	if len(segments) > 1 {
+		last := len(segments) - 1
+		if canonical := canonicalizeOpenAIModelAliasSpelling(segments[last]); canonical != "" {
+			segments[last] = canonical
+		}
+		return strings.Join(segments, "/")
+	}
+
+	canonical := segments[0]
+	if normalized := canonicalizeOpenAIModelAliasSpelling(canonical); normalized != "" {
+		canonical = normalized
+	}
+	if previewTier, isPreviewFamily := classifyOpenAIGPT56PreviewModel(canonical); isPreviewFamily {
+		if previewTier != "" {
+			return previewTier
+		}
+		return canonical
+	}
+	if normalized := getNormalizedCodexModel(canonical); normalized != "" {
+		switch normalized {
+		case "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5":
+			return normalized
+		}
+	}
+	return canonical
 }
 
 // OpenAIWSSameCanonicalModel reports whether two client-visible WS models
@@ -285,6 +306,20 @@ func validateOpenAIWSSessionModel(account *Account, initialCanonicalModel, candi
 		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "websocket model cannot change within a connection", nil)
 	}
 	return nil
+}
+
+func validateOpenAIWSSessionFrameModel(account *Account, initialCanonicalModel string, msgType coderws.MessageType, payload []byte) error {
+	if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
+		return nil
+	}
+	if msgType == coderws.MessageBinary && !gjson.ValidBytes(payload) {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "binary websocket client frames must contain valid JSON", nil)
+	}
+	candidateModel := openAIWSPassthroughRequestModelForFrame(payload)
+	if candidateModel == "" {
+		candidateModel = openAIWSPassthroughRequestModelFromSessionFrame(payload)
+	}
+	return validateOpenAIWSSessionModel(account, initialCanonicalModel, candidateModel)
 }
 
 func normalizeOpenAIWSLogValue(value string) string {

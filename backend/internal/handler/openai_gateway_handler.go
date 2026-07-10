@@ -85,7 +85,23 @@ func openAIWSChannelMappingKeepsCanonicalModel(requestedModel string, channelMap
 	if !channelMapping.Mapped {
 		return true
 	}
-	return service.OpenAIWSSameCanonicalModel(requestedModel, channelMapping.MappedModel)
+	requestedModel = strings.TrimSpace(requestedModel)
+	mappedModel := strings.TrimSpace(channelMapping.MappedModel)
+	_, requestedIsPreview := service.NormalizeOpenAIGPT56PreviewModel(requestedModel)
+	_, mappedIsPreview := service.NormalizeOpenAIGPT56PreviewModel(mappedModel)
+	if requestedIsPreview || mappedIsPreview {
+		return requestedModel != "" && requestedModel == mappedModel
+	}
+	if service.OpenAIWSSameCanonicalModel(requestedModel, mappedModel) {
+		return true
+	}
+	stripOpenAIPrefix := func(model string) string {
+		if strings.HasPrefix(strings.ToLower(model), "openai/") {
+			return strings.TrimSpace(model[len("openai/"):])
+		}
+		return model
+	}
+	return service.OpenAIWSSameCanonicalModel(stripOpenAIPrefix(requestedModel), stripOpenAIPrefix(mappedModel))
 }
 
 // NewOpenAIGatewayHandler creates a new OpenAIGatewayHandler

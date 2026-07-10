@@ -578,7 +578,9 @@ func TestOpenAIWSChannelMappingKeepsCanonicalModel(t *testing.T) {
 		want      bool
 	}{
 		{name: "no mapping", requested: "gpt-5.4", want: true},
-		{name: "same base suffix remains compatible", requested: "gpt-5.6-luna-low", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "openai/gpt-5.6-luna-xhigh"}, want: true},
+		{name: "same exact preview spelling remains compatible", requested: "gpt-5.6-luna-low", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6-luna-low"}, want: true},
+		{name: "preview reasoning suffix rewrite rejected", requested: "gpt-5.6-luna-low", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6-luna-xhigh"}, want: false},
+		{name: "legacy same base suffix remains compatible", requested: "gpt-5.4-low", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "openai/gpt-5.4-xhigh"}, want: true},
 		{name: "cross model mapping rejected", requested: "gpt-5.4", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "gpt-5.6-luna"}, want: false},
 		{name: "custom provider namespace change rejected", requested: "provider-a/gpt-custom", mapping: service.ChannelMappingResult{Mapped: true, MappedModel: "provider-b/gpt-custom"}, want: false},
 	}

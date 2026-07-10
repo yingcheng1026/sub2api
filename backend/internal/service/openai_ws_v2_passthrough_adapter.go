@@ -450,14 +450,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		// capturedSessionModel 的读写都发生在该 goroutine 内，因此无需
 		// 加锁/原子化。
 		filter: func(msgType coderws.MessageType, payload []byte) ([]byte, *OpenAIFastBlockedError, error) {
-			if msgType != coderws.MessageText {
+			if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 				return payload, nil, nil
 			}
-			candidateModel := openAIWSPassthroughRequestModelForFrame(payload)
-			if candidateModel == "" {
-				candidateModel = openAIWSPassthroughRequestModelFromSessionFrame(payload)
-			}
-			if err := validateOpenAIWSSessionModel(account, initialCanonicalRoutingModel, candidateModel); err != nil {
+			if err := validateOpenAIWSSessionFrameModel(account, initialCanonicalRoutingModel, msgType, payload); err != nil {
 				return payload, nil, err
 			}
 			if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" && hooks != nil && hooks.BeforeRequest != nil {
