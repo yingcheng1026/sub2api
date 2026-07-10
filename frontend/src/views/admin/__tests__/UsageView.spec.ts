@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import UsageView from '../UsageView.vue'
 
-const { list, getStats, getSnapshotV2, getById } = vi.hoisted(() => {
+const { list, exportList, getStats, getSnapshotV2, getModelStats, getById, aoaToSheet, sheetAddAoa, saveAs } = vi.hoisted(() => {
   vi.stubGlobal('localStorage', {
     getItem: vi.fn(() => null),
     setItem: vi.fn(),
@@ -12,9 +12,14 @@ const { list, getStats, getSnapshotV2, getById } = vi.hoisted(() => {
 
   return {
     list: vi.fn(),
+    exportList: vi.fn(),
     getStats: vi.fn(),
     getSnapshotV2: vi.fn(),
+    getModelStats: vi.fn(),
     getById: vi.fn(),
+    aoaToSheet: vi.fn(() => ({})),
+    sheetAddAoa: vi.fn(),
+    saveAs: vi.fn(),
   }
 })
 
@@ -23,6 +28,15 @@ const messages: Record<string, string> = {
   'admin.dashboard.day': 'Day',
   'admin.dashboard.hour': 'Hour',
   'admin.usage.failedToLoadUser': 'Failed to load user',
+  'usage.time': 'Time',
+  'admin.usage.user': 'User',
+  'usage.apiKeyFilter': 'API Key',
+  'admin.usage.account': 'Account',
+  'usage.requestedModel': 'Requested',
+  'usage.executedModel': 'Executed',
+  'usage.upstreamModel': 'Upstream',
+  'usage.billingModel': 'Billing',
+  'usage.compatibilityMode': 'Compatibility',
 }
 
 const formatLocalDate = (date: Date): string => {
@@ -40,6 +54,7 @@ vi.mock('@/api/admin', () => ({
     },
     dashboard: {
       getSnapshotV2,
+      getModelStats,
     },
     users: {
       getById,
@@ -49,9 +64,21 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('@/api/admin/usage', () => ({
   adminUsageAPI: {
-    list: vi.fn(),
+    list: exportList,
   },
 }))
+
+vi.mock('xlsx', () => ({
+  utils: {
+    aoa_to_sheet: aoaToSheet,
+    sheet_add_aoa: sheetAddAoa,
+    book_new: vi.fn(() => ({})),
+    book_append_sheet: vi.fn(),
+  },
+  write: vi.fn(() => new Uint8Array()),
+}))
+
+vi.mock('file-saver', () => ({ saveAs }))
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
@@ -83,12 +110,15 @@ vi.mock('vue-router', () => ({
 }))
 
 const AppLayoutStub = { template: '<div><slot /></div>' }
-const UsageFiltersStub = { template: '<div><slot name="after-reset" /></div>' }
+const UsageFiltersStub = {
+  emits: ['export'],
+  template: '<div><button data-test="export" @click="$emit(\'export\')">export</button><slot name="after-reset" /></div>'
+}
 const ModelDistributionChartStub = {
-  props: ['metric'],
-  emits: ['update:metric'],
+  props: ['metric', 'source'],
+  emits: ['update:metric', 'update:source'],
   template: `
-    <div data-test="model-chart">
+    <div data-test="model-chart" :data-source="source">
       <span class="metric">{{ metric }}</span>
       <button class="switch-metric" @click="$emit('update:metric', 'actual_cost')">switch</button>
     </div>
@@ -111,7 +141,12 @@ describe('admin UsageView distribution metric toggles', () => {
     list.mockReset()
     getStats.mockReset()
     getSnapshotV2.mockReset()
+    getModelStats.mockReset()
     getById.mockReset()
+    exportList.mockReset()
+    aoaToSheet.mockClear()
+    sheetAddAoa.mockClear()
+    saveAs.mockClear()
 
     list.mockResolvedValue({
       items: [],
@@ -133,6 +168,7 @@ describe('admin UsageView distribution metric toggles', () => {
       models: [],
       groups: [],
     })
+    getModelStats.mockResolvedValue({ models: [] })
   })
 
   afterEach(() => {
@@ -165,6 +201,7 @@ describe('admin UsageView distribution metric toggles', () => {
     await flushPromises()
 
     expect(getSnapshotV2).toHaveBeenCalledTimes(1)
+    expect(getModelStats).toHaveBeenCalledWith(expect.objectContaining({ model_source: 'upstream' }))
     const now = new Date()
     const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
     expect(getSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({
@@ -177,6 +214,7 @@ describe('admin UsageView distribution metric toggles', () => {
     const groupChart = wrapper.find('[data-test="group-chart"]')
 
     expect(modelChart.find('.metric').text()).toBe('tokens')
+    expect(modelChart.attributes('data-source')).toBe('upstream')
     expect(groupChart.find('.metric').text()).toBe('tokens')
 
     await modelChart.find('.switch-metric').trigger('click')
@@ -192,5 +230,67 @@ describe('admin UsageView distribution metric toggles', () => {
     expect(modelChart.find('.metric').text()).toBe('actual_cost')
     expect(groupChart.find('.metric').text()).toBe('actual_cost')
     expect(getSnapshotV2).toHaveBeenCalledTimes(1)
+  })
+
+  it('exports requested, executed, upstream, billing and compatibility identities', async () => {
+    exportList.mockResolvedValue({
+      total: 1,
+      items: [{
+        created_at: '2026-07-10T10:00:00Z',
+        requested_model: 'claude-sonnet-4-6',
+        model: 'gpt-5.5',
+        upstream_model: 'gpt-5.5',
+        billing_model: 'gpt-5.5',
+        compat_mode: 'legacy_claude_alias',
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        input_cost: 0,
+        output_cost: 0,
+        cache_read_cost: 0,
+        cache_creation_cost: 0,
+        rate_multiplier: 1,
+        total_cost: 0,
+        actual_cost: 0,
+        duration_ms: 10,
+      }],
+    })
+
+    const wrapper = mount(UsageView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          UsageStatsCards: true,
+          UsageFilters: UsageFiltersStub,
+          UsageTable: true,
+          UsageExportProgress: true,
+          UsageCleanupDialog: true,
+          UserBalanceHistoryModal: true,
+          Pagination: true,
+          Select: true,
+          DateRangePicker: true,
+          Icon: true,
+          TokenUsageTrend: true,
+          ModelDistributionChart: ModelDistributionChartStub,
+          GroupDistributionChart: GroupDistributionChartStub,
+        },
+      },
+    })
+    await flushPromises()
+    await wrapper.find('[data-test="export"]').trigger('click')
+    await flushPromises()
+
+    const headers = aoaToSheet.mock.calls[0][0][0]
+    expect(headers.slice(4, 9)).toEqual(['Requested', 'Executed', 'Upstream', 'Billing', 'Compatibility'])
+    const row = sheetAddAoa.mock.calls[0][1][0]
+    expect(row.slice(4, 9)).toEqual([
+      'claude-sonnet-4-6',
+      'gpt-5.5',
+      'gpt-5.5',
+      'gpt-5.5',
+      'legacy_claude_alias',
+    ])
+    expect(saveAs).toHaveBeenCalledOnce()
   })
 })

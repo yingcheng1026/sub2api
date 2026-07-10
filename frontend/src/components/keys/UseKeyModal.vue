@@ -176,6 +176,14 @@ const copiedIndex = ref<number | null>(null)
 const activeTab = ref<string>('unix')
 const activeClientTab = ref<string>('claude')
 
+const OPENAI_CLAUDE_CODE_MODELS = {
+  ANTHROPIC_MODEL: 'gpt-5.5',
+  ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-5.5',
+  ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-5.4',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-5.4-mini',
+  CLAUDE_CODE_SUBAGENT_MODEL: 'inherit'
+} as const
+
 // Reset tabs when platform changes
 const defaultClientTab = computed(() => {
   switch (props.platform) {
@@ -415,7 +423,7 @@ const currentFiles = computed((): FileConfig[] => {
   switch (props.platform) {
     case 'openai':
       if (activeClientTab.value === 'claude') {
-        return generateAnthropicFiles(baseUrl, apiKey)
+        return generateOpenAINativeClaudeFiles(baseUrl, apiKey)
       }
       if (activeClientTab.value === 'codex-ws') {
         return generateOpenAIWsFiles(baseUrl, apiKey)
@@ -432,6 +440,63 @@ const currentFiles = computed((): FileConfig[] => {
       return generateAnthropicFiles(baseUrl, apiKey)
   }
 })
+
+function generateOpenAINativeClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] {
+  const modelEntries = Object.entries(OPENAI_CLAUDE_CODE_MODELS)
+  let path: string
+  let content: string
+
+  switch (activeTab.value) {
+    case 'unix':
+      path = 'Terminal'
+      content = [
+        `export ANTHROPIC_BASE_URL="${baseUrl}"`,
+        `export ANTHROPIC_AUTH_TOKEN="${apiKey}"`,
+        'export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+        ...modelEntries.map(([name, model]) => `export ${name}="${model}"`)
+      ].join('\n')
+      break
+    case 'cmd':
+      path = 'Command Prompt'
+      content = [
+        `set ANTHROPIC_BASE_URL=${baseUrl}`,
+        `set ANTHROPIC_AUTH_TOKEN=${apiKey}`,
+        'set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+        ...modelEntries.map(([name, model]) => `set ${name}=${model}`)
+      ].join('\n')
+      break
+    case 'powershell':
+      path = 'PowerShell'
+      content = [
+        `$env:ANTHROPIC_BASE_URL="${baseUrl}"`,
+        `$env:ANTHROPIC_AUTH_TOKEN="${apiKey}"`,
+        '$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+        ...modelEntries.map(([name, model]) => `$env:${name}="${model}"`)
+      ].join('\n')
+      break
+    default:
+      path = 'Terminal'
+      content = ''
+  }
+
+  const settingsPath = activeTab.value === 'unix'
+    ? '~/.claude/settings.json'
+    : '%userprofile%\\.claude\\settings.json'
+  const settingsContent = JSON.stringify({
+    env: {
+      ANTHROPIC_BASE_URL: baseUrl,
+      ANTHROPIC_AUTH_TOKEN: apiKey,
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      CLAUDE_CODE_ATTRIBUTION_HEADER: '0',
+      ...OPENAI_CLAUDE_CODE_MODELS
+    }
+  }, null, 2)
+
+  return [
+    { path, content },
+    { path: settingsPath, content: settingsContent, hint: 'VSCode Claude Code' }
+  ]
+}
 
 function generateAnthropicFiles(baseUrl: string, apiKey: string): FileConfig[] {
   let path: string

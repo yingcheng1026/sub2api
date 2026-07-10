@@ -22,6 +22,15 @@ const messages: Record<string, string> = {
   'usage.original': 'Original',
   'usage.userBilled': 'User billed',
   'usage.accountBilled': 'Account billed',
+  'usage.executedModel': 'Executed',
+  'usage.requestedModel': 'Requested',
+  'usage.upstreamModel': 'Upstream',
+  'usage.billingModel': 'Billing',
+  'usage.compatibilityMode': 'Compatibility',
+  'usage.compatNativeGPT': 'Native GPT',
+  'usage.compatLegacyClaudeAlias': 'Legacy Claude alias',
+  'usage.compatOtherHistorical': 'Other / historical',
+  'usage.mapping': 'Mapping',
 }
 
 vi.mock('vue-i18n', async () => {
@@ -131,11 +140,14 @@ describe('admin UsageTable tooltip', () => {
     expect(wrapper.find('.data-table-stub').attributes('data-page-vertical-scroll')).toBe('true')
   })
 
-  it('shows requested and upstream models separately for admin rows', () => {
+  it('shows executed, requested, upstream and billing identities separately', () => {
     const row = {
       request_id: 'req-admin-model-1',
-      model: 'claude-sonnet-4',
-      upstream_model: 'claude-sonnet-4-20250514',
+      requested_model: 'claude-sonnet-4-6',
+      model: 'gpt-5.5',
+      upstream_model: 'gpt-5.5',
+      billing_model: 'gpt-5.5',
+      compat_mode: 'legacy_claude_alias',
       actual_cost: 0,
       total_cost: 0,
       account_rate_multiplier: 1,
@@ -164,8 +176,50 @@ describe('admin UsageTable tooltip', () => {
       },
     })
 
-    const text = wrapper.text()
-    expect(text).toContain('claude-sonnet-4')
-    expect(text).toContain('claude-sonnet-4-20250514')
+    const modelCell = wrapper.find('.usage-model-identities')
+    expect(modelCell.find('[data-model-identity="executed"]').text()).toBe('gpt-5.5')
+    expect(modelCell.find('[data-model-identity="requested"]').text()).toContain('Requested: claude-sonnet-4-6')
+    expect(modelCell.find('[data-model-identity="upstream"]').text()).toContain('Upstream: gpt-5.5')
+    expect(modelCell.find('[data-model-identity="billing"]').text()).toContain('Billing: gpt-5.5')
+    expect(modelCell.find('[data-compat-mode="legacy_claude_alias"]').text()).toContain('Legacy Claude alias')
+  })
+
+  it('renders hostile model identity strings as text without creating image nodes', () => {
+    const payload = '<img src=x onerror=alert(1)>'
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [{
+          request_id: 'req-admin-model-xss',
+          requested_model: payload,
+          model: payload,
+          upstream_model: payload,
+          billing_model: payload,
+          compat_mode: 'other',
+          actual_cost: 0,
+          total_cost: 0,
+          account_rate_multiplier: 1,
+          rate_multiplier: 1,
+          input_cost: 0,
+          output_cost: 0,
+          cache_creation_cost: 0,
+          cache_read_cost: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+        }],
+        loading: false,
+        columns: [],
+      },
+      global: {
+        stubs: {
+          DataTable: DataTableStub,
+          EmptyState: true,
+          Icon: true,
+          Teleport: true,
+        },
+      },
+    })
+
+    expect(wrapper.text()).toContain(payload)
+    expect(wrapper.find('img').exists()).toBe(false)
   })
 })

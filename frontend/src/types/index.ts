@@ -1160,6 +1160,7 @@ export interface AdminDataImportResult {
 
 export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation'
 export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2'
+export type UsageCompatMode = 'native_gpt' | 'legacy_claude_alias' | 'other'
 
 export interface UsageLog {
   id: number
@@ -1225,7 +1226,10 @@ export interface UsageLogAccountSummary {
 }
 
 export interface AdminUsageLog extends UsageLog {
+  requested_model: string
   upstream_model?: string | null
+  billing_model?: string | null
+  compat_mode: UsageCompatMode
   model_mapping_chain?: string | null
 
   // 账号计费倍率（仅管理员可见）

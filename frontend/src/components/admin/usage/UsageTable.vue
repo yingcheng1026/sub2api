@@ -35,23 +35,55 @@
         </template>
 
         <template #cell-model="{ row }">
-          <div v-if="row.model_mapping_chain && row.model_mapping_chain.includes('→')" class="space-y-0.5 text-xs">
-            <div v-for="(step, i) in row.model_mapping_chain.split('→')" :key="i"
-                 class="break-all"
-                 :class="i === 0 ? 'font-medium text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'"
-                 :style="i > 0 ? `padding-left: ${i * 0.75}rem` : ''">
-              <span v-if="i > 0" class="mr-0.5">↳</span>{{ step }}
-            </div>
-          </div>
-          <div v-else-if="row.upstream_model && row.upstream_model !== row.model" class="space-y-0.5 text-xs">
-            <div class="break-all font-medium text-gray-900 dark:text-white">
+          <div class="usage-model-identities max-w-[320px] space-y-1 text-xs">
+            <div
+              data-model-identity="executed"
+              class="break-all text-sm font-semibold text-gray-900 dark:text-white"
+            >
               {{ row.model }}
             </div>
-            <div class="break-all text-gray-500 dark:text-gray-400">
-              <span class="mr-0.5">↳</span>{{ row.upstream_model }}
+            <div
+              v-if="row.requested_model"
+              data-model-identity="requested"
+              class="break-all text-gray-600 dark:text-gray-300"
+            >
+              <span class="font-medium text-gray-500 dark:text-gray-400">{{ t('usage.requestedModel') }}:</span>
+              {{ row.requested_model }}
+            </div>
+            <div
+              v-if="row.upstream_model"
+              data-model-identity="upstream"
+              class="break-all text-gray-600 dark:text-gray-300"
+            >
+              <span class="font-medium text-gray-500 dark:text-gray-400">{{ t('usage.upstreamModel') }}:</span>
+              {{ row.upstream_model }}
+            </div>
+            <div
+              v-if="row.billing_model"
+              data-model-identity="billing"
+              class="break-all text-gray-600 dark:text-gray-300"
+            >
+              <span class="font-medium text-gray-500 dark:text-gray-400">{{ t('usage.billingModel') }}:</span>
+              {{ row.billing_model }}
+            </div>
+            <div v-if="row.compat_mode" class="flex flex-wrap items-center gap-1.5">
+              <span class="font-medium text-gray-500 dark:text-gray-400">{{ t('usage.compatibilityMode') }}:</span>
+              <span
+                :data-compat-mode="row.compat_mode"
+                class="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
+                :class="getCompatModeBadgeClass(row.compat_mode)"
+              >
+                {{ getCompatModeLabel(row.compat_mode) }}
+              </span>
+            </div>
+            <div
+              v-if="row.model_mapping_chain"
+              class="break-all text-gray-500 dark:text-gray-400"
+            >
+              <span class="font-medium">{{ t('usage.mapping') }}:</span>
+              {{ row.model_mapping_chain }}
             </div>
           </div>
-          <span v-else class="font-medium text-gray-900 dark:text-white">{{ row.model }}</span>
         </template>
 
         <template #cell-reasoning_effort="{ row }">
@@ -433,6 +465,22 @@ const getRequestTypeBadgeClass = (row: AdminUsageLog): string => {
   if (requestType === 'stream') return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
   if (requestType === 'sync') return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
   return 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200'
+}
+
+const getCompatModeLabel = (mode: AdminUsageLog['compat_mode']): string => {
+  if (mode === 'native_gpt') return t('usage.compatNativeGPT')
+  if (mode === 'legacy_claude_alias') return t('usage.compatLegacyClaudeAlias')
+  return t('usage.compatOtherHistorical')
+}
+
+const getCompatModeBadgeClass = (mode: AdminUsageLog['compat_mode']): string => {
+  if (mode === 'native_gpt') {
+    return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200'
+  }
+  if (mode === 'legacy_claude_alias') {
+    return 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200'
+  }
+  return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
 }
 
 
