@@ -54,11 +54,10 @@ func TestNormalizeKnownOpenAICodexModel_UnknownGPT56FailsClosed(t *testing.T) {
 	}
 }
 
-func TestDefaultOpenAIModels_GPT56ExactTiers(t *testing.T) {
+func TestDefaultOpenAIModels_HideGPT56PreviewTiers(t *testing.T) {
 	t.Parallel()
 
-	require.ElementsMatch(t, []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"},
-		filterGPT56ModelIDs(openaiModels.DefaultModelIDs()))
+	require.Empty(t, filterGPT56ModelIDs(openaiModels.DefaultModelIDs()))
 }
 
 func filterGPT56ModelIDs(modelIDs []string) []string {
