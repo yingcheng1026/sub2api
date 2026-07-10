@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
@@ -791,6 +792,88 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyGenerationUsesConfiguredV1BaseU
 	require.True(t, auditCalled)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "aGVsbG8=", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
+}
+
+func TestOpenAIGatewayServiceForwardImages_UpstreamZeroImagesDoesNotUseRequestedCount(t *testing.T) {
+	for _, accountType := range []string{AccountTypeAPIKey, AccountTypeOAuth} {
+		t.Run(accountType, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			body := []byte(`{"model":"gpt-image-2","prompt":"draw","size":"1024x1024","n":3}`)
+			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = req
+			responseBody := `{"created":1710000007,"data":[]}`
+			responseType := "application/json"
+			if accountType == AccountTypeOAuth {
+				responseType = "text/event-stream"
+				responseBody = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_zero_images\",\"created_at\":1710000007,\"usage\":{\"input_tokens\":2,\"output_tokens\":1},\"output\":[]}}\n\n" +
+					"data: [DONE]\n\n"
+			}
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{responseType}, "X-Request-Id": []string{"req_zero_images"}},
+				Body:       io.NopCloser(strings.NewReader(responseBody)),
+			}}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+			require.NoError(t, err)
+			credentials := map[string]any{"api_key": "test-key"}
+			if accountType == AccountTypeOAuth {
+				credentials = map[string]any{"access_token": "test-token", "chatgpt_account_id": "acct-test"}
+			}
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: accountType, Credentials: credentials}
+
+			result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "",
+				WithOpenAIImagesBillingPreflight(OpenAIForwardOptions{RequestedModel: "gpt-image-2", RequirePricingPreflight: true}),
+			)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Zero(t, result.ImageCount)
+			require.NotEqual(t, parsed.N, result.ImageCount)
+		})
+	}
+}
+
+func TestOpenAIGatewayServiceHandleImagesStream_EOFWithoutTerminalIsUnknown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"type\":\"image_generation.partial_image\",\"partial_image_index\":0,\"b64_json\":\"cGFydGlhbA==\"}\n\n",
+		)),
+	}
+
+	_, imageCount, _, err := (&OpenAIGatewayService{cfg: &config.Config{}}).
+		handleOpenAIImagesStreamingResponse(resp, c, time.Now())
+
+	require.ErrorContains(t, err, "incomplete")
+	require.Zero(t, imageCount)
+}
+
+func TestOpenAIGatewayServiceHandleImagesStream_TerminalZeroImagesIsAuthoritative(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n" +
+				"data: [DONE]\n\n",
+		)),
+	}
+
+	_, imageCount, _, err := (&OpenAIGatewayService{cfg: &config.Config{}}).
+		handleOpenAIImagesStreamingResponse(resp, c, time.Now())
+
+	require.NoError(t, err)
+	require.Zero(t, imageCount)
 }
 
 func TestOpenAIGatewayServiceForwardImages_APIKeyOutputAuditBlocksBeforeWrite(t *testing.T) {

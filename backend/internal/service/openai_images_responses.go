@@ -563,9 +563,6 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthNonStreamingResponse(
 	if err != nil {
 		return OpenAIUsage{}, 0, err
 	}
-	if len(results) == 0 {
-		return OpenAIUsage{}, 0, fmt.Errorf("upstream did not return image output")
-	}
 	if strings.TrimSpace(firstMeta.Model) == "" {
 		firstMeta.Model = strings.TrimSpace(fallbackModel)
 	}
@@ -574,8 +571,10 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthNonStreamingResponse(
 	if err != nil {
 		return OpenAIUsage{}, 0, err
 	}
-	if err := s.auditOpenAIImagesOutput(ctx, responseBody, resp.Header, resp.Header.Get("x-request-id"), options); err != nil {
-		return usage, len(results), err
+	if len(results) > 0 {
+		if err := s.auditOpenAIImagesOutput(ctx, responseBody, resp.Header, resp.Header.Get("x-request-id"), options); err != nil {
+			return usage, len(results), err
+		}
 	}
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	c.Data(resp.StatusCode, "application/json; charset=utf-8", responseBody)
@@ -701,9 +700,10 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 				appendOpenAIResponsesImageResultDedup(&finalResults, finalSeen, "", img)
 			}
 			if len(finalResults) == 0 {
-				outputErr := fmt.Errorf("upstream did not return image output")
-				s.tryWriteOpenAIImagesStreamEvent(c, flusher, &clientDisconnected, &lastDownstreamWriteAt, "error", buildOpenAIImagesStreamErrorBody(outputErr.Error()))
-				processDataErr = outputErr
+				// response.completed with an empty output is an authoritative
+				// zero-image success. A disconnected stream without a terminal
+				// event remains the separate, unknowable legacy error below.
+				imageCount = 0
 				processDataDone = true
 				return
 			}
@@ -1067,9 +1067,6 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 			}
 			return nil, err
 		}
-	}
-	if imageCount <= 0 {
-		imageCount = parsed.N
 	}
 	return &OpenAIForwardResult{
 		RequestID:       resp.Header.Get("x-request-id"),

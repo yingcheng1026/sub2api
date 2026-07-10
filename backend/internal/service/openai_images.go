@@ -894,7 +894,9 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	defer func() { _ = resp.Body.Close() }()
 
 	var usage OpenAIUsage
-	imageCount := parsed.N
+	// Successful upstream parsing is authoritative, including an explicit zero.
+	// parsed.N is a request intent, not proof that images were produced.
+	imageCount := 0
 	var firstTokenMs *int
 	if parsed.Stream && isEventStreamResponse(resp.Header) {
 		streamUsage, streamCount, ttft, err := s.handleOpenAIImagesStreamingResponse(resp, c, startTime)
@@ -938,9 +940,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			return nil, err
 		}
 		usage = nonStreamUsage
-		if nonStreamCount > 0 {
-			imageCount = nonStreamCount
-		}
+		imageCount = nonStreamCount
 	}
 	return &OpenAIForwardResult{
 		RequestID:       resp.Header.Get("x-request-id"),
@@ -1246,11 +1246,21 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 	fallbackBytes := int64(0)
 	fallbackLimit := resolveUpstreamResponseReadLimit(s.cfg)
 	seenSSEData := false
+	seenTerminal := false
 	fallbackTooLarge := false
 	var sseData openAISSEDataAccumulator
 
 	processSSEData := func(dataBytes []byte) {
 		seenSSEData = true
+		trimmedData := bytes.TrimSpace(dataBytes)
+		if bytes.Equal(trimmedData, []byte("[DONE]")) {
+			seenTerminal = true
+		} else {
+			switch strings.TrimSpace(gjson.GetBytes(trimmedData, "type").String()) {
+			case "image_generation.completed", "image_edit.completed", "response.completed":
+				seenTerminal = true
+			}
+		}
 		fallbackBody.Reset()
 		fallbackBytes = 0
 		mergeOpenAIUsage(&usage, dataBytes)
@@ -1307,6 +1317,19 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		imageCounter.AddJSONResponse(body)
 	}
 
+	validateStreamCompletion := func() error {
+		if seenSSEData {
+			if seenTerminal {
+				return nil
+			}
+			return fmt.Errorf("image stream incomplete: upstream ended without terminal event")
+		}
+		if json.Valid(bytes.TrimSpace(fallbackBody.Bytes())) {
+			return nil
+		}
+		return fmt.Errorf("image stream incomplete: upstream ended without a complete response")
+	}
+
 	streamInterval := s.openAIImageStreamDataInterval()
 	keepaliveInterval := s.openAIImageStreamKeepaliveInterval()
 	if streamInterval <= 0 && keepaliveInterval <= 0 {
@@ -1324,6 +1347,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		}
 		flushSSEEvent()
 		finalizeFallbackBody()
+		if err := validateStreamCompletion(); err != nil {
+			return usage, imageCounter.Count(), firstTokenMs, err
+		}
 		return usage, imageCounter.Count(), firstTokenMs, nil
 	}
 
@@ -1391,6 +1417,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 			if !ok {
 				flushSSEEvent()
 				finalizeFallbackBody()
+				if err := validateStreamCompletion(); err != nil {
+					return usage, imageCounter.Count(), firstTokenMs, err
+				}
 				return usage, imageCounter.Count(), firstTokenMs, nil
 			}
 			if ev.err != nil {

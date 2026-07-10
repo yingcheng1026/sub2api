@@ -309,6 +309,81 @@ func TestResolveOpenAIImagePricingQuoteRejectsMissingRequestedSizeTier(t *testin
 	require.Nil(t, quote)
 }
 
+func TestResolvePricingQuoteAllowsZeroUnusedIntervalDimension(t *testing.T) {
+	resolver := newResolverWithChannel(t, []ChannelModelPricing{{
+		Platform: "anthropic", Models: []string{"custom-zero-input"}, BillingMode: BillingModeToken,
+		Intervals: []PricingInterval{{MinTokens: -1, InputPrice: testPtrFloat64(0), OutputPrice: testPtrFloat64(2e-6)}},
+	}})
+
+	quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "custom-zero-input", GroupID: groupIDPtr()})
+
+	require.NoError(t, err)
+	require.NotNil(t, quote)
+	_, err = resolver.billingService.CalculateCostUnified(CostInput{
+		Ctx: context.Background(), Model: "custom-zero-input", GroupID: groupIDPtr(),
+		Tokens: UsageTokens{OutputTokens: 10}, RateMultiplier: 1, Resolver: resolver, Resolved: quote.CloneResolved(),
+	})
+	require.NoError(t, err)
+	_, err = resolver.billingService.CalculateCostUnified(CostInput{
+		Ctx: context.Background(), Model: "custom-zero-input", GroupID: groupIDPtr(),
+		Tokens: UsageTokens{InputTokens: 10}, RateMultiplier: 1, Resolver: resolver, Resolved: quote.CloneResolved(),
+	})
+	require.Error(t, err, "a used input dimension without a positive price must fail closed")
+}
+
+func TestResolvePricingQuoteRejectsAllZeroOrInvalidIntervalPrices(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		outputPrice float64
+	}{
+		{name: "all zero", outputPrice: 0},
+		{name: "negative", outputPrice: -1},
+		{name: "nan", outputPrice: math.NaN()},
+		{name: "infinity", outputPrice: math.Inf(1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resolver := newResolverWithChannel(t, []ChannelModelPricing{{
+				Platform: "anthropic", Models: []string{"custom-invalid-interval"}, BillingMode: BillingModeToken,
+				Intervals: []PricingInterval{{MinTokens: 0, InputPrice: testPtrFloat64(0), OutputPrice: testPtrFloat64(tt.outputPrice)}},
+			}})
+			quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "custom-invalid-interval", GroupID: groupIDPtr()})
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrOpenAIPricingUnavailable)
+			require.Nil(t, quote)
+		})
+	}
+}
+
+func TestResolvePricingQuoteRejectsAllZeroIntervalEvenWithUsableBasePrice(t *testing.T) {
+	resolver := newResolverWithChannel(t, []ChannelModelPricing{{
+		Platform: "anthropic", Models: []string{"claude-sonnet-4"}, BillingMode: BillingModeToken,
+		Intervals: []PricingInterval{{MinTokens: 0, InputPrice: testPtrFloat64(0), OutputPrice: testPtrFloat64(0)}},
+	}})
+
+	quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "claude-sonnet-4", GroupID: groupIDPtr()})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrOpenAIPricingUnavailable)
+	require.Nil(t, quote)
+}
+
+func TestValidateTokenPricingForUsageRejectsNonPositiveOrNonFiniteUsedDimension(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		price float64
+	}{
+		{name: "zero", price: 0},
+		{name: "negative", price: -1},
+		{name: "nan", price: math.NaN()},
+		{name: "infinity", price: math.Inf(1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTokenPricingForUsage(&ModelPricing{OutputPricePerToken: tt.price}, UsageTokens{OutputTokens: 1}, "")
+			require.Error(t, err)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 1. Token mode overrides
 // ---------------------------------------------------------------------------

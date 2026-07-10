@@ -132,3 +132,52 @@ ok github.com/Wei-Shaw/sub2api/internal/repository 2.013s
 `git diff --check`、迁移 172 不变检查、diff 级常见凭证扫描均通过。私有 503 报告继续保持未读取、未修改、未暂存。
 
 修复提交标题：`fix: close image billing preflight gaps`（本报告与修复代码同一提交）。
+
+## 2026-07-10 Task 1 最终零图与零价语义修复
+
+### 最终复审范围
+
+- API key 与 OAuth Images 的权威上游零输出均保持 `ImageCount=0`，不再回退请求参数 `n`；dedicated Images 零输出 settlement 成本为 0。
+- API-key SSE 只有看到 `[DONE]`、`image_generation.completed`、`image_edit.completed` 或 `response.completed` 才视为完整；EOF/断线且无 terminal 属于结果未知并 fail closed。完整 terminal 的零图仍按权威 0 处理。
+- 非 GPT token interval 允许未使用维度显式为 0，但每个可能命中的 interval 自身至少要有一项正有限价格；全零、负数、NaN、Inf interval 均在上游前拒绝，不能借用 base 或另一区间的正价通过。
+- settlement 按实际使用维度再次 fail closed；被使用的 input/output/cache/image 维度没有正价时返回错误。
+
+### RED 证据
+
+```text
+go test ./internal/service -run 'UpstreamZeroImagesDoesNotUseRequestedCount|DedicatedImageWithoutOutputChargesZero' -count=1
+FAIL API-key expected 0 images, got requested n=3.
+FAIL OAuth zero-output returned upstream did not return image output.
+
+go test -tags=unit ./internal/service -run 'AllowsZeroUnusedIntervalDimension' -count=1
+FAIL openai pricing unavailable for custom-zero-input.
+
+go test ./internal/service -run 'EOFWithoutTerminalIsUnknown' -count=1
+FAIL expected incomplete stream error, got nil.
+
+go test -tags=unit ./internal/service -run 'RejectsAllZeroIntervalEvenWithUsableBasePrice' -count=1
+FAIL expected ErrOpenAIPricingUnavailable, got nil.
+```
+
+### GREEN 与独立复审
+
+```text
+go test ./internal/service -run 'EOFWithoutTerminalIsUnknown|TerminalZeroImagesIsAuthoritative|UpstreamZeroImagesDoesNotUseRequestedCount|DedicatedImageWithoutOutputChargesZero' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/service 0.875s
+
+go test -tags=unit ./internal/service -run 'AllowsZeroUnusedIntervalDimension|RejectsAllZeroOrInvalidIntervalPrices|RejectsAllZeroIntervalEvenWithUsableBasePrice|ValidateTokenPricingForUsage' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/service 1.024s
+
+go test ./internal/service -run 'ForwardImages|RecordUsage|OpenAIBillingIdentity|ResolvePricingQuote|CalculateCostUnified' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/service 0.854s
+
+go test -tags=unit ./internal/service -run 'ResolvePricingQuote|CalculateCostUnified' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/service 1.551s
+
+go test ./internal/handler -run 'OpenAI|Responses|Images|Messages|Chat|WebSocket' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/handler 0.951s
+```
+
+最终独立代码复审：PASS。最终独立安全复审：PASS。`git diff --check` 通过；迁移 172 未修改；私有 503 报告未读取、未修改、未暂存。
+
+修复提交标题：`fix: preserve zero-image and zero-tier billing semantics`。

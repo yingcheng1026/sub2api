@@ -143,6 +143,38 @@ func TestOpenAIGatewayServiceRecordUsage_ImageIntentWithoutOutputUsesFrozenTextQ
 	require.Equal(t, strings.Repeat("t", 64), *usageRepo.lastLog.PricingHash)
 }
 
+func TestOpenAIGatewayServiceRecordUsage_DedicatedImageWithoutOutputChargesZero(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil,
+	)
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	identity := &ResolvedOpenAIBillingIdentity{
+		BillingModel: "gpt-image-2",
+		Pricing: &PricingQuote{
+			Resolved: &ResolvedPricing{Mode: BillingModeImage, DefaultPerRequestPrice: 0.25, Source: PricingSourceBuiltinFallback},
+			Evidence: PricingEvidence{Source: PricingSourceBuiltinFallback, Revision: "image-zero", Hash: strings.Repeat("z", 64)},
+		},
+	}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp-dedicated-image-zero", Model: "gpt-image-2", UpstreamModel: "gpt-image-2",
+			BillingModel: "gpt-image-2", BillingIdentity: identity, ImageCount: 0, Duration: time.Second,
+		},
+		APIKey: &APIKey{ID: 102, Group: &Group{ID: 12, RateMultiplier: 1}},
+		User:   &User{ID: 202}, Account: &Account{ID: 302, Type: AccountTypeAPIKey},
+		APIKeyService: &openAIRecordUsageAPIKeyQuotaStub{},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.Zero(t, usageRepo.lastLog.ImageCount)
+	require.Zero(t, usageRepo.lastLog.TotalCost)
+	require.Zero(t, usageRepo.lastLog.ActualCost)
+}
+
 type openAIRecordUsageUserRepoStub struct {
 	UserRepository
 

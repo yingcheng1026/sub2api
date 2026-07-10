@@ -504,15 +504,20 @@ func resolvedPricingIsUsable(resolved *ResolvedPricing) bool {
 	default:
 		usable, valid := usableModelPricing(resolved.BasePricing)
 		for _, interval := range resolved.Intervals {
+			intervalUsable := false
 			for _, price := range []*float64{interval.InputPrice, interval.OutputPrice, interval.CacheWritePrice, interval.CacheReadPrice} {
 				if price == nil {
 					continue
 				}
-				if !positiveFinitePrice(*price) {
+				if !nonNegativeFinitePrice(*price) {
 					return false
 				}
-				usable = true
+				intervalUsable = intervalUsable || *price > 0
 			}
+			if !intervalUsable {
+				return false
+			}
+			usable = true
 		}
 		return valid && usable
 	}
@@ -541,6 +546,10 @@ func usableModelPricing(pricing *ModelPricing) (usable bool, valid bool) {
 
 func positiveFinitePrice(price float64) bool {
 	return price > 0 && !math.IsNaN(price) && !math.IsInf(price, 0)
+}
+
+func nonNegativeFinitePrice(price float64) bool {
+	return price >= 0 && !math.IsNaN(price) && !math.IsInf(price, 0)
 }
 
 func pricingFloat64Ptr(price float64) *float64 {

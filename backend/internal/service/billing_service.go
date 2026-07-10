@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"log"
@@ -498,11 +499,59 @@ func (s *BillingService) calculateTokenCost(resolved *ResolvedPricing, input Cos
 	}
 
 	pricing = s.applyModelSpecificPricingPolicy(input.Model, pricing)
+	if err := validateTokenPricingForUsage(pricing, input.Tokens, input.ServiceTier); err != nil {
+		return nil, fmt.Errorf("invalid pricing for used token dimension: %w", err)
+	}
 
 	// 长上下文定价仅在无区间定价时应用（区间定价已包含上下文分层）
 	applyLongCtx := len(resolved.Intervals) == 0
 
 	return s.computeTokenBreakdown(pricing, input.Tokens, input.RateMultiplier, input.ServiceTier, applyLongCtx), nil
+}
+
+func validateTokenPricingForUsage(pricing *ModelPricing, tokens UsageTokens, serviceTier string) error {
+	if pricing == nil {
+		return errors.New("pricing is nil")
+	}
+	inputPrice := pricing.InputPricePerToken
+	outputPrice := pricing.OutputPricePerToken
+	cacheReadPrice := pricing.CacheReadPricePerToken
+	if usePriorityServiceTierPricing(serviceTier, pricing) {
+		if pricing.InputPricePerTokenPriority > 0 {
+			inputPrice = pricing.InputPricePerTokenPriority
+		}
+		if pricing.OutputPricePerTokenPriority > 0 {
+			outputPrice = pricing.OutputPricePerTokenPriority
+		}
+		if pricing.CacheReadPricePerTokenPriority > 0 {
+			cacheReadPrice = pricing.CacheReadPricePerTokenPriority
+		}
+	}
+	if tokens.InputTokens > 0 && !positiveFinitePrice(inputPrice) {
+		return errors.New("input tokens have no positive price")
+	}
+	textOutputTokens := tokens.OutputTokens - tokens.ImageOutputTokens
+	if textOutputTokens > 0 && !positiveFinitePrice(outputPrice) {
+		return errors.New("output tokens have no positive price")
+	}
+	if tokens.ImageOutputTokens > 0 && !positiveFinitePrice(pricing.ImageOutputPricePerToken) && !positiveFinitePrice(outputPrice) {
+		return errors.New("image output tokens have no positive price")
+	}
+	if tokens.CacheReadTokens > 0 && !positiveFinitePrice(cacheReadPrice) {
+		return errors.New("cache read tokens have no positive price")
+	}
+	useCacheBreakdown := pricing.SupportsCacheBreakdown && (pricing.CacheCreation5mPrice > 0 || pricing.CacheCreation1hPrice > 0)
+	if useCacheBreakdown && (tokens.CacheCreationTokens > 0 || tokens.CacheCreation5mTokens > 0 || tokens.CacheCreation1hTokens > 0) {
+		if tokens.CacheCreation1hTokens > 0 && !positiveFinitePrice(pricing.CacheCreation1hPrice) {
+			return errors.New("1h cache creation tokens have no positive price")
+		}
+		if (tokens.CacheCreation5mTokens > 0 || (tokens.CacheCreationTokens > 0 && tokens.CacheCreation5mTokens == 0 && tokens.CacheCreation1hTokens == 0)) && !positiveFinitePrice(pricing.CacheCreation5mPrice) {
+			return errors.New("5m cache creation tokens have no positive price")
+		}
+	} else if tokens.CacheCreationTokens > 0 && !positiveFinitePrice(pricing.CacheCreationPricePerToken) {
+		return errors.New("cache creation tokens have no positive price")
+	}
+	return nil
 }
 
 // computeTokenBreakdown 是 token 计费的核心逻辑，由 calculateTokenCost 和 calculateCostInternal 共用。
