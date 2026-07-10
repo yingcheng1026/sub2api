@@ -634,6 +634,9 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 		return true // 无映射 = 允许所有
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
+		if a.Platform != PlatformOpenAI {
+			return true
+		}
 		return openAIGPT56MappingTargetEntitled(mapping, requestedModel, mappedModel)
 	}
 	normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
@@ -641,7 +644,7 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 		return false
 	}
 	mappedModel, matched := resolveRequestedModelInMapping(mapping, normalized)
-	return matched && openAIGPT56MappingTargetEntitled(mapping, normalized, mappedModel)
+	return matched && (a.Platform != PlatformOpenAI || openAIGPT56MappingTargetEntitled(mapping, normalized, mappedModel))
 }
 
 // GetMappedModel 获取映射后的模型名（支持通配符，最长优先匹配）
