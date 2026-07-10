@@ -60,6 +60,9 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "usage_logs", "request_type", "smallint", 0, false)
 	requireColumn(t, tx, "usage_logs", "openai_ws_mode", "boolean", 0, false)
 	requireColumn(t, tx, "usage_logs", "billing_model", "character varying", 100, true)
+	requireColumn(t, tx, "usage_logs", "pricing_source", "character varying", 50, true)
+	requireColumn(t, tx, "usage_logs", "pricing_revision", "character varying", 100, true)
+	requireColumn(t, tx, "usage_logs", "pricing_hash", "character varying", 64, true)
 
 	// usage_billing_dedup: billing idempotency narrow table
 	var usageBillingDedupRegclass sql.NullString
@@ -156,6 +159,41 @@ func TestUsageLogBillingModelMigrationUpgradesHistoricalRowsWithoutBackfill(t *t
 	require.Equal(t, int64(100), maxLen.Int64)
 	require.Equal(t, "YES", nullable)
 	require.False(t, columnDefault.Valid)
+}
+
+func TestUsageLogPricingEvidenceMigration173IsIdempotentAndLeavesHistoricalRowsNull(t *testing.T) {
+	tx := testTx(t)
+	ctx := context.Background()
+	content, err := dbmigrations.FS.ReadFile("173_add_usage_log_pricing_evidence.sql")
+	require.NoError(t, err)
+
+	_, err = tx.ExecContext(ctx, `CREATE TEMP TABLE usage_logs (id BIGINT PRIMARY KEY, billing_model VARCHAR(100))`)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "INSERT INTO usage_logs (id, billing_model) VALUES (1, 'gpt-5.6-terra')")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, string(content))
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, string(content))
+	require.NoError(t, err)
+
+	var source, revision, hash sql.NullString
+	require.NoError(t, tx.QueryRowContext(ctx, "SELECT pricing_source, pricing_revision, pricing_hash FROM usage_logs WHERE id = 1").Scan(&source, &revision, &hash))
+	require.False(t, source.Valid)
+	require.False(t, revision.Valid)
+	require.False(t, hash.Valid)
+
+	for _, column := range []string{"pricing_source", "pricing_revision", "pricing_hash"} {
+		var nullable string
+		var defaultValue sql.NullString
+		require.NoError(t, tx.QueryRowContext(ctx, `
+			SELECT is_nullable, column_default
+			FROM information_schema.columns
+			WHERE table_schema = (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema())
+			  AND table_name = 'usage_logs' AND column_name = $1
+		`, column).Scan(&nullable, &defaultValue))
+		require.Equal(t, "YES", nullable)
+		require.False(t, defaultValue.Valid)
+	}
 }
 
 func TestMigrationsRunner_AuthIdentityAndPaymentSchemaStayAligned(t *testing.T) {

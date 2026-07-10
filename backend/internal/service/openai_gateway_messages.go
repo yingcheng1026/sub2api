@@ -33,6 +33,18 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	return s.ForwardAsAnthropicWithOptions(ctx, c, account, body, promptCacheKey, defaultMappedModel, OpenAIForwardOptions{})
+}
+
+func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	promptCacheKey string,
+	defaultMappedModel string,
+	opts OpenAIForwardOptions,
+) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
 
 	// 1. Parse Anthropic request
@@ -246,6 +258,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 	responsesBody = updatedBody
 
+	billingIdentity, err := s.resolveForwardBillingIdentity(ctx, opts, originalModel, normalizedModel, billingModel, upstreamModel)
+	if err != nil {
+		return nil, err
+	}
+
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
@@ -325,7 +342,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				zap.String("previous_response_id", truncateOpenAIWSLogValue(previousResponseID, openAIWSIDValueMaxLen)),
 				zap.String("upstream_model", upstreamModel),
 			)
-			return s.ForwardAsAnthropic(ctx, c, account, body, promptCacheKey, defaultMappedModel)
+			return s.ForwardAsAnthropicWithOptions(ctx, c, account, body, promptCacheKey, defaultMappedModel, opts)
 		}
 		if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
 			upstreamDetail := ""
@@ -378,6 +395,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	// Propagate ServiceTier and ReasoningEffort to result for billing
 	if handleErr == nil && result != nil {
+		attachOpenAIBillingIdentity(result, billingIdentity)
 		if compatContinuationEnabled && promptCacheKey != "" && result.ResponseID != "" {
 			s.bindOpenAICompatSessionResponseID(ctx, c, account, promptCacheKey, result.ResponseID)
 		}

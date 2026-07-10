@@ -58,6 +58,50 @@ func TestOpenAIGatewayServiceRecordUsage_RejectsNilInput(t *testing.T) {
 	require.Error(t, svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{}))
 }
 
+func TestOpenAIGatewayServiceRecordUsageUsesImmutablePreflightQuoteAndEvidence(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo,
+		billingRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		nil,
+	)
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	quote := &PricingQuote{
+		Resolved: &ResolvedPricing{
+			Mode:        BillingModeToken,
+			BasePricing: &ModelPricing{InputPricePerToken: 0.01, OutputPricePerToken: 0.02},
+			Source:      PricingSourceLiteLLM,
+		},
+		Evidence: PricingEvidence{Source: PricingSourceLiteLLM, Revision: "effective-test", Hash: strings.Repeat("c", 64)},
+	}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp-immutable-quote", Model: "custom-unpriceable", UpstreamModel: "custom-unpriceable",
+			Usage: OpenAIUsage{InputTokens: 10, OutputTokens: 2}, Duration: time.Second,
+			BillingIdentity: &ResolvedOpenAIBillingIdentity{
+				RequestedModel: "custom-unpriceable", UpstreamModel: "custom-unpriceable",
+				BillingModel: "custom-unpriceable", BillingModelSource: BillingModelSourceUpstream,
+				Pricing: quote,
+			},
+		},
+		APIKey: &APIKey{ID: 100, Group: &Group{ID: 10, RateMultiplier: 1}},
+		User:   &User{ID: 200}, Account: &Account{ID: 300, Type: AccountTypeAPIKey},
+		APIKeyService: &openAIRecordUsageAPIKeyQuotaStub{},
+	})
+	require.NoError(t, err, "recording must use the quote even though the model cannot be re-resolved")
+	require.NotNil(t, usageRepo.lastLog)
+	require.InDelta(t, 0.10, usageRepo.lastLog.InputCost, 1e-12)
+	require.InDelta(t, 0.04, usageRepo.lastLog.OutputCost, 1e-12)
+	require.Equal(t, "custom-unpriceable", *usageRepo.lastLog.BillingModel)
+	require.Equal(t, PricingSourceLiteLLM, *usageRepo.lastLog.PricingSource)
+	require.Equal(t, "effective-test", *usageRepo.lastLog.PricingRevision)
+	require.Equal(t, strings.Repeat("c", 64), *usageRepo.lastLog.PricingHash)
+}
+
 type openAIRecordUsageUserRepoStub struct {
 	UserRepository
 
@@ -1690,6 +1734,13 @@ func TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndSha
 			ImageCount: 3,
 			ImageSize:  "1K",
 			Duration:   time.Second,
+			BillingIdentity: &ResolvedOpenAIBillingIdentity{
+				BillingModel: "gpt-image-2",
+				Pricing: &PricingQuote{
+					Resolved: &ResolvedPricing{Mode: BillingModeToken, BasePricing: &ModelPricing{InputPricePerToken: 99}},
+					Evidence: PricingEvidence{Source: PricingSourceLiteLLM, Revision: "wrong-image-quote", Hash: strings.Repeat("f", 64)},
+				},
+			},
 		},
 		APIKey: &APIKey{
 			ID:      10123,
@@ -1713,6 +1764,9 @@ func TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndSha
 	require.Equal(t, 3, usageRepo.lastLog.ImageCount)
 	require.NotNil(t, usageRepo.lastLog.BillingMode)
 	require.Equal(t, string(BillingModeImage), *usageRepo.lastLog.BillingMode)
+	require.Nil(t, usageRepo.lastLog.PricingSource, "unused text quote must not be recorded as image pricing evidence")
+	require.Nil(t, usageRepo.lastLog.PricingRevision)
+	require.Nil(t, usageRepo.lastLog.PricingHash)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndIndependentMultiplier(t *testing.T) {

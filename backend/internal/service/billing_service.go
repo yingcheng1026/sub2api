@@ -340,6 +340,13 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 
 // GetModelPricing 获取模型价格配置
 func (s *BillingService) GetModelPricing(model string) (*ModelPricing, error) {
+	pricing, _, err := s.GetModelPricingWithSource(model)
+	return pricing, err
+}
+
+// GetModelPricingWithSource resolves pricing and preserves whether the
+// effective schedule came from the LiteLLM snapshot or a built-in fallback.
+func (s *BillingService) GetModelPricingWithSource(model string) (*ModelPricing, string, error) {
 	// 标准化模型名称（转小写）
 	model = strings.ToLower(model)
 
@@ -353,6 +360,12 @@ func (s *BillingService) GetModelPricing(model string) (*ModelPricing, error) {
 			price5m := litellmPricing.CacheCreationInputTokenCost
 			price1h := litellmPricing.CacheCreationInputTokenCostAbove1hr
 			enableBreakdown := price1h > 0 && price1h > price5m
+			source := PricingSourceLiteLLM
+			if normalized, family := classifyOpenAIGPT56PreviewModel(model); family && normalized != "" {
+				// PricingService policy-locks GPT-5.6 to its built-in tier table;
+				// dynamic/local LiteLLM data cannot override these values.
+				source = PricingSourceBuiltinGPT56
+			}
 			return s.applyModelSpecificPricingPolicy(model, &ModelPricing{
 				InputPricePerToken:             litellmPricing.InputCostPerToken,
 				InputPricePerTokenPriority:     litellmPricing.InputCostPerTokenPriority,
@@ -368,7 +381,7 @@ func (s *BillingService) GetModelPricing(model string) (*ModelPricing, error) {
 				LongContextInputMultiplier:     litellmPricing.LongContextInputCostMultiplier,
 				LongContextOutputMultiplier:    litellmPricing.LongContextOutputCostMultiplier,
 				ImageOutputPricePerToken:       litellmPricing.OutputCostPerImageToken,
-			}), nil
+			}), source, nil
 		}
 	}
 
@@ -377,10 +390,14 @@ func (s *BillingService) GetModelPricing(model string) (*ModelPricing, error) {
 	if fallback != nil {
 		log.Printf("[Billing] Using fallback pricing for model: %s", model)
 		cloned := *fallback
-		return s.applyModelSpecificPricingPolicy(model, &cloned), nil
+		source := PricingSourceBuiltinFallback
+		if normalized, family := classifyOpenAIGPT56PreviewModel(model); family && normalized != "" {
+			source = PricingSourceBuiltinGPT56
+		}
+		return s.applyModelSpecificPricingPolicy(model, &cloned), source, nil
 	}
 
-	return nil, fmt.Errorf("pricing not found for model: %s", model)
+	return nil, "", fmt.Errorf("pricing not found for model: %s", model)
 }
 
 // GetModelPricingWithChannel 获取模型定价，渠道配置的价格覆盖默认值

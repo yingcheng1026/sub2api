@@ -31,6 +31,10 @@ type ResolvedPricing struct {
 
 	// 来源标识
 	Source string // "channel", "litellm", "fallback"
+	// Revision identifies the source snapshot used to build this resolved price.
+	Revision string
+	// SourceExact reports whether channel pricing matched an exact model slug.
+	SourceExact bool
 
 	// 是否支持缓存细分
 	SupportsCacheBreakdown bool
@@ -62,8 +66,9 @@ type PricingInput struct {
 // 2. 如果指定了 GroupID，查找渠道定价并覆盖
 func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) *ResolvedPricing {
 	var chPricing *ChannelModelPricing
+	var chPricingExact bool
 	if input.GroupID != nil && r.channelService != nil {
-		chPricing = r.channelService.GetChannelModelPricing(ctx, *input.GroupID, input.Model)
+		chPricing, chPricingExact = r.channelService.GetChannelModelPricingMatch(ctx, *input.GroupID, input.Model)
 		if chPricing != nil {
 			mode := chPricing.BillingMode
 			if mode == "" {
@@ -71,8 +76,9 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 			}
 			if mode == BillingModePerRequest || mode == BillingModeImage {
 				resolved := &ResolvedPricing{
-					Mode:   mode,
-					Source: PricingSourceChannel,
+					Mode:        mode,
+					Source:      PricingSourceChannel,
+					SourceExact: chPricingExact,
 				}
 				r.applyRequestTierOverrides(chPricing, resolved)
 				return resolved
@@ -88,14 +94,14 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 		BasePricing:            basePricing,
 		Source:                 source,
 		SupportsCacheBreakdown: basePricing != nil && basePricing.SupportsCacheBreakdown,
+		SourceExact:            true,
 	}
 
 	// 2. 如果有 GroupID，尝试渠道覆盖
 	if chPricing != nil {
 		resolved.Source = PricingSourceChannel
+		resolved.SourceExact = chPricingExact
 		r.applyTokenOverrides(chPricing, resolved)
-	} else if input.GroupID != nil {
-		r.applyChannelOverrides(ctx, *input.GroupID, input.Model, resolved)
 	}
 
 	return resolved
@@ -103,34 +109,13 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 
 // resolveBasePricing 从 LiteLLM 或 Fallback 获取基础定价
 func (r *ModelPricingResolver) resolveBasePricing(model string) (*ModelPricing, string) {
-	pricing, err := r.billingService.GetModelPricing(model)
+	pricing, source, err := r.billingService.GetModelPricingWithSource(model)
 	if err != nil {
 		slog.Debug("failed to get model pricing from LiteLLM, using fallback",
 			"model", model, "error", err)
 		return nil, PricingSourceFallback
 	}
-	return pricing, PricingSourceLiteLLM
-}
-
-// applyChannelOverrides 应用渠道定价覆盖
-func (r *ModelPricingResolver) applyChannelOverrides(ctx context.Context, groupID int64, model string, resolved *ResolvedPricing) {
-	chPricing := r.channelService.GetChannelModelPricing(ctx, groupID, model)
-	if chPricing == nil {
-		return
-	}
-
-	resolved.Source = PricingSourceChannel
-	resolved.Mode = chPricing.BillingMode
-	if resolved.Mode == "" {
-		resolved.Mode = BillingModeToken
-	}
-
-	switch resolved.Mode {
-	case BillingModeToken:
-		r.applyTokenOverrides(chPricing, resolved)
-	case BillingModePerRequest, BillingModeImage:
-		r.applyRequestTierOverrides(chPricing, resolved)
-	}
+	return pricing, source
 }
 
 // applyTokenOverrides 应用 token 模式的渠道覆盖

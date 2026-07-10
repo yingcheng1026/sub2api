@@ -38,6 +38,12 @@ type UsageLog struct {
 	UpstreamModel *string `json:"upstream_model,omitempty"`
 	// BillingModel holds the value of the "billing_model" field.
 	BillingModel *string `json:"billing_model,omitempty"`
+	// PricingSource holds the value of the "pricing_source" field.
+	PricingSource *string `json:"pricing_source,omitempty"`
+	// PricingRevision holds the value of the "pricing_revision" field.
+	PricingRevision *string `json:"pricing_revision,omitempty"`
+	// PricingHash holds the value of the "pricing_hash" field.
+	PricingHash *string `json:"pricing_hash,omitempty"`
 	// 渠道 ID
 	ChannelID *int64 `json:"channel_id,omitempty"`
 	// 模型映射链
@@ -198,7 +204,7 @@ func (*UsageLog) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullFloat64)
 		case usagelog.FieldID, usagelog.FieldUserID, usagelog.FieldAPIKeyID, usagelog.FieldAccountID, usagelog.FieldChannelID, usagelog.FieldGroupID, usagelog.FieldSubscriptionID, usagelog.FieldInputTokens, usagelog.FieldOutputTokens, usagelog.FieldCacheCreationTokens, usagelog.FieldCacheReadTokens, usagelog.FieldCacheCreation5mTokens, usagelog.FieldCacheCreation1hTokens, usagelog.FieldBillingType, usagelog.FieldDurationMs, usagelog.FieldFirstTokenMs, usagelog.FieldImageCount:
 			values[i] = new(sql.NullInt64)
-		case usagelog.FieldRequestID, usagelog.FieldModel, usagelog.FieldRequestedModel, usagelog.FieldUpstreamModel, usagelog.FieldBillingModel, usagelog.FieldModelMappingChain, usagelog.FieldBillingTier, usagelog.FieldBillingMode, usagelog.FieldUserAgent, usagelog.FieldIPAddress, usagelog.FieldImageSize:
+		case usagelog.FieldRequestID, usagelog.FieldModel, usagelog.FieldRequestedModel, usagelog.FieldUpstreamModel, usagelog.FieldBillingModel, usagelog.FieldPricingSource, usagelog.FieldPricingRevision, usagelog.FieldPricingHash, usagelog.FieldModelMappingChain, usagelog.FieldBillingTier, usagelog.FieldBillingMode, usagelog.FieldUserAgent, usagelog.FieldIPAddress, usagelog.FieldImageSize:
 			values[i] = new(sql.NullString)
 		case usagelog.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -273,6 +279,27 @@ func (_m *UsageLog) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.BillingModel = new(string)
 				*_m.BillingModel = value.String
+			}
+		case usagelog.FieldPricingSource:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field pricing_source", values[i])
+			} else if value.Valid {
+				_m.PricingSource = new(string)
+				*_m.PricingSource = value.String
+			}
+		case usagelog.FieldPricingRevision:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field pricing_revision", values[i])
+			} else if value.Valid {
+				_m.PricingRevision = new(string)
+				*_m.PricingRevision = value.String
+			}
+		case usagelog.FieldPricingHash:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field pricing_hash", values[i])
+			} else if value.Valid {
+				_m.PricingHash = new(string)
+				*_m.PricingHash = value.String
 			}
 		case usagelog.FieldChannelID:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -559,6 +586,21 @@ func (_m *UsageLog) String() string {
 	builder.WriteString(", ")
 	if v := _m.BillingModel; v != nil {
 		builder.WriteString("billing_model=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.PricingSource; v != nil {
+		builder.WriteString("pricing_source=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.PricingRevision; v != nil {
+		builder.WriteString("pricing_revision=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.PricingHash; v != nil {
+		builder.WriteString("pricing_hash=")
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")

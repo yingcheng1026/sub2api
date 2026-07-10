@@ -30,6 +30,12 @@ const (
 	FieldUpstreamModel = "upstream_model"
 	// FieldBillingModel holds the string denoting the billing_model field in the database.
 	FieldBillingModel = "billing_model"
+	// FieldPricingSource holds the string denoting the pricing_source field in the database.
+	FieldPricingSource = "pricing_source"
+	// FieldPricingRevision holds the string denoting the pricing_revision field in the database.
+	FieldPricingRevision = "pricing_revision"
+	// FieldPricingHash holds the string denoting the pricing_hash field in the database.
+	FieldPricingHash = "pricing_hash"
 	// FieldChannelID holds the string denoting the channel_id field in the database.
 	FieldChannelID = "channel_id"
 	// FieldModelMappingChain holds the string denoting the model_mapping_chain field in the database.
@@ -159,6 +165,9 @@ var Columns = []string{
 	FieldRequestedModel,
 	FieldUpstreamModel,
 	FieldBillingModel,
+	FieldPricingSource,
+	FieldPricingRevision,
+	FieldPricingHash,
 	FieldChannelID,
 	FieldModelMappingChain,
 	FieldBillingTier,
@@ -212,6 +221,12 @@ var (
 	UpstreamModelValidator func(string) error
 	// BillingModelValidator is a validator for the "billing_model" field. It is called by the builders before save.
 	BillingModelValidator func(string) error
+	// PricingSourceValidator is a validator for the "pricing_source" field. It is called by the builders before save.
+	PricingSourceValidator func(string) error
+	// PricingRevisionValidator is a validator for the "pricing_revision" field. It is called by the builders before save.
+	PricingRevisionValidator func(string) error
+	// PricingHashValidator is a validator for the "pricing_hash" field. It is called by the builders before save.
+	PricingHashValidator func(string) error
 	// ModelMappingChainValidator is a validator for the "model_mapping_chain" field. It is called by the builders before save.
 	ModelMappingChainValidator func(string) error
 	// BillingTierValidator is a validator for the "billing_tier" field. It is called by the builders before save.
@@ -308,6 +323,21 @@ func ByUpstreamModel(opts ...sql.OrderTermOption) OrderOption {
 // ByBillingModel orders the results by the billing_model field.
 func ByBillingModel(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldBillingModel, opts...).ToFunc()
+}
+
+// ByPricingSource orders the results by the pricing_source field.
+func ByPricingSource(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPricingSource, opts...).ToFunc()
+}
+
+// ByPricingRevision orders the results by the pricing_revision field.
+func ByPricingRevision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPricingRevision, opts...).ToFunc()
+}
+
+// ByPricingHash orders the results by the pricing_hash field.
+func ByPricingHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPricingHash, opts...).ToFunc()
 }
 
 // ByChannelID orders the results by the channel_id field.

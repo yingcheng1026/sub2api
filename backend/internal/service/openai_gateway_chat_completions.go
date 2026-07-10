@@ -61,6 +61,18 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	return s.ForwardAsChatCompletionsWithOptions(ctx, c, account, body, promptCacheKey, defaultMappedModel, OpenAIForwardOptions{})
+}
+
+func (s *OpenAIGatewayService) ForwardAsChatCompletionsWithOptions(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	promptCacheKey string,
+	defaultMappedModel string,
+	opts OpenAIForwardOptions,
+) (*OpenAIForwardResult, error) {
 	reasoningField := "reasoning_effort"
 	if !gjson.GetBytes(body, "messages").Exists() && gjson.GetBytes(body, "input").Exists() {
 		reasoningField = "reasoning.effort"
@@ -75,7 +87,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	// 入口分流：APIKey 账号 + 已探测且确认上游不支持 Responses，走 CC 直转。
 	// 标记缺失（未探测）按"现状即证据"原则继续走下方原 Responses 转换路径。
 	if account.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(account.Extra) {
-		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+		return s.forwardAsRawChatCompletionsWithOptions(ctx, c, account, body, defaultMappedModel, opts)
 	}
 
 	startTime := time.Now()
@@ -210,6 +222,11 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	}
 	responsesBody = updatedBody
 
+	billingIdentity, err := s.resolveForwardBillingIdentity(ctx, opts, originalModel, originalModel, billingModel, upstreamModel)
+	if err != nil {
+		return nil, err
+	}
+
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
@@ -300,6 +317,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 
 	// Propagate ServiceTier and ReasoningEffort to result for billing
 	if handleErr == nil && result != nil {
+		attachOpenAIBillingIdentity(result, billingIdentity)
 		if responsesReq.ServiceTier != "" {
 			st := responsesReq.ServiceTier
 			result.ServiceTier = &st

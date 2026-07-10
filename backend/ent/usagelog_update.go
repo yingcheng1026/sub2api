@@ -163,6 +163,66 @@ func (_u *UsageLogUpdate) ClearBillingModel() *UsageLogUpdate {
 	return _u
 }
 
+// SetPricingSource sets the "pricing_source" field.
+func (_u *UsageLogUpdate) SetPricingSource(v string) *UsageLogUpdate {
+	_u.mutation.SetPricingSource(v)
+	return _u
+}
+
+// SetNillablePricingSource sets the "pricing_source" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillablePricingSource(v *string) *UsageLogUpdate {
+	if v != nil {
+		_u.SetPricingSource(*v)
+	}
+	return _u
+}
+
+// ClearPricingSource clears the value of the "pricing_source" field.
+func (_u *UsageLogUpdate) ClearPricingSource() *UsageLogUpdate {
+	_u.mutation.ClearPricingSource()
+	return _u
+}
+
+// SetPricingRevision sets the "pricing_revision" field.
+func (_u *UsageLogUpdate) SetPricingRevision(v string) *UsageLogUpdate {
+	_u.mutation.SetPricingRevision(v)
+	return _u
+}
+
+// SetNillablePricingRevision sets the "pricing_revision" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillablePricingRevision(v *string) *UsageLogUpdate {
+	if v != nil {
+		_u.SetPricingRevision(*v)
+	}
+	return _u
+}
+
+// ClearPricingRevision clears the value of the "pricing_revision" field.
+func (_u *UsageLogUpdate) ClearPricingRevision() *UsageLogUpdate {
+	_u.mutation.ClearPricingRevision()
+	return _u
+}
+
+// SetPricingHash sets the "pricing_hash" field.
+func (_u *UsageLogUpdate) SetPricingHash(v string) *UsageLogUpdate {
+	_u.mutation.SetPricingHash(v)
+	return _u
+}
+
+// SetNillablePricingHash sets the "pricing_hash" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillablePricingHash(v *string) *UsageLogUpdate {
+	if v != nil {
+		_u.SetPricingHash(*v)
+	}
+	return _u
+}
+
+// ClearPricingHash clears the value of the "pricing_hash" field.
+func (_u *UsageLogUpdate) ClearPricingHash() *UsageLogUpdate {
+	_u.mutation.ClearPricingHash()
+	return _u
+}
+
 // SetChannelID sets the "channel_id" field.
 func (_u *UsageLogUpdate) SetChannelID(v int64) *UsageLogUpdate {
 	_u.mutation.ResetChannelID()
@@ -924,6 +984,21 @@ func (_u *UsageLogUpdate) check() error {
 			return &ValidationError{Name: "billing_model", err: fmt.Errorf(`ent: validator failed for field "UsageLog.billing_model": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.PricingSource(); ok {
+		if err := usagelog.PricingSourceValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_source", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_source": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.PricingRevision(); ok {
+		if err := usagelog.PricingRevisionValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_revision", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_revision": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.PricingHash(); ok {
+		if err := usagelog.PricingHashValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_hash", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_hash": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.ModelMappingChain(); ok {
 		if err := usagelog.ModelMappingChainValidator(v); err != nil {
 			return &ValidationError{Name: "model_mapping_chain", err: fmt.Errorf(`ent: validator failed for field "UsageLog.model_mapping_chain": %w`, err)}
@@ -1001,6 +1076,24 @@ func (_u *UsageLogUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.BillingModelCleared() {
 		_spec.ClearField(usagelog.FieldBillingModel, field.TypeString)
+	}
+	if value, ok := _u.mutation.PricingSource(); ok {
+		_spec.SetField(usagelog.FieldPricingSource, field.TypeString, value)
+	}
+	if _u.mutation.PricingSourceCleared() {
+		_spec.ClearField(usagelog.FieldPricingSource, field.TypeString)
+	}
+	if value, ok := _u.mutation.PricingRevision(); ok {
+		_spec.SetField(usagelog.FieldPricingRevision, field.TypeString, value)
+	}
+	if _u.mutation.PricingRevisionCleared() {
+		_spec.ClearField(usagelog.FieldPricingRevision, field.TypeString)
+	}
+	if value, ok := _u.mutation.PricingHash(); ok {
+		_spec.SetField(usagelog.FieldPricingHash, field.TypeString, value)
+	}
+	if _u.mutation.PricingHashCleared() {
+		_spec.ClearField(usagelog.FieldPricingHash, field.TypeString)
 	}
 	if value, ok := _u.mutation.ChannelID(); ok {
 		_spec.SetField(usagelog.FieldChannelID, field.TypeInt64, value)
@@ -1507,6 +1600,66 @@ func (_u *UsageLogUpdateOne) SetNillableBillingModel(v *string) *UsageLogUpdateO
 // ClearBillingModel clears the value of the "billing_model" field.
 func (_u *UsageLogUpdateOne) ClearBillingModel() *UsageLogUpdateOne {
 	_u.mutation.ClearBillingModel()
+	return _u
+}
+
+// SetPricingSource sets the "pricing_source" field.
+func (_u *UsageLogUpdateOne) SetPricingSource(v string) *UsageLogUpdateOne {
+	_u.mutation.SetPricingSource(v)
+	return _u
+}
+
+// SetNillablePricingSource sets the "pricing_source" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillablePricingSource(v *string) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetPricingSource(*v)
+	}
+	return _u
+}
+
+// ClearPricingSource clears the value of the "pricing_source" field.
+func (_u *UsageLogUpdateOne) ClearPricingSource() *UsageLogUpdateOne {
+	_u.mutation.ClearPricingSource()
+	return _u
+}
+
+// SetPricingRevision sets the "pricing_revision" field.
+func (_u *UsageLogUpdateOne) SetPricingRevision(v string) *UsageLogUpdateOne {
+	_u.mutation.SetPricingRevision(v)
+	return _u
+}
+
+// SetNillablePricingRevision sets the "pricing_revision" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillablePricingRevision(v *string) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetPricingRevision(*v)
+	}
+	return _u
+}
+
+// ClearPricingRevision clears the value of the "pricing_revision" field.
+func (_u *UsageLogUpdateOne) ClearPricingRevision() *UsageLogUpdateOne {
+	_u.mutation.ClearPricingRevision()
+	return _u
+}
+
+// SetPricingHash sets the "pricing_hash" field.
+func (_u *UsageLogUpdateOne) SetPricingHash(v string) *UsageLogUpdateOne {
+	_u.mutation.SetPricingHash(v)
+	return _u
+}
+
+// SetNillablePricingHash sets the "pricing_hash" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillablePricingHash(v *string) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetPricingHash(*v)
+	}
+	return _u
+}
+
+// ClearPricingHash clears the value of the "pricing_hash" field.
+func (_u *UsageLogUpdateOne) ClearPricingHash() *UsageLogUpdateOne {
+	_u.mutation.ClearPricingHash()
 	return _u
 }
 
@@ -2284,6 +2437,21 @@ func (_u *UsageLogUpdateOne) check() error {
 			return &ValidationError{Name: "billing_model", err: fmt.Errorf(`ent: validator failed for field "UsageLog.billing_model": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.PricingSource(); ok {
+		if err := usagelog.PricingSourceValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_source", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_source": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.PricingRevision(); ok {
+		if err := usagelog.PricingRevisionValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_revision", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_revision": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.PricingHash(); ok {
+		if err := usagelog.PricingHashValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_hash", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_hash": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.ModelMappingChain(); ok {
 		if err := usagelog.ModelMappingChainValidator(v); err != nil {
 			return &ValidationError{Name: "model_mapping_chain", err: fmt.Errorf(`ent: validator failed for field "UsageLog.model_mapping_chain": %w`, err)}
@@ -2378,6 +2546,24 @@ func (_u *UsageLogUpdateOne) sqlSave(ctx context.Context) (_node *UsageLog, err 
 	}
 	if _u.mutation.BillingModelCleared() {
 		_spec.ClearField(usagelog.FieldBillingModel, field.TypeString)
+	}
+	if value, ok := _u.mutation.PricingSource(); ok {
+		_spec.SetField(usagelog.FieldPricingSource, field.TypeString, value)
+	}
+	if _u.mutation.PricingSourceCleared() {
+		_spec.ClearField(usagelog.FieldPricingSource, field.TypeString)
+	}
+	if value, ok := _u.mutation.PricingRevision(); ok {
+		_spec.SetField(usagelog.FieldPricingRevision, field.TypeString, value)
+	}
+	if _u.mutation.PricingRevisionCleared() {
+		_spec.ClearField(usagelog.FieldPricingRevision, field.TypeString)
+	}
+	if value, ok := _u.mutation.PricingHash(); ok {
+		_spec.SetField(usagelog.FieldPricingHash, field.TypeString, value)
+	}
+	if _u.mutation.PricingHashCleared() {
+		_spec.ClearField(usagelog.FieldPricingHash, field.TypeString)
 	}
 	if value, ok := _u.mutation.ChannelID(); ok {
 		_spec.SetField(usagelog.FieldChannelID, field.TypeInt64, value)

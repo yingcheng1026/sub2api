@@ -192,7 +192,12 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
-		result, err := h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, "")
+		result, err := h.gatewayService.ForwardAsChatCompletionsWithOptions(c.Request.Context(), c, account, forwardBody, promptCacheKey, "", service.OpenAIForwardOptions{
+			RequestedModel:          reqModel,
+			ChannelMapping:          channelMapping,
+			GroupID:                 apiKey.GroupID,
+			RequirePricingPreflight: true,
+		})
 
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		if accountReleaseFunc != nil {
@@ -252,6 +257,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						zap.Int("max_switches", maxAccountSwitches),
 					)
 					continue
+				}
+				if errors.Is(err, service.ErrOpenAIBillingPreflight) || errors.Is(err, service.ErrOpenAIPricingUnavailable) {
+					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+					h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "OpenAI billing preflight failed", streamStarted)
+					return
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 				wroteFallback := h.ensureForwardErrorResponse(c, streamStarted)

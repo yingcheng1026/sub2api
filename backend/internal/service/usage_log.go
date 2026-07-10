@@ -105,6 +105,10 @@ type UsageLog struct {
 	// Nil means it was not captured or the upstream model matched the requested model.
 	UpstreamModel *string
 	BillingModel  *string
+	// Pricing evidence is nullable for historical rows and admin-visible only.
+	PricingSource   *string
+	PricingRevision *string
+	PricingHash     *string
 	// ChannelID 渠道 ID
 	ChannelID *int64
 	// ModelMappingChain 模型映射链，如 "a→b→c"

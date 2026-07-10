@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -404,7 +405,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
-		result, err := h.gatewayService.Forward(c.Request.Context(), c, account, forwardBody)
+		result, err := h.gatewayService.ForwardWithOptions(c.Request.Context(), c, account, forwardBody, service.OpenAIForwardOptions{
+			RequestedModel:          reqModel,
+			ChannelMapping:          channelMapping,
+			GroupID:                 apiKey.GroupID,
+			RequirePricingPreflight: true,
+		})
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
@@ -463,6 +469,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						zap.Int("max_switches", maxAccountSwitches),
 					)
 					continue
+				}
+				if errors.Is(err, service.ErrOpenAIBillingPreflight) || errors.Is(err, service.ErrOpenAIPricingUnavailable) {
+					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+					h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "OpenAI billing preflight failed", streamStarted)
+					return
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 				wroteFallback := h.ensureForwardErrorResponse(c, streamStarted)
@@ -840,7 +851,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		if channelMappingMsg.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMappingMsg.MappedModel)
 		}
-		result, err := h.gatewayService.ForwardAsAnthropic(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
+		result, err := h.gatewayService.ForwardAsAnthropicWithOptions(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel, service.OpenAIForwardOptions{
+			RequestedModel:          reqModel,
+			ChannelMapping:          channelMappingMsg,
+			GroupID:                 apiKey.GroupID,
+			RequirePricingPreflight: true,
+		})
 
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		if accountReleaseFunc != nil {
@@ -900,6 +916,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						zap.Int("max_switches", maxAccountSwitches),
 					)
 					continue
+				}
+				if errors.Is(err, service.ErrOpenAIBillingPreflight) || errors.Is(err, service.ErrOpenAIPricingUnavailable) {
+					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+					h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "OpenAI billing preflight failed", streamStarted)
+					return
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 				wroteFallback := h.ensureAnthropicErrorResponse(c, streamStarted)
@@ -1436,10 +1457,29 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		reqLog.Warn("openai.websocket_bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 	}
 
+	wsPreflightOptions := service.OpenAIForwardOptions{
+		RequestedModel:          reqModel,
+		ChannelMapping:          channelMappingWS,
+		GroupID:                 apiKey.GroupID,
+		RequirePricingPreflight: true,
+	}
+	_, err = h.gatewayService.ResolveOpenAIWSBillingIdentity(ctx, account, wsPreflightOptions)
+	if err != nil {
+		reqLog.Warn("openai.websocket_billing_preflight_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenAI billing preflight failed")
+		return
+	}
+
 	token, _, err := h.gatewayService.GetAccessToken(ctx, account)
 	if err != nil {
 		reqLog.Warn("openai.websocket_get_access_token_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to get access token")
+		return
+	}
+	firstTurnBillingIdentity, err := h.gatewayService.ResolveOpenAIWSBillingIdentity(ctx, account, wsPreflightOptions)
+	if err != nil {
+		reqLog.Warn("openai.websocket_first_turn_billing_preflight_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenAI billing preflight failed")
 		return
 	}
 
@@ -1450,14 +1490,23 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		zap.Int("candidate_count", scheduleDecision.CandidateCount),
 	)
 
+	turnBillingIdentities := map[int]*service.ResolvedOpenAIBillingIdentity{1: firstTurnBillingIdentity}
+	var turnBillingIdentitiesMu sync.Mutex
 	hooks := &service.OpenAIWSIngressHooks{
 		InitialRequestModel: reqModel,
 		BeforeRequest: func(turn int, payload []byte, originalModel string) error {
-			if turn == 1 {
-				return nil
-			}
 			if !gjson.ValidBytes(payload) {
 				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
+			}
+			turnIdentity, preflightErr := h.gatewayService.ResolveOpenAIWSBillingIdentity(ctx, account, wsPreflightOptions)
+			if preflightErr != nil {
+				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "OpenAI billing preflight failed", preflightErr)
+			}
+			turnBillingIdentitiesMu.Lock()
+			turnBillingIdentities[turn] = turnIdentity
+			turnBillingIdentitiesMu.Unlock()
+			if turn == 1 {
+				return nil
 			}
 			model := strings.TrimSpace(originalModel)
 			if model == "" {
@@ -1505,6 +1554,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		},
 		AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
 			releaseTurnSlots()
+			turnBillingIdentitiesMu.Lock()
+			turnBillingIdentity := turnBillingIdentities[turn]
+			delete(turnBillingIdentities, turn)
+			turnBillingIdentitiesMu.Unlock()
 			if turnErr != nil {
 				if result == nil || result.ImageCount <= 0 {
 					return
@@ -1518,6 +1571,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			if result == nil {
 				return
 			}
+			service.AttachOpenAIBillingIdentity(result, turnBillingIdentity)
 			if account.Type == service.AccountTypeOAuth {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, result.ResponseHeaders)
 			}

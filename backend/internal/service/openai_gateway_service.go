@@ -219,6 +219,8 @@ type OpenAIForwardResult struct {
 	// This is set by the Anthropic Messages conversion path where
 	// the mapped upstream model differs from the client-facing model.
 	BillingModel string
+	// BillingIdentity is the immutable preflight snapshot used for settlement.
+	BillingIdentity *ResolvedOpenAIBillingIdentity
 	// UpstreamModel is the actual model sent to the upstream provider after mapping.
 	// Empty when no mapping was applied (requested model was used as-is).
 	UpstreamModel string
@@ -2090,6 +2092,12 @@ func (s *OpenAIGatewayService) handleFailoverSideEffects(ctx context.Context, re
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	return s.ForwardWithOptions(ctx, c, account, body, OpenAIForwardOptions{})
+}
+
+// ForwardWithOptions enables request handlers to supply the pre-account channel
+// identity while preserving Forward as a compatibility wrapper.
+func (s *OpenAIGatewayService) ForwardWithOptions(ctx context.Context, c *gin.Context, account *Account, body []byte, opts OpenAIForwardOptions) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
 
 	restrictionResult := s.detectCodexClientRestriction(c, account)
@@ -2161,7 +2169,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		// 透传分支只需要轻量提取字段，避免热路径全量 Unmarshal。
 		reasoningEffort := extractOpenAIReasoningEffortFromBody(body, reqModel)
-		return s.forwardOpenAIPassthrough(ctx, c, account, body, reqModel, reasoningEffort, reqStream, startTime)
+		return s.forwardOpenAIPassthrough(ctx, c, account, body, reqModel, reasoningEffort, reqStream, startTime, opts)
 	}
 
 	reqBody, err := getOpenAIRequestBodyMap(c, body)
@@ -2578,6 +2586,32 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 	}
 
+	requestedForIdentity := firstNonEmptyModel(opts.RequestedModel, originalModel)
+	channelMappedForIdentity := firstNonEmptyModel(opts.ChannelMapping.MappedModel, originalModel)
+	identityRequired := opts.RequirePricingPreflight
+	if _, family := classifyOpenAIGPT56PreviewModel(upstreamModel); family {
+		identityRequired = true
+	}
+	var billingIdentity *ResolvedOpenAIBillingIdentity
+	if identityRequired {
+		billingIdentity, err = s.ResolveOpenAIBillingIdentity(ctx, OpenAIBillingIdentityInput{
+			RequestedModel:        requestedForIdentity,
+			DispatchModel:         originalModel,
+			ChannelMappedModel:    channelMappedForIdentity,
+			ChannelMappingApplied: opts.ChannelMapping.Mapped,
+			ChannelMappingExact:   opts.ChannelMapping.MappingExact,
+			AccountMappedModel:    billingModel,
+			UpstreamModel:         upstreamModel,
+			BillingModelSource:    opts.ChannelMapping.BillingModelSource,
+			ChannelID:             opts.ChannelMapping.ChannelID,
+			ModelMappingChain:     opts.ChannelMapping.BuildModelMappingChain(requestedForIdentity, upstreamModel),
+			GroupID:               opts.GroupID,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
@@ -2792,6 +2826,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				wsAttempts,
 			)
 			wsResult.UpstreamModel = upstreamModel
+			wsResult.BillingIdentity = billingIdentity
+			if billingIdentity != nil {
+				wsResult.BillingModel = billingIdentity.BillingModel
+			}
 			if wsResult.ImageCount > 0 {
 				wsResult.ImageSize = imageSizeTier
 				wsResult.BillingModel = imageBillingModel
@@ -2942,6 +2980,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			OpenAIWSMode:    false,
 			Duration:        time.Since(startTime),
 			FirstTokenMs:    firstTokenMs,
+			BillingIdentity: billingIdentity,
+		}
+		if billingIdentity != nil {
+			forwardResult.BillingModel = billingIdentity.BillingModel
 		}
 		if imageCount > 0 {
 			forwardResult.ImageCount = imageCount
@@ -2961,6 +3003,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	reasoningEffort *string,
 	reqStream bool,
 	startTime time.Time,
+	opts OpenAIForwardOptions,
 ) (*OpenAIForwardResult, error) {
 	upstreamPassthroughModel := ""
 	compactBaseModel := reqModel
@@ -3126,6 +3169,32 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 	}
 
+	finalUpstreamModel := firstNonEmptyModel(upstreamPassthroughModel, policyModel)
+	requestedForIdentity := firstNonEmptyModel(opts.RequestedModel, reqModel)
+	identityRequired := opts.RequirePricingPreflight
+	if _, family := classifyOpenAIGPT56PreviewModel(finalUpstreamModel); family {
+		identityRequired = true
+	}
+	var billingIdentity *ResolvedOpenAIBillingIdentity
+	if identityRequired {
+		billingIdentity, err = s.ResolveOpenAIBillingIdentity(ctx, OpenAIBillingIdentityInput{
+			RequestedModel:        requestedForIdentity,
+			DispatchModel:         reqModel,
+			ChannelMappedModel:    firstNonEmptyModel(opts.ChannelMapping.MappedModel, reqModel),
+			ChannelMappingApplied: opts.ChannelMapping.Mapped,
+			ChannelMappingExact:   opts.ChannelMapping.MappingExact,
+			AccountMappedModel:    compactBaseModel,
+			UpstreamModel:         finalUpstreamModel,
+			BillingModelSource:    opts.ChannelMapping.BillingModelSource,
+			ChannelID:             opts.ChannelMapping.ChannelID,
+			ModelMappingChain:     opts.ChannelMapping.BuildModelMappingChain(requestedForIdentity, finalUpstreamModel),
+			GroupID:               opts.GroupID,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
@@ -3222,6 +3291,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		OpenAIWSMode:    false,
 		Duration:        time.Since(startTime),
 		FirstTokenMs:    firstTokenMs,
+		BillingIdentity: billingIdentity,
+	}
+	if billingIdentity != nil {
+		forwardResult.BillingModel = billingIdentity.BillingModel
 	}
 	if imageCount > 0 {
 		forwardResult.ImageCount = imageCount
@@ -5393,6 +5466,9 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	var cost *CostBreakdown
 	var err error
 	billingModel := forwardResultBillingModel(result.Model, result.UpstreamModel)
+	if result.BillingIdentity != nil {
+		billingModel = strings.TrimSpace(result.BillingIdentity.BillingModel)
+	}
 	if result.BillingModel != "" {
 		billingModel = strings.TrimSpace(result.BillingModel)
 	}
@@ -5419,7 +5495,28 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		serviceTier = strings.TrimSpace(*result.ServiceTier)
 	}
 	var successfulBillingModel string
-	cost, successfulBillingModel, err = s.calculateOpenAIRecordUsageCost(ctx, result, apiKey, billingModels, multiplier, imageMultiplier, tokens, serviceTier)
+	usedPreflightQuote := false
+	if result.BillingIdentity != nil && result.BillingIdentity.Pricing != nil && result.ImageCount == 0 {
+		resolved := result.BillingIdentity.Pricing.CloneResolved()
+		resolver := s.resolver
+		if resolver == nil {
+			resolver = NewModelPricingResolver(s.channelService, s.billingService)
+		}
+		var groupID *int64
+		if apiKey != nil && apiKey.Group != nil {
+			gid := apiKey.Group.ID
+			groupID = &gid
+		}
+		cost, err = s.billingService.CalculateCostUnified(CostInput{
+			Ctx: ctx, Model: billingModel, GroupID: groupID, Tokens: tokens,
+			RequestCount: 1, RateMultiplier: multiplier, ServiceTier: serviceTier,
+			Resolver: resolver, Resolved: resolved,
+		})
+		successfulBillingModel = billingModel
+		usedPreflightQuote = err == nil
+	} else {
+		cost, successfulBillingModel, err = s.calculateOpenAIRecordUsageCost(ctx, result, apiKey, billingModels, multiplier, imageMultiplier, tokens, serviceTier)
+	}
 	if err != nil {
 		return err
 	}
@@ -5465,6 +5562,12 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageOutputTokens:   result.Usage.ImageOutputTokens,
 		ImageCount:          result.ImageCount,
 		ImageSize:           optionalTrimmedStringPtr(result.ImageSize),
+	}
+	if usedPreflightQuote {
+		evidence := result.BillingIdentity.Pricing.Evidence
+		usageLog.PricingSource = optionalTrimmedStringPtr(evidence.Source)
+		usageLog.PricingRevision = optionalTrimmedStringPtr(evidence.Revision)
+		usageLog.PricingHash = optionalTrimmedStringPtr(evidence.Hash)
 	}
 	if cost != nil {
 		usageLog.InputCost = cost.InputCost

@@ -64,6 +64,17 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	body []byte,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	return s.forwardAsRawChatCompletionsWithOptions(ctx, c, account, body, defaultMappedModel, OpenAIForwardOptions{})
+}
+
+func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithOptions(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	defaultMappedModel string,
+	opts OpenAIForwardOptions,
+) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
 
 	// 1. Parse minimal fields needed for routing/billing
@@ -113,6 +124,11 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		zap.String("upstream_model", upstreamModel),
 		zap.Bool("stream", clientStream),
 	)
+
+	billingIdentity, err := s.resolveForwardBillingIdentity(ctx, opts, originalModel, originalModel, billingModel, upstreamModel)
+	if err != nil {
+		return nil, err
+	}
 
 	// 5. Build upstream request
 	apiKey := account.GetOpenAIApiKey()
@@ -219,10 +235,16 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	}
 
 	// 8. Forward response
+	var result *OpenAIForwardResult
 	if clientStream {
-		return s.streamRawChatCompletions(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		result, err = s.streamRawChatCompletions(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	} else {
+		result, err = s.bufferRawChatCompletions(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
-	return s.bufferRawChatCompletions(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	if err == nil {
+		attachOpenAIBillingIdentity(result, billingIdentity)
+	}
+	return result, err
 }
 
 // streamRawChatCompletions 透传上游 CC SSE 流到客户端，并提取 usage（包括

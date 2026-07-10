@@ -100,6 +100,48 @@ func (_c *UsageLogCreate) SetNillableBillingModel(v *string) *UsageLogCreate {
 	return _c
 }
 
+// SetPricingSource sets the "pricing_source" field.
+func (_c *UsageLogCreate) SetPricingSource(v string) *UsageLogCreate {
+	_c.mutation.SetPricingSource(v)
+	return _c
+}
+
+// SetNillablePricingSource sets the "pricing_source" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillablePricingSource(v *string) *UsageLogCreate {
+	if v != nil {
+		_c.SetPricingSource(*v)
+	}
+	return _c
+}
+
+// SetPricingRevision sets the "pricing_revision" field.
+func (_c *UsageLogCreate) SetPricingRevision(v string) *UsageLogCreate {
+	_c.mutation.SetPricingRevision(v)
+	return _c
+}
+
+// SetNillablePricingRevision sets the "pricing_revision" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillablePricingRevision(v *string) *UsageLogCreate {
+	if v != nil {
+		_c.SetPricingRevision(*v)
+	}
+	return _c
+}
+
+// SetPricingHash sets the "pricing_hash" field.
+func (_c *UsageLogCreate) SetPricingHash(v string) *UsageLogCreate {
+	_c.mutation.SetPricingHash(v)
+	return _c
+}
+
+// SetNillablePricingHash sets the "pricing_hash" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillablePricingHash(v *string) *UsageLogCreate {
+	if v != nil {
+		_c.SetPricingHash(*v)
+	}
+	return _c
+}
+
 // SetChannelID sets the "channel_id" field.
 func (_c *UsageLogCreate) SetChannelID(v int64) *UsageLogCreate {
 	_c.mutation.SetChannelID(v)
@@ -711,6 +753,21 @@ func (_c *UsageLogCreate) check() error {
 			return &ValidationError{Name: "billing_model", err: fmt.Errorf(`ent: validator failed for field "UsageLog.billing_model": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.PricingSource(); ok {
+		if err := usagelog.PricingSourceValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_source", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_source": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.PricingRevision(); ok {
+		if err := usagelog.PricingRevisionValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_revision", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_revision": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.PricingHash(); ok {
+		if err := usagelog.PricingHashValidator(v); err != nil {
+			return &ValidationError{Name: "pricing_hash", err: fmt.Errorf(`ent: validator failed for field "UsageLog.pricing_hash": %w`, err)}
+		}
+	}
 	if v, ok := _c.mutation.ModelMappingChain(); ok {
 		if err := usagelog.ModelMappingChainValidator(v); err != nil {
 			return &ValidationError{Name: "model_mapping_chain", err: fmt.Errorf(`ent: validator failed for field "UsageLog.model_mapping_chain": %w`, err)}
@@ -850,6 +907,18 @@ func (_c *UsageLogCreate) createSpec() (*UsageLog, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.BillingModel(); ok {
 		_spec.SetField(usagelog.FieldBillingModel, field.TypeString, value)
 		_node.BillingModel = &value
+	}
+	if value, ok := _c.mutation.PricingSource(); ok {
+		_spec.SetField(usagelog.FieldPricingSource, field.TypeString, value)
+		_node.PricingSource = &value
+	}
+	if value, ok := _c.mutation.PricingRevision(); ok {
+		_spec.SetField(usagelog.FieldPricingRevision, field.TypeString, value)
+		_node.PricingRevision = &value
+	}
+	if value, ok := _c.mutation.PricingHash(); ok {
+		_spec.SetField(usagelog.FieldPricingHash, field.TypeString, value)
+		_node.PricingHash = &value
 	}
 	if value, ok := _c.mutation.ChannelID(); ok {
 		_spec.SetField(usagelog.FieldChannelID, field.TypeInt64, value)
@@ -1227,6 +1296,60 @@ func (u *UsageLogUpsert) UpdateBillingModel() *UsageLogUpsert {
 // ClearBillingModel clears the value of the "billing_model" field.
 func (u *UsageLogUpsert) ClearBillingModel() *UsageLogUpsert {
 	u.SetNull(usagelog.FieldBillingModel)
+	return u
+}
+
+// SetPricingSource sets the "pricing_source" field.
+func (u *UsageLogUpsert) SetPricingSource(v string) *UsageLogUpsert {
+	u.Set(usagelog.FieldPricingSource, v)
+	return u
+}
+
+// UpdatePricingSource sets the "pricing_source" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdatePricingSource() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldPricingSource)
+	return u
+}
+
+// ClearPricingSource clears the value of the "pricing_source" field.
+func (u *UsageLogUpsert) ClearPricingSource() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldPricingSource)
+	return u
+}
+
+// SetPricingRevision sets the "pricing_revision" field.
+func (u *UsageLogUpsert) SetPricingRevision(v string) *UsageLogUpsert {
+	u.Set(usagelog.FieldPricingRevision, v)
+	return u
+}
+
+// UpdatePricingRevision sets the "pricing_revision" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdatePricingRevision() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldPricingRevision)
+	return u
+}
+
+// ClearPricingRevision clears the value of the "pricing_revision" field.
+func (u *UsageLogUpsert) ClearPricingRevision() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldPricingRevision)
+	return u
+}
+
+// SetPricingHash sets the "pricing_hash" field.
+func (u *UsageLogUpsert) SetPricingHash(v string) *UsageLogUpsert {
+	u.Set(usagelog.FieldPricingHash, v)
+	return u
+}
+
+// UpdatePricingHash sets the "pricing_hash" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdatePricingHash() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldPricingHash)
+	return u
+}
+
+// ClearPricingHash clears the value of the "pricing_hash" field.
+func (u *UsageLogUpsert) ClearPricingHash() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldPricingHash)
 	return u
 }
 
@@ -1939,6 +2062,69 @@ func (u *UsageLogUpsertOne) UpdateBillingModel() *UsageLogUpsertOne {
 func (u *UsageLogUpsertOne) ClearBillingModel() *UsageLogUpsertOne {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.ClearBillingModel()
+	})
+}
+
+// SetPricingSource sets the "pricing_source" field.
+func (u *UsageLogUpsertOne) SetPricingSource(v string) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetPricingSource(v)
+	})
+}
+
+// UpdatePricingSource sets the "pricing_source" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdatePricingSource() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdatePricingSource()
+	})
+}
+
+// ClearPricingSource clears the value of the "pricing_source" field.
+func (u *UsageLogUpsertOne) ClearPricingSource() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearPricingSource()
+	})
+}
+
+// SetPricingRevision sets the "pricing_revision" field.
+func (u *UsageLogUpsertOne) SetPricingRevision(v string) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetPricingRevision(v)
+	})
+}
+
+// UpdatePricingRevision sets the "pricing_revision" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdatePricingRevision() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdatePricingRevision()
+	})
+}
+
+// ClearPricingRevision clears the value of the "pricing_revision" field.
+func (u *UsageLogUpsertOne) ClearPricingRevision() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearPricingRevision()
+	})
+}
+
+// SetPricingHash sets the "pricing_hash" field.
+func (u *UsageLogUpsertOne) SetPricingHash(v string) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetPricingHash(v)
+	})
+}
+
+// UpdatePricingHash sets the "pricing_hash" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdatePricingHash() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdatePricingHash()
+	})
+}
+
+// ClearPricingHash clears the value of the "pricing_hash" field.
+func (u *UsageLogUpsertOne) ClearPricingHash() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearPricingHash()
 	})
 }
 
@@ -2906,6 +3092,69 @@ func (u *UsageLogUpsertBulk) UpdateBillingModel() *UsageLogUpsertBulk {
 func (u *UsageLogUpsertBulk) ClearBillingModel() *UsageLogUpsertBulk {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.ClearBillingModel()
+	})
+}
+
+// SetPricingSource sets the "pricing_source" field.
+func (u *UsageLogUpsertBulk) SetPricingSource(v string) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetPricingSource(v)
+	})
+}
+
+// UpdatePricingSource sets the "pricing_source" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdatePricingSource() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdatePricingSource()
+	})
+}
+
+// ClearPricingSource clears the value of the "pricing_source" field.
+func (u *UsageLogUpsertBulk) ClearPricingSource() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearPricingSource()
+	})
+}
+
+// SetPricingRevision sets the "pricing_revision" field.
+func (u *UsageLogUpsertBulk) SetPricingRevision(v string) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetPricingRevision(v)
+	})
+}
+
+// UpdatePricingRevision sets the "pricing_revision" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdatePricingRevision() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdatePricingRevision()
+	})
+}
+
+// ClearPricingRevision clears the value of the "pricing_revision" field.
+func (u *UsageLogUpsertBulk) ClearPricingRevision() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearPricingRevision()
+	})
+}
+
+// SetPricingHash sets the "pricing_hash" field.
+func (u *UsageLogUpsertBulk) SetPricingHash(v string) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetPricingHash(v)
+	})
+}
+
+// UpdatePricingHash sets the "pricing_hash" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdatePricingHash() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdatePricingHash()
+	})
+}
+
+// ClearPricingHash clears the value of the "pricing_hash" field.
+func (u *UsageLogUpsertBulk) ClearPricingHash() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearPricingHash()
 	})
 }
 

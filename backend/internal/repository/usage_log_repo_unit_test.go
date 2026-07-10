@@ -84,7 +84,7 @@ func TestUsageLogRepositoryBillingModelPersistenceContract(t *testing.T) {
 	}
 	prepared := prepareUsageLogInsert(log)
 
-	require.Contains(t, usageLogSelectColumns, "requested_model, upstream_model, billing_model, group_id")
+	require.Contains(t, usageLogSelectColumns, "requested_model, upstream_model, billing_model, pricing_source, pricing_revision, pricing_hash, group_id")
 	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
 	require.Equal(t, "text", usageLogInsertArgTypes[7])
 	require.Equal(t, sql.NullString{String: billingModel, Valid: true}, prepared.args[7])
@@ -93,8 +93,36 @@ func TestUsageLogRepositoryBillingModelPersistenceContract(t *testing.T) {
 	batchQuery, _ := buildUsageLogBatchInsertQuery([]string{key}, map[string]usageLogInsertPrepared{key: prepared})
 	bestEffortQuery, _ := buildUsageLogBestEffortInsertQuery([]usageLogInsertPrepared{prepared})
 	for _, query := range []string{batchQuery, bestEffortQuery} {
-		require.Contains(t, query, "requested_model,\n\t\t\tupstream_model,\n\t\t\tbilling_model,")
+		require.Contains(t, query, "requested_model,\n\t\t\tupstream_model,\n\t\t\tbilling_model,\n\t\t\tpricing_source,\n\t\t\tpricing_revision,\n\t\t\tpricing_hash,")
 		require.Contains(t, query, "billing_model")
+	}
+}
+
+func TestUsageLogRepositoryPricingEvidencePersistenceContract(t *testing.T) {
+	pricingSource := service.PricingSourceBuiltinGPT56
+	pricingRevision := service.GPT56PricingRevision
+	pricingHash := strings.Repeat("a", 64)
+	log := &service.UsageLog{
+		UserID: 1, APIKeyID: 2, AccountID: 3,
+		RequestID: "req-pricing-evidence", Model: "gpt-5.6-terra",
+		PricingSource: &pricingSource, PricingRevision: &pricingRevision, PricingHash: &pricingHash,
+		CreatedAt: time.Now().UTC(),
+	}
+	prepared := prepareUsageLogInsert(log)
+
+	require.Contains(t, usageLogSelectColumns, "billing_model, pricing_source, pricing_revision, pricing_hash, group_id")
+	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
+	require.Equal(t, sql.NullString{String: pricingSource, Valid: true}, prepared.args[8])
+	require.Equal(t, sql.NullString{String: pricingRevision, Valid: true}, prepared.args[9])
+	require.Equal(t, sql.NullString{String: pricingHash, Valid: true}, prepared.args[10])
+
+	key := usageLogBatchKey(log.RequestID, log.APIKeyID)
+	batchQuery, _ := buildUsageLogBatchInsertQuery([]string{key}, map[string]usageLogInsertPrepared{key: prepared})
+	bestEffortQuery, _ := buildUsageLogBestEffortInsertQuery([]usageLogInsertPrepared{prepared})
+	for _, query := range []string{batchQuery, bestEffortQuery} {
+		require.Contains(t, query, "pricing_source")
+		require.Contains(t, query, "pricing_revision")
+		require.Contains(t, query, "pricing_hash")
 	}
 }
 
@@ -146,6 +174,7 @@ func TestScanUsageLogBillingModelPreservesValueAndHistoricalNull(t *testing.T) {
 		sql.NullString{Valid: true, String: "claude-sonnet-4-6"},
 		sql.NullString{Valid: true, String: "gpt-5.4"},
 		sql.NullString{Valid: true, String: "gpt-5.4"},
+		sql.NullString{}, sql.NullString{}, sql.NullString{},
 		sql.NullInt64{}, sql.NullInt64{},
 		1, 2, 3, 4, 5, 6,
 		0, 0.0,

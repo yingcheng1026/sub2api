@@ -36327,6 +36327,9 @@ type UsageLogMutation struct {
 	requested_model              *string
 	upstream_model               *string
 	billing_model                *string
+	pricing_source               *string
+	pricing_revision             *string
+	pricing_hash                 *string
 	channel_id                   *int64
 	addchannel_id                *int64
 	model_mapping_chain          *string
@@ -36816,6 +36819,153 @@ func (m *UsageLogMutation) BillingModelCleared() bool {
 func (m *UsageLogMutation) ResetBillingModel() {
 	m.billing_model = nil
 	delete(m.clearedFields, usagelog.FieldBillingModel)
+}
+
+// SetPricingSource sets the "pricing_source" field.
+func (m *UsageLogMutation) SetPricingSource(s string) {
+	m.pricing_source = &s
+}
+
+// PricingSource returns the value of the "pricing_source" field in the mutation.
+func (m *UsageLogMutation) PricingSource() (r string, exists bool) {
+	v := m.pricing_source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPricingSource returns the old "pricing_source" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldPricingSource(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPricingSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPricingSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPricingSource: %w", err)
+	}
+	return oldValue.PricingSource, nil
+}
+
+// ClearPricingSource clears the value of the "pricing_source" field.
+func (m *UsageLogMutation) ClearPricingSource() {
+	m.pricing_source = nil
+	m.clearedFields[usagelog.FieldPricingSource] = struct{}{}
+}
+
+// PricingSourceCleared returns if the "pricing_source" field was cleared in this mutation.
+func (m *UsageLogMutation) PricingSourceCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldPricingSource]
+	return ok
+}
+
+// ResetPricingSource resets all changes to the "pricing_source" field.
+func (m *UsageLogMutation) ResetPricingSource() {
+	m.pricing_source = nil
+	delete(m.clearedFields, usagelog.FieldPricingSource)
+}
+
+// SetPricingRevision sets the "pricing_revision" field.
+func (m *UsageLogMutation) SetPricingRevision(s string) {
+	m.pricing_revision = &s
+}
+
+// PricingRevision returns the value of the "pricing_revision" field in the mutation.
+func (m *UsageLogMutation) PricingRevision() (r string, exists bool) {
+	v := m.pricing_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPricingRevision returns the old "pricing_revision" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldPricingRevision(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPricingRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPricingRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPricingRevision: %w", err)
+	}
+	return oldValue.PricingRevision, nil
+}
+
+// ClearPricingRevision clears the value of the "pricing_revision" field.
+func (m *UsageLogMutation) ClearPricingRevision() {
+	m.pricing_revision = nil
+	m.clearedFields[usagelog.FieldPricingRevision] = struct{}{}
+}
+
+// PricingRevisionCleared returns if the "pricing_revision" field was cleared in this mutation.
+func (m *UsageLogMutation) PricingRevisionCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldPricingRevision]
+	return ok
+}
+
+// ResetPricingRevision resets all changes to the "pricing_revision" field.
+func (m *UsageLogMutation) ResetPricingRevision() {
+	m.pricing_revision = nil
+	delete(m.clearedFields, usagelog.FieldPricingRevision)
+}
+
+// SetPricingHash sets the "pricing_hash" field.
+func (m *UsageLogMutation) SetPricingHash(s string) {
+	m.pricing_hash = &s
+}
+
+// PricingHash returns the value of the "pricing_hash" field in the mutation.
+func (m *UsageLogMutation) PricingHash() (r string, exists bool) {
+	v := m.pricing_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPricingHash returns the old "pricing_hash" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldPricingHash(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPricingHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPricingHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPricingHash: %w", err)
+	}
+	return oldValue.PricingHash, nil
+}
+
+// ClearPricingHash clears the value of the "pricing_hash" field.
+func (m *UsageLogMutation) ClearPricingHash() {
+	m.pricing_hash = nil
+	m.clearedFields[usagelog.FieldPricingHash] = struct{}{}
+}
+
+// PricingHashCleared returns if the "pricing_hash" field was cleared in this mutation.
+func (m *UsageLogMutation) PricingHashCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldPricingHash]
+	return ok
+}
+
+// ResetPricingHash resets all changes to the "pricing_hash" field.
+func (m *UsageLogMutation) ResetPricingHash() {
+	m.pricing_hash = nil
+	delete(m.clearedFields, usagelog.FieldPricingHash)
 }
 
 // SetChannelID sets the "channel_id" field.
@@ -38661,7 +38811,7 @@ func (m *UsageLogMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UsageLogMutation) Fields() []string {
-	fields := make([]string, 0, 38)
+	fields := make([]string, 0, 41)
 	if m.user != nil {
 		fields = append(fields, usagelog.FieldUserID)
 	}
@@ -38685,6 +38835,15 @@ func (m *UsageLogMutation) Fields() []string {
 	}
 	if m.billing_model != nil {
 		fields = append(fields, usagelog.FieldBillingModel)
+	}
+	if m.pricing_source != nil {
+		fields = append(fields, usagelog.FieldPricingSource)
+	}
+	if m.pricing_revision != nil {
+		fields = append(fields, usagelog.FieldPricingRevision)
+	}
+	if m.pricing_hash != nil {
+		fields = append(fields, usagelog.FieldPricingHash)
 	}
 	if m.channel_id != nil {
 		fields = append(fields, usagelog.FieldChannelID)
@@ -38800,6 +38959,12 @@ func (m *UsageLogMutation) Field(name string) (ent.Value, bool) {
 		return m.UpstreamModel()
 	case usagelog.FieldBillingModel:
 		return m.BillingModel()
+	case usagelog.FieldPricingSource:
+		return m.PricingSource()
+	case usagelog.FieldPricingRevision:
+		return m.PricingRevision()
+	case usagelog.FieldPricingHash:
+		return m.PricingHash()
 	case usagelog.FieldChannelID:
 		return m.ChannelID()
 	case usagelog.FieldModelMappingChain:
@@ -38885,6 +39050,12 @@ func (m *UsageLogMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldUpstreamModel(ctx)
 	case usagelog.FieldBillingModel:
 		return m.OldBillingModel(ctx)
+	case usagelog.FieldPricingSource:
+		return m.OldPricingSource(ctx)
+	case usagelog.FieldPricingRevision:
+		return m.OldPricingRevision(ctx)
+	case usagelog.FieldPricingHash:
+		return m.OldPricingHash(ctx)
 	case usagelog.FieldChannelID:
 		return m.OldChannelID(ctx)
 	case usagelog.FieldModelMappingChain:
@@ -39009,6 +39180,27 @@ func (m *UsageLogMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetBillingModel(v)
+		return nil
+	case usagelog.FieldPricingSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPricingSource(v)
+		return nil
+	case usagelog.FieldPricingRevision:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPricingRevision(v)
+		return nil
+	case usagelog.FieldPricingHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPricingHash(v)
 		return nil
 	case usagelog.FieldChannelID:
 		v, ok := value.(int64)
@@ -39490,6 +39682,15 @@ func (m *UsageLogMutation) ClearedFields() []string {
 	if m.FieldCleared(usagelog.FieldBillingModel) {
 		fields = append(fields, usagelog.FieldBillingModel)
 	}
+	if m.FieldCleared(usagelog.FieldPricingSource) {
+		fields = append(fields, usagelog.FieldPricingSource)
+	}
+	if m.FieldCleared(usagelog.FieldPricingRevision) {
+		fields = append(fields, usagelog.FieldPricingRevision)
+	}
+	if m.FieldCleared(usagelog.FieldPricingHash) {
+		fields = append(fields, usagelog.FieldPricingHash)
+	}
 	if m.FieldCleared(usagelog.FieldChannelID) {
 		fields = append(fields, usagelog.FieldChannelID)
 	}
@@ -39548,6 +39749,15 @@ func (m *UsageLogMutation) ClearField(name string) error {
 		return nil
 	case usagelog.FieldBillingModel:
 		m.ClearBillingModel()
+		return nil
+	case usagelog.FieldPricingSource:
+		m.ClearPricingSource()
+		return nil
+	case usagelog.FieldPricingRevision:
+		m.ClearPricingRevision()
+		return nil
+	case usagelog.FieldPricingHash:
+		m.ClearPricingHash()
 		return nil
 	case usagelog.FieldChannelID:
 		m.ClearChannelID()
@@ -39616,6 +39826,15 @@ func (m *UsageLogMutation) ResetField(name string) error {
 		return nil
 	case usagelog.FieldBillingModel:
 		m.ResetBillingModel()
+		return nil
+	case usagelog.FieldPricingSource:
+		m.ResetPricingSource()
+		return nil
+	case usagelog.FieldPricingRevision:
+		m.ResetPricingRevision()
+		return nil
+	case usagelog.FieldPricingHash:
+		m.ResetPricingHash()
 		return nil
 	case usagelog.FieldChannelID:
 		m.ResetChannelID()

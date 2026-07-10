@@ -7,6 +7,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,9 +38,9 @@ func TestResolve_NoGroupID(t *testing.T) {
 	require.Equal(t, BillingModeToken, resolved.Mode)
 	require.NotNil(t, resolved.BasePricing)
 	require.InDelta(t, 3e-6, resolved.BasePricing.InputPricePerToken, 1e-12)
-	// BillingService.GetModelPricing uses fallback internally, but resolveBasePricing
-	// reports "litellm" when GetModelPricing succeeds (regardless of internal source)
-	require.Equal(t, "litellm", resolved.Source)
+	// The resolver preserves the actual source instead of labelling a built-in
+	// fallback as LiteLLM evidence.
+	require.Equal(t, PricingSourceBuiltinFallback, resolved.Source)
 }
 
 func TestResolve_UnknownModel(t *testing.T) {
@@ -191,6 +192,59 @@ func newResolverWithChannel(t *testing.T, pricing []ChannelModelPricing) *ModelP
 
 // groupIDPtr returns a pointer to groupID 100 (the test constant).
 func groupIDPtr() *int64 { v := int64(100); return &v }
+
+func TestResolvePricingQuoteGPT56RejectsWildcardChannelPricing(t *testing.T) {
+	const groupID int64 = 100
+	repo := &mockChannelRepository{
+		listAllFn: func(context.Context) ([]Channel, error) {
+			return []Channel{{
+				ID: 1, Name: "gpt56-pricing", Status: StatusActive, GroupIDs: []int64{groupID},
+				ModelPricing: []ChannelModelPricing{{
+					Platform: "openai", Models: []string{"gpt-5.6-*"}, BillingMode: BillingModeToken,
+					InputPrice: testPtrFloat64(1e-6), OutputPrice: testPtrFloat64(2e-6),
+				}},
+			}}, nil
+		},
+		getGroupPlatformsFn: func(context.Context, []int64) (map[int64]string, error) {
+			return map[int64]string{groupID: PlatformOpenAI}, nil
+		},
+	}
+	cfg := &config.Config{}
+	billing := NewBillingService(cfg, NewPricingService(cfg, nil))
+	resolver := NewModelPricingResolver(NewChannelService(repo, nil, nil, nil), billing)
+
+	quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "gpt-5.6-terra", GroupID: groupIDPtr()})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrOpenAIPricingUnavailable)
+	require.Nil(t, quote)
+}
+
+func TestResolvePricingQuoteGPT56AcceptsExactChannelPricing(t *testing.T) {
+	const groupID int64 = 100
+	repo := &mockChannelRepository{
+		listAllFn: func(context.Context) ([]Channel, error) {
+			return []Channel{{
+				ID: 1, Name: "gpt56-pricing", Status: StatusActive, GroupIDs: []int64{groupID},
+				ModelPricing: []ChannelModelPricing{{
+					Platform: "openai", Models: []string{"gpt-5.6-terra"}, BillingMode: BillingModeToken,
+					InputPrice: testPtrFloat64(1e-6), OutputPrice: testPtrFloat64(2e-6),
+				}},
+			}}, nil
+		},
+		getGroupPlatformsFn: func(context.Context, []int64) (map[int64]string, error) {
+			return map[int64]string{groupID: PlatformOpenAI}, nil
+		},
+	}
+	cfg := &config.Config{}
+	billing := NewBillingService(cfg, NewPricingService(cfg, nil))
+	resolver := NewModelPricingResolver(NewChannelService(repo, nil, nil, nil), billing)
+
+	quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "gpt-5.6-terra", GroupID: groupIDPtr()})
+	require.NoError(t, err)
+	require.NotNil(t, quote)
+	require.Equal(t, PricingSourceChannel, quote.Evidence.Source)
+	require.Equal(t, channelPricingRevision, quote.Evidence.Revision)
+}
 
 // ---------------------------------------------------------------------------
 // 1. Token mode overrides

@@ -97,6 +97,7 @@ type ChannelMappingResult struct {
 	MappedModel        string // 映射后的模型名（无映射时等于原始模型名）
 	ChannelID          int64  // 渠道 ID（0 = 无渠道关联）
 	Mapped             bool   // 是否发生了映射
+	MappingExact       bool   // true when the configured source was an exact model slug
 	BillingModelSource string // 计费模型来源（"requested" / "upstream" / "channel_mapped"）
 }
 
@@ -379,36 +380,46 @@ func (c *channelCache) matchWildcardMapping(groupID int64, platform, modelLower 
 // lookupPricingAcrossPlatforms 在分组平台内查找模型定价。
 // 各平台严格独立，只在本平台内查找（先精确匹配，再通配符）。
 func lookupPricingAcrossPlatforms(cache *channelCache, groupID int64, groupPlatform, modelLower string) *ChannelModelPricing {
+	pricing, _ := lookupPricingAcrossPlatformsWithExact(cache, groupID, groupPlatform, modelLower)
+	return pricing
+}
+
+func lookupPricingAcrossPlatformsWithExact(cache *channelCache, groupID int64, groupPlatform, modelLower string) (*ChannelModelPricing, bool) {
 	for _, p := range matchingPlatforms(groupPlatform) {
 		key := channelModelKey{groupID: groupID, platform: p, model: modelLower}
 		if pricing, ok := cache.pricingByGroupModel[key]; ok {
-			return pricing
+			return pricing, true
 		}
 	}
 	// 精确查找全部失败，依次尝试通配符匹配
 	for _, p := range matchingPlatforms(groupPlatform) {
 		if pricing := cache.matchWildcard(groupID, p, modelLower); pricing != nil {
-			return pricing
+			return pricing, false
 		}
 	}
-	return nil
+	return nil, false
 }
 
 // lookupMappingAcrossPlatforms 在分组平台内查找模型映射。
 // 逻辑与 lookupPricingAcrossPlatforms 相同：先精确查找，再通配符。
 func lookupMappingAcrossPlatforms(cache *channelCache, groupID int64, groupPlatform, modelLower string) string {
+	mapped, _ := lookupMappingAcrossPlatformsWithExact(cache, groupID, groupPlatform, modelLower)
+	return mapped
+}
+
+func lookupMappingAcrossPlatformsWithExact(cache *channelCache, groupID int64, groupPlatform, modelLower string) (string, bool) {
 	for _, p := range matchingPlatforms(groupPlatform) {
 		key := channelModelKey{groupID: groupID, platform: p, model: modelLower}
 		if mapped, ok := cache.mappingByGroupModel[key]; ok {
-			return mapped
+			return mapped, true
 		}
 	}
 	for _, p := range matchingPlatforms(groupPlatform) {
 		if mapped := cache.matchWildcardMapping(groupID, p, modelLower); mapped != "" {
-			return mapped
+			return mapped, false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // GetChannelForGroup 获取分组关联的渠道（热路径 O(1)）
@@ -463,23 +474,40 @@ func (s *ChannelService) lookupGroupChannel(ctx context.Context, groupID int64) 
 // GetChannelModelPricing 获取指定分组+模型的渠道定价（热路径 O(1)）。
 // 各平台严格独立，只在本平台内查找定价。
 func (s *ChannelService) GetChannelModelPricing(ctx context.Context, groupID int64, model string) *ChannelModelPricing {
+	pricing, _ := s.GetChannelModelPricingMatch(ctx, groupID, model)
+	return pricing
+}
+
+// GetChannelModelPricingMatch returns a cloned price plus exact-match provenance.
+func (s *ChannelService) GetChannelModelPricingMatch(ctx context.Context, groupID int64, model string) (*ChannelModelPricing, bool) {
+	if s == nil {
+		return nil, false
+	}
+	// Unit tests and immutable snapshots may provide a preloaded cache without
+	// a repository. Accept that valid hot-path state, while keeping a zero-value
+	// service from attempting to build a cache through a nil repository.
+	if s.repo == nil {
+		if cached, ok := s.cache.Load().(*channelCache); !ok || cached == nil {
+			return nil, false
+		}
+	}
 	lk, err := s.lookupGroupChannel(ctx, groupID)
 	if err != nil {
 		slog.Warn("failed to load channel cache", "group_id", groupID, "error", err)
-		return nil
+		return nil, false
 	}
 	if lk == nil {
-		return nil
+		return nil, false
 	}
 
 	modelLower := strings.ToLower(model)
-	pricing := lookupPricingAcrossPlatforms(lk.cache, groupID, lk.platform, modelLower)
+	pricing, exact := lookupPricingAcrossPlatformsWithExact(lk.cache, groupID, lk.platform, modelLower)
 	if pricing == nil {
-		return nil
+		return nil, false
 	}
 
 	cp := pricing.Clone()
-	return &cp
+	return &cp, exact
 }
 
 // ResolveChannelMapping 解析渠道级模型映射（热路径 O(1)）
@@ -535,9 +563,10 @@ func resolveMapping(lk *channelLookup, groupID int64, model string) ChannelMappi
 	}
 
 	modelLower := strings.ToLower(model)
-	if mapped := lookupMappingAcrossPlatforms(lk.cache, groupID, lk.platform, modelLower); mapped != "" {
+	if mapped, exact := lookupMappingAcrossPlatformsWithExact(lk.cache, groupID, lk.platform, modelLower); mapped != "" {
 		result.MappedModel = mapped
 		result.Mapped = true
+		result.MappingExact = exact
 	}
 
 	return result

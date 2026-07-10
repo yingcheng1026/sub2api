@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -179,6 +180,30 @@ func TestUsageLogFromServiceAdmin_IncludesBillingIdentityWithoutLeakingUserAudit
 	} {
 		require.Contains(t, string(adminJSON), expected)
 	}
+}
+
+func TestUsageLogMapperPricingEvidenceIsAdminOnly(t *testing.T) {
+	t.Parallel()
+
+	source := service.PricingSourceBuiltinGPT56
+	revision := service.GPT56PricingRevision
+	hash := strings.Repeat("b", 64)
+	log := &service.UsageLog{
+		RequestID: "req-pricing-evidence", Model: "gpt-5.6-terra",
+		PricingSource: &source, PricingRevision: &revision, PricingHash: &hash,
+	}
+
+	userJSON, err := json.Marshal(UsageLogFromService(log))
+	require.NoError(t, err)
+	for _, field := range []string{"pricing_source", "pricing_revision", "pricing_hash"} {
+		require.NotContains(t, string(userJSON), field)
+	}
+
+	adminJSON, err := json.Marshal(UsageLogFromServiceAdmin(log))
+	require.NoError(t, err)
+	require.Contains(t, string(adminJSON), `"pricing_source":"builtin_gpt56"`)
+	require.Contains(t, string(adminJSON), `"pricing_revision":"gpt56-policy-v1"`)
+	require.Contains(t, string(adminJSON), `"pricing_hash":"`+hash+`"`)
 }
 
 func TestUsageLogFromServiceAdmin_DerivesCompatModeFromStoredIdentity(t *testing.T) {

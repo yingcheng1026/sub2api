@@ -1,0 +1,3 @@
+ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS pricing_source VARCHAR(50);
+ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS pricing_revision VARCHAR(100);
+ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS pricing_hash VARCHAR(64);
