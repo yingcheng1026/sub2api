@@ -1440,6 +1440,73 @@ func TestOpenAIGatewayServiceRecordUsage_ImageOnlyUsageStillPersists(t *testing.
 	require.Equal(t, "1K", *usageRepo.lastLog.ImageSize)
 	require.NotNil(t, usageRepo.lastLog.BillingMode)
 	require.Equal(t, string(BillingModeImage), *usageRepo.lastLog.BillingMode)
+	require.NotNil(t, usageRepo.lastLog.BillingModel)
+	require.Equal(t, "gpt-image-2", *usageRepo.lastLog.BillingModel)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_ImageEmptyBillingCandidatesReturnErrorWithoutWriteOrDeduct(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, userRepo, subRepo, nil)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_image_empty_billing_candidates",
+			Model:         " \t ",
+			BillingModel:  " ",
+			UpstreamModel: "\n",
+			ImageCount:    1,
+			ImageSize:     "1K",
+			Duration:      time.Second,
+		},
+		APIKey:  &APIKey{ID: 10071},
+		User:    &User{ID: 20071},
+		Account: &Account{ID: 30071},
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "billing model is empty")
+	require.Zero(t, usageRepo.calls)
+	require.Zero(t, userRepo.deductCalls)
+	require.Zero(t, subRepo.incrementCalls)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_ImageSelectsExplicitUpstreamAfterInvalidPrimary(t *testing.T) {
+	groupID := int64(127)
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(
+		usageRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		nil,
+	)
+	svc.resolver = newOpenAIImageChannelPricingResolverForTest(t, groupID, "gpt-image-2", 0.25)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_image_explicit_upstream_candidate",
+			Model:         "not-priceable-image-alias",
+			BillingModel:  "not-priceable-image-alias",
+			UpstreamModel: "gpt-image-2",
+			ImageCount:    2,
+			ImageSize:     "1K",
+			Duration:      time.Second,
+		},
+		APIKey: &APIKey{
+			ID:      10072,
+			GroupID: &groupID,
+			Group:   &Group{ID: groupID, RateMultiplier: 1},
+		},
+		User:    &User{ID: 20072},
+		Account: &Account{ID: 30072},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.NotNil(t, usageRepo.lastLog.BillingModel)
+	require.Equal(t, "gpt-image-2", *usageRepo.lastLog.BillingModel)
+	require.InDelta(t, 0.5, usageRepo.lastLog.TotalCost, 1e-12)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_ImageUsesPerImageBillingEvenWithUsageTokens(t *testing.T) {

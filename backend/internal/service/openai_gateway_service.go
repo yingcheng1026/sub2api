@@ -5494,19 +5494,35 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCost(
 	tokens UsageTokens,
 	serviceTier string,
 ) (*CostBreakdown, string, error) {
-	billingModel := firstUsageBillingModel(billingModels)
-	if result != nil && result.ImageCount > 0 {
-		return s.calculateOpenAIImageCost(ctx, billingModel, apiKey, result, imageMultiplier), billingModel, nil
+	candidates := make([]string, 0, len(billingModels))
+	for _, candidate := range billingModels {
+		if candidate = strings.TrimSpace(candidate); candidate != "" {
+			candidates = append(candidates, candidate)
+		}
 	}
-	if len(billingModels) == 0 || billingModel == "" {
+	if len(candidates) == 0 {
 		return nil, "", errors.New("openai usage billing model is empty")
 	}
-	var lastErr error
-	for _, candidate := range billingModels {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
+	billingModel := candidates[0]
+	if result != nil && result.ImageCount > 0 {
+		var lastErr error
+		for _, candidate := range candidates {
+			cost, matched, err := s.calculateOpenAIExplicitImageCost(ctx, candidate, apiKey, result, imageMultiplier)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if matched {
+				return cost, candidate, nil
+			}
 		}
+		if lastErr != nil {
+			return nil, "", fmt.Errorf("calculate OpenAI image usage cost failed for billing models %s: %w", strings.Join(candidates, ","), lastErr)
+		}
+		return s.calculateOpenAIImageCost(billingModel, apiKey, result, imageMultiplier), billingModel, nil
+	}
+	var lastErr error
+	for _, candidate := range candidates {
 		cost, err := s.calculateOpenAIRecordUsageTokenCost(ctx, apiKey, candidate, multiplier, tokens, serviceTier)
 		if err == nil {
 			return cost, candidate, nil
@@ -5516,7 +5532,7 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCost(
 	if lastErr == nil {
 		lastErr = errors.New("no non-empty billing model candidates")
 	}
-	return nil, "", fmt.Errorf("calculate OpenAI usage cost failed for billing models %s: %w", strings.Join(billingModels, ","), lastErr)
+	return nil, "", fmt.Errorf("calculate OpenAI usage cost failed for billing models %s: %w", strings.Join(candidates, ","), lastErr)
 }
 
 func (s *OpenAIGatewayService) calculateOpenAIRecordUsageTokenCost(
@@ -5543,13 +5559,13 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageTokenCost(
 	return s.billingService.CalculateCostWithServiceTier(billingModel, tokens, multiplier, serviceTier)
 }
 
-func (s *OpenAIGatewayService) calculateOpenAIImageCost(
+func (s *OpenAIGatewayService) calculateOpenAIExplicitImageCost(
 	ctx context.Context,
 	billingModel string,
 	apiKey *APIKey,
 	result *OpenAIForwardResult,
 	multiplier float64,
-) *CostBreakdown {
+) (*CostBreakdown, bool, error) {
 	if resolved := s.resolveOpenAIChannelPricing(ctx, billingModel, apiKey); resolved != nil &&
 		(resolved.Mode == BillingModePerRequest || resolved.Mode == BillingModeImage) {
 		gid := apiKey.Group.ID
@@ -5563,12 +5579,23 @@ func (s *OpenAIGatewayService) calculateOpenAIImageCost(
 			Resolver:       s.resolver,
 			Resolved:       resolved,
 		})
-		if err == nil {
-			return cost
+		if err != nil {
+			return nil, true, err
 		}
-		logger.LegacyPrintf("service.openai_gateway", "Calculate image channel cost failed: %v", err)
+		return cost, true, nil
 	}
+	if hasOpenAIGroupImagePrice(apiKey, result.ImageSize) || s.hasOpenAIModelImagePrice(billingModel) {
+		return s.calculateOpenAIImageCost(billingModel, apiKey, result, multiplier), true, nil
+	}
+	return nil, false, nil
+}
 
+func (s *OpenAIGatewayService) calculateOpenAIImageCost(
+	billingModel string,
+	apiKey *APIKey,
+	result *OpenAIForwardResult,
+	multiplier float64,
+) *CostBreakdown {
 	var groupConfig *ImagePriceConfig
 	if apiKey != nil && apiKey.Group != nil {
 		groupConfig = &ImagePriceConfig{
@@ -5578,6 +5605,30 @@ func (s *OpenAIGatewayService) calculateOpenAIImageCost(
 		}
 	}
 	return s.billingService.CalculateImageCost(billingModel, result.ImageSize, result.ImageCount, groupConfig, multiplier)
+}
+
+func hasOpenAIGroupImagePrice(apiKey *APIKey, imageSize string) bool {
+	if apiKey == nil || apiKey.Group == nil {
+		return false
+	}
+	switch imageSize {
+	case "1K":
+		return apiKey.Group.ImagePrice1K != nil
+	case "2K":
+		return apiKey.Group.ImagePrice2K != nil
+	case "4K":
+		return apiKey.Group.ImagePrice4K != nil
+	default:
+		return false
+	}
+}
+
+func (s *OpenAIGatewayService) hasOpenAIModelImagePrice(billingModel string) bool {
+	if s.billingService == nil || s.billingService.pricingService == nil {
+		return false
+	}
+	pricing := s.billingService.pricingService.GetModelPricing(billingModel)
+	return pricing != nil && pricing.OutputCostPerImage > 0
 }
 
 func (s *OpenAIGatewayService) resolveOpenAIChannelPricing(ctx context.Context, billingModel string, apiKey *APIKey) *ResolvedPricing {
