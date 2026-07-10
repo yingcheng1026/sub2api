@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -244,6 +245,68 @@ func TestResolvePricingQuoteGPT56AcceptsExactChannelPricing(t *testing.T) {
 	require.NotNil(t, quote)
 	require.Equal(t, PricingSourceChannel, quote.Evidence.Source)
 	require.Equal(t, channelPricingRevision, quote.Evidence.Revision)
+}
+
+func TestResolvePricingQuoteRejectsEmptyExactChannelTokenPricing(t *testing.T) {
+	resolver := newResolverWithChannel(t, []ChannelModelPricing{{
+		Platform: "anthropic", Models: []string{"custom-empty-price"}, BillingMode: BillingModeToken,
+	}})
+
+	quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "custom-empty-price", GroupID: groupIDPtr()})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrOpenAIPricingUnavailable)
+	require.Nil(t, quote)
+}
+
+func TestResolvePricingQuoteAllowsExplicitPositiveNonGPTChannelTokenPricing(t *testing.T) {
+	resolver := newResolverWithChannel(t, []ChannelModelPricing{{
+		Platform: "anthropic", Models: []string{"custom-positive-price"}, BillingMode: BillingModeToken,
+		InputPrice: testPtrFloat64(1e-6),
+	}})
+
+	quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "custom-positive-price", GroupID: groupIDPtr()})
+
+	require.NoError(t, err)
+	require.NotNil(t, quote)
+	require.Equal(t, PricingSourceChannel, quote.Evidence.Source)
+}
+
+func TestResolvePricingQuoteRejectsInvalidChannelTokenPrices(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		price float64
+	}{
+		{name: "zero", price: 0},
+		{name: "negative", price: -1},
+		{name: "nan", price: math.NaN()},
+		{name: "positive infinity", price: math.Inf(1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resolver := newResolverWithChannel(t, []ChannelModelPricing{{
+				Platform: "anthropic", Models: []string{"custom-invalid-price"}, BillingMode: BillingModeToken,
+				InputPrice: testPtrFloat64(tt.price),
+			}})
+			quote, err := resolver.ResolveQuote(context.Background(), PricingInput{Model: "custom-invalid-price", GroupID: groupIDPtr()})
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrOpenAIPricingUnavailable)
+			require.Nil(t, quote)
+		})
+	}
+}
+
+func TestResolveOpenAIImagePricingQuoteRejectsMissingRequestedSizeTier(t *testing.T) {
+	resolver := newResolverWithChannel(t, []ChannelModelPricing{{
+		Platform: "anthropic", Models: []string{"custom-image-priced"}, BillingMode: BillingModeImage,
+		Intervals: []PricingInterval{{TierLabel: "1K", PerRequestPrice: testPtrFloat64(0.25)}},
+	}})
+	svc := &OpenAIGatewayService{billingService: resolver.billingService, resolver: resolver}
+
+	quote, err := svc.ResolveOpenAIImagePricingQuote(context.Background(), "custom-image-priced", "4K", groupIDPtr(), nil)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrOpenAIPricingUnavailable)
+	require.Nil(t, quote)
 }
 
 // ---------------------------------------------------------------------------

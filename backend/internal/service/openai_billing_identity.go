@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -17,9 +18,11 @@ import (
 const (
 	PricingSourceBuiltinGPT56    = "builtin_gpt56"
 	PricingSourceBuiltinFallback = "builtin_fallback"
+	PricingSourceGroupImage      = "group_image"
 	GPT56PricingRevision         = "gpt56-policy-v1"
 	channelPricingRevision       = "channel-effective-v1"
 	builtinFallbackRevision      = "builtin-fallback-v1"
+	groupImagePricingRevision    = "group-image-effective-v1"
 )
 
 var (
@@ -78,6 +81,8 @@ type ResolvedOpenAIBillingIdentity struct {
 	ChannelID          int64
 	ModelMappingChain  string
 	Pricing            *PricingQuote
+	TextBillingModel   string
+	TextPricing        *PricingQuote
 }
 
 type OpenAIBillingIdentityInput struct {
@@ -99,6 +104,7 @@ type OpenAIForwardOptions struct {
 	RequestedModel          string
 	ChannelMapping          ChannelMappingResult
 	GroupID                 *int64
+	ImagePriceConfig        *ImagePriceConfig
 	RequirePricingPreflight bool
 }
 
@@ -150,16 +156,177 @@ func (s *OpenAIGatewayService) ResolveOpenAIWSBillingIdentity(
 	account *Account,
 	opts OpenAIForwardOptions,
 ) (*ResolvedOpenAIBillingIdentity, error) {
+	return s.ResolveOpenAIWSBillingIdentityForPayload(ctx, account, opts, nil)
+}
+
+func (s *OpenAIGatewayService) ResolveOpenAIWSBillingIdentityForPayload(
+	ctx context.Context,
+	account *Account,
+	opts OpenAIForwardOptions,
+	payload []byte,
+) (*ResolvedOpenAIBillingIdentity, error) {
 	requested := strings.TrimSpace(opts.RequestedModel)
 	channelMapped := firstNonEmptyModel(opts.ChannelMapping.MappedModel, requested)
 	accountMapped := resolveOpenAIForwardModel(account, channelMapped, "")
 	upstream := normalizeOpenAIModelForUpstream(account, accountMapped)
+	if IsImageGenerationIntent(openAIResponsesEndpoint, requested, payload) {
+		imageModel, imageSizeTier, err := resolveOpenAIResponsesImageBillingConfigFromBody(payload, upstream)
+		if err != nil {
+			return nil, preflightError("invalid image billing configuration", err)
+		}
+		return s.ResolveOpenAIImageBillingIdentity(ctx, OpenAIBillingIdentityInput{
+			RequestedModel: requested, DispatchModel: channelMapped, ChannelMappedModel: channelMapped,
+			ChannelMappingApplied: opts.ChannelMapping.Mapped, ChannelMappingExact: opts.ChannelMapping.MappingExact,
+			AccountMappedModel: accountMapped, UpstreamModel: upstream,
+			BillingModelSource: BillingModelSourceUpstream, ChannelID: opts.ChannelMapping.ChannelID,
+			ModelMappingChain: opts.ChannelMapping.BuildModelMappingChain(requested, upstream), GroupID: opts.GroupID,
+		}, imageModel, imageSizeTier, opts.ImagePriceConfig)
+	}
 	return s.resolveForwardBillingIdentity(ctx, opts, channelMapped, channelMapped, accountMapped, upstream)
 }
 
 // AttachOpenAIBillingIdentity applies a preflight result to a completed turn.
 func AttachOpenAIBillingIdentity(result *OpenAIForwardResult, identity *ResolvedOpenAIBillingIdentity) {
+	if result != nil && result.ImageCount > 0 && pricingQuoteMode(identity) != BillingModeImage && pricingQuoteMode(identity) != BillingModePerRequest {
+		// Never replace an image result's billing model with a text-turn quote.
+		return
+	}
 	attachOpenAIBillingIdentity(result, identity)
+}
+
+func pricingQuoteMode(identity *ResolvedOpenAIBillingIdentity) BillingMode {
+	if identity == nil || identity.Pricing == nil || identity.Pricing.Resolved == nil {
+		return ""
+	}
+	return identity.Pricing.Resolved.Mode
+}
+
+// ResolveOpenAIImageBillingIdentity freezes the exact image schedule selected
+// before token acquisition or transport.
+func (s *OpenAIGatewayService) ResolveOpenAIImageBillingIdentity(
+	ctx context.Context,
+	input OpenAIBillingIdentityInput,
+	imageModel string,
+	imageSizeTier string,
+	groupConfig *ImagePriceConfig,
+) (*ResolvedOpenAIBillingIdentity, error) {
+	imageModel = strings.TrimSpace(imageModel)
+	if imageModel == "" {
+		return nil, preflightError("image billing model is empty", ErrOpenAIPricingUnavailable)
+	}
+	quote, err := s.ResolveOpenAIImagePricingQuote(ctx, imageModel, imageSizeTier, input.GroupID, groupConfig)
+	if err != nil {
+		return nil, preflightError("image billing model is not priceable", err)
+	}
+	requested := strings.TrimSpace(input.RequestedModel)
+	channelMapped := firstNonEmptyModel(input.ChannelMappedModel, input.DispatchModel, requested)
+	accountMapped := firstNonEmptyModel(input.AccountMappedModel, channelMapped)
+	upstream := firstNonEmptyModel(input.UpstreamModel, accountMapped)
+	identity := &ResolvedOpenAIBillingIdentity{
+		RequestedModel: requested, CompatModel: strings.TrimSpace(input.CompatModel),
+		DispatchModel: strings.TrimSpace(input.DispatchModel), ChannelMappedModel: channelMapped,
+		AccountMappedModel: accountMapped, UpstreamModel: upstream, BillingModel: imageModel,
+		BillingModelSource: BillingModelSourceUpstream, ChannelID: input.ChannelID,
+		ModelMappingChain: strings.TrimSpace(input.ModelMappingChain), Pricing: quote,
+	}
+	if !strings.EqualFold(strings.TrimSpace(upstream), imageModel) {
+		textIdentity, textErr := s.ResolveOpenAIBillingIdentity(ctx, input)
+		if textErr != nil {
+			return nil, preflightError("text fallback billing model is not priceable", textErr)
+		}
+		identity.TextBillingModel = textIdentity.BillingModel
+		identity.TextPricing = textIdentity.Pricing
+	}
+	return identity, nil
+}
+
+func (s *OpenAIGatewayService) ResolveOpenAIImagePricingQuote(
+	ctx context.Context,
+	model string,
+	imageSizeTier string,
+	groupID *int64,
+	groupConfig *ImagePriceConfig,
+) (*PricingQuote, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil, fmt.Errorf("%w: image model is empty", ErrOpenAIPricingUnavailable)
+	}
+	resolver := s.resolver
+	if resolver == nil && s.billingService != nil {
+		resolver = NewModelPricingResolver(s.channelService, s.billingService)
+	}
+	if resolver != nil && groupID != nil {
+		resolved := resolver.Resolve(ctx, PricingInput{Model: model, GroupID: groupID})
+		if resolved != nil && (resolved.Mode == BillingModeImage || resolved.Mode == BillingModePerRequest) {
+			if !resolvedPricingIsUsable(resolved) {
+				return nil, fmt.Errorf("%w for image model %s", ErrOpenAIPricingUnavailable, model)
+			}
+			selectedPrice := resolver.GetRequestTierPrice(resolved, imageSizeTier)
+			if selectedPrice == 0 {
+				selectedPrice = resolved.DefaultPerRequestPrice
+			}
+			if !positiveFinitePrice(selectedPrice) {
+				return nil, fmt.Errorf("%w: no %s price for image model %s", ErrOpenAIPricingUnavailable, imageSizeTier, model)
+			}
+			selected := &ResolvedPricing{
+				Mode: resolved.Mode, Source: resolved.Source, Revision: resolved.Revision,
+				SourceExact: resolved.SourceExact, DefaultPerRequestPrice: selectedPrice,
+				RequestTiers: []PricingInterval{{TierLabel: imageSizeTier, PerRequestPrice: pricingFloat64Ptr(selectedPrice)}},
+			}
+			return freezeResolvedPricingQuote(selected)
+		}
+	}
+
+	basePrice := 0.0
+	source := ""
+	if s.billingService != nil && s.billingService.pricingService != nil {
+		if pricing := s.billingService.pricingService.GetModelPricing(model); pricing != nil && positiveFinitePrice(pricing.OutputCostPerImage) {
+			basePrice = pricing.OutputCostPerImage
+			source = PricingSourceLiteLLM
+		}
+	}
+	if basePrice == 0 && isOpenAIImageGenerationModel(model) {
+		basePrice = 0.134
+		source = PricingSourceBuiltinFallback
+	}
+	prices := map[string]float64{
+		"1K": basePrice,
+		"2K": basePrice * 1.5,
+		"4K": basePrice * 2,
+	}
+	imageSizeTier = strings.TrimSpace(imageSizeTier)
+	if imageSizeTier == "" {
+		imageSizeTier = "2K"
+	}
+	var groupPrice *float64
+	if groupConfig != nil {
+		switch imageSizeTier {
+		case "1K":
+			groupPrice = groupConfig.Price1K
+		case "2K":
+			groupPrice = groupConfig.Price2K
+		case "4K":
+			groupPrice = groupConfig.Price4K
+		}
+	}
+	if groupPrice != nil {
+		if !positiveFinitePrice(*groupPrice) {
+			return nil, fmt.Errorf("%w: invalid %s image price", ErrOpenAIPricingUnavailable, imageSizeTier)
+		}
+		prices[imageSizeTier] = *groupPrice
+		source = PricingSourceGroupImage
+	}
+	selectedPrice := prices[imageSizeTier]
+	if source == "" || !positiveFinitePrice(selectedPrice) {
+		return nil, fmt.Errorf("%w for image model %s", ErrOpenAIPricingUnavailable, model)
+	}
+	resolved := &ResolvedPricing{
+		Mode: BillingModeImage, Source: source, DefaultPerRequestPrice: selectedPrice, SourceExact: true,
+		RequestTiers: []PricingInterval{
+			{TierLabel: imageSizeTier, PerRequestPrice: pricingFloat64Ptr(selectedPrice)},
+		},
+	}
+	return freezeResolvedPricingQuote(resolved)
 }
 
 func (s *OpenAIGatewayService) ResolveOpenAIBillingIdentity(ctx context.Context, input OpenAIBillingIdentityInput) (*ResolvedOpenAIBillingIdentity, error) {
@@ -273,10 +440,16 @@ func (r *ModelPricingResolver) ResolveQuote(ctx context.Context, input PricingIn
 			resolved.Revision = GPT56PricingRevision
 		}
 	}
-	if resolved.Revision == "" {
-		resolved.Revision = pricingRevisionForResolved(r, resolved)
-	}
+	return freezeResolvedPricingQuote(resolved)
+}
 
+func freezeResolvedPricingQuote(resolved *ResolvedPricing) (*PricingQuote, error) {
+	if resolved == nil || !resolvedPricingIsUsable(resolved) {
+		return nil, ErrOpenAIPricingUnavailable
+	}
+	if resolved.Revision == "" {
+		resolved.Revision = pricingRevisionForResolved(resolved)
+	}
 	snapshot := cloneResolvedPricing(resolved)
 	hash, err := hashResolvedPricing(snapshot)
 	if err != nil {
@@ -294,7 +467,7 @@ func (r *ModelPricingResolver) ResolveQuote(ctx context.Context, input PricingIn
 	}, nil
 }
 
-func pricingRevisionForResolved(_ *ModelPricingResolver, resolved *ResolvedPricing) string {
+func pricingRevisionForResolved(resolved *ResolvedPricing) string {
 	switch resolved.Source {
 	case PricingSourceChannel:
 		return channelPricingRevision
@@ -302,6 +475,8 @@ func pricingRevisionForResolved(_ *ModelPricingResolver, resolved *ResolvedPrici
 		return ""
 	case PricingSourceBuiltinGPT56:
 		return GPT56PricingRevision
+	case PricingSourceGroupImage:
+		return groupImagePricingRevision
 	default:
 		return builtinFallbackRevision
 	}
@@ -313,10 +488,63 @@ func resolvedPricingIsUsable(resolved *ResolvedPricing) bool {
 	}
 	switch resolved.Mode {
 	case BillingModePerRequest, BillingModeImage:
-		return resolved.DefaultPerRequestPrice > 0 || len(resolved.RequestTiers) > 0
+		if resolved.DefaultPerRequestPrice != 0 && !positiveFinitePrice(resolved.DefaultPerRequestPrice) {
+			return false
+		}
+		usable := positiveFinitePrice(resolved.DefaultPerRequestPrice)
+		for _, tier := range resolved.RequestTiers {
+			if tier.PerRequestPrice != nil {
+				if !positiveFinitePrice(*tier.PerRequestPrice) {
+					return false
+				}
+				usable = true
+			}
+		}
+		return usable
 	default:
-		return resolved.BasePricing != nil || len(resolved.Intervals) > 0
+		usable, valid := usableModelPricing(resolved.BasePricing)
+		for _, interval := range resolved.Intervals {
+			for _, price := range []*float64{interval.InputPrice, interval.OutputPrice, interval.CacheWritePrice, interval.CacheReadPrice} {
+				if price == nil {
+					continue
+				}
+				if !positiveFinitePrice(*price) {
+					return false
+				}
+				usable = true
+			}
+		}
+		return valid && usable
 	}
+}
+
+func usableModelPricing(pricing *ModelPricing) (usable bool, valid bool) {
+	if pricing == nil {
+		return false, true
+	}
+	valid = true
+	prices := []float64{
+		pricing.InputPricePerToken, pricing.InputPricePerTokenPriority,
+		pricing.OutputPricePerToken, pricing.OutputPricePerTokenPriority,
+		pricing.CacheCreationPricePerToken, pricing.CacheReadPricePerToken,
+		pricing.CacheReadPricePerTokenPriority, pricing.CacheCreation5mPrice,
+		pricing.CacheCreation1hPrice, pricing.ImageOutputPricePerToken,
+	}
+	for _, price := range prices {
+		if price < 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+			return false, false
+		}
+		usable = usable || price > 0
+	}
+	return usable, valid
+}
+
+func positiveFinitePrice(price float64) bool {
+	return price > 0 && !math.IsNaN(price) && !math.IsInf(price, 0)
+}
+
+func pricingFloat64Ptr(price float64) *float64 {
+	return &price
 }
 
 func cloneResolvedPricing(in *ResolvedPricing) *ResolvedPricing {

@@ -2594,7 +2594,7 @@ func (s *OpenAIGatewayService) ForwardWithOptions(ctx context.Context, c *gin.Co
 	}
 	var billingIdentity *ResolvedOpenAIBillingIdentity
 	if identityRequired {
-		billingIdentity, err = s.ResolveOpenAIBillingIdentity(ctx, OpenAIBillingIdentityInput{
+		identityInput := OpenAIBillingIdentityInput{
 			RequestedModel:        requestedForIdentity,
 			DispatchModel:         originalModel,
 			ChannelMappedModel:    channelMappedForIdentity,
@@ -2606,7 +2606,12 @@ func (s *OpenAIGatewayService) ForwardWithOptions(ctx context.Context, c *gin.Co
 			ChannelID:             opts.ChannelMapping.ChannelID,
 			ModelMappingChain:     opts.ChannelMapping.BuildModelMappingChain(requestedForIdentity, upstreamModel),
 			GroupID:               opts.GroupID,
-		})
+		}
+		if imageBillingModel != "" {
+			billingIdentity, err = s.ResolveOpenAIImageBillingIdentity(ctx, identityInput, imageBillingModel, imageSizeTier, opts.ImagePriceConfig)
+		} else {
+			billingIdentity, err = s.ResolveOpenAIBillingIdentity(ctx, identityInput)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -3177,7 +3182,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 	var billingIdentity *ResolvedOpenAIBillingIdentity
 	if identityRequired {
-		billingIdentity, err = s.ResolveOpenAIBillingIdentity(ctx, OpenAIBillingIdentityInput{
+		identityInput := OpenAIBillingIdentityInput{
 			RequestedModel:        requestedForIdentity,
 			DispatchModel:         reqModel,
 			ChannelMappedModel:    firstNonEmptyModel(opts.ChannelMapping.MappedModel, reqModel),
@@ -3189,7 +3194,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			ChannelID:             opts.ChannelMapping.ChannelID,
 			ModelMappingChain:     opts.ChannelMapping.BuildModelMappingChain(requestedForIdentity, finalUpstreamModel),
 			GroupID:               opts.GroupID,
-		})
+		}
+		if imageBillingModel != "" {
+			billingIdentity, err = s.ResolveOpenAIImageBillingIdentity(ctx, identityInput, imageBillingModel, imageSizeTier, opts.ImagePriceConfig)
+		} else {
+			billingIdentity, err = s.ResolveOpenAIBillingIdentity(ctx, identityInput)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -5496,8 +5506,17 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}
 	var successfulBillingModel string
 	usedPreflightQuote := false
-	if result.BillingIdentity != nil && result.BillingIdentity.Pricing != nil && result.ImageCount == 0 {
-		resolved := result.BillingIdentity.Pricing.CloneResolved()
+	var usedPricingQuote *PricingQuote
+	if result.BillingIdentity != nil && result.BillingIdentity.Pricing != nil {
+		usedPricingQuote = result.BillingIdentity.Pricing
+		if result.ImageCount == 0 && result.BillingIdentity.TextPricing != nil {
+			usedPricingQuote = result.BillingIdentity.TextPricing
+			billingModel = strings.TrimSpace(result.BillingIdentity.TextBillingModel)
+		}
+		resolved := usedPricingQuote.CloneResolved()
+		if result.ImageCount > 0 && resolved != nil && resolved.Mode != BillingModeImage && resolved.Mode != BillingModePerRequest {
+			return errors.New("openai image usage has no frozen image pricing quote")
+		}
 		resolver := s.resolver
 		if resolver == nil {
 			resolver = NewModelPricingResolver(s.channelService, s.billingService)
@@ -5507,11 +5526,23 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 			gid := apiKey.Group.ID
 			groupID = &gid
 		}
-		cost, err = s.billingService.CalculateCostUnified(CostInput{
-			Ctx: ctx, Model: billingModel, GroupID: groupID, Tokens: tokens,
-			RequestCount: 1, RateMultiplier: multiplier, ServiceTier: serviceTier,
-			Resolver: resolver, Resolved: resolved,
-		})
+		requestCount := 1
+		rateMultiplier := multiplier
+		sizeTier := ""
+		if result.ImageCount > 0 {
+			requestCount = result.ImageCount
+			rateMultiplier = imageMultiplier
+			sizeTier = result.ImageSize
+		}
+		if result.ImageCount == 0 && resolved != nil && (resolved.Mode == BillingModeImage || resolved.Mode == BillingModePerRequest) {
+			cost = &CostBreakdown{BillingMode: string(resolved.Mode)}
+		} else {
+			cost, err = s.billingService.CalculateCostUnified(CostInput{
+				Ctx: ctx, Model: billingModel, GroupID: groupID, Tokens: tokens,
+				RequestCount: requestCount, SizeTier: sizeTier, RateMultiplier: rateMultiplier, ServiceTier: serviceTier,
+				Resolver: resolver, Resolved: resolved,
+			})
+		}
 		successfulBillingModel = billingModel
 		usedPreflightQuote = err == nil
 	} else {
@@ -5564,7 +5595,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageSize:           optionalTrimmedStringPtr(result.ImageSize),
 	}
 	if usedPreflightQuote {
-		evidence := result.BillingIdentity.Pricing.Evidence
+		evidence := usedPricingQuote.Evidence
 		usageLog.PricingSource = optionalTrimmedStringPtr(evidence.Source)
 		usageLog.PricingRevision = optionalTrimmedStringPtr(evidence.Revision)
 		usageLog.PricingHash = optionalTrimmedStringPtr(evidence.Hash)

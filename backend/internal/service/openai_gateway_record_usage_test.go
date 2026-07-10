@@ -102,6 +102,47 @@ func TestOpenAIGatewayServiceRecordUsageUsesImmutablePreflightQuoteAndEvidence(t
 	require.Equal(t, strings.Repeat("c", 64), *usageRepo.lastLog.PricingHash)
 }
 
+func TestOpenAIGatewayServiceRecordUsage_ImageIntentWithoutOutputUsesFrozenTextQuote(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil,
+	)
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	identity := &ResolvedOpenAIBillingIdentity{
+		BillingModel: "gpt-image-2",
+		Pricing: &PricingQuote{
+			Resolved: &ResolvedPricing{Mode: BillingModeImage, DefaultPerRequestPrice: 0.25, Source: PricingSourceBuiltinFallback},
+			Evidence: PricingEvidence{Source: PricingSourceBuiltinFallback, Revision: "image", Hash: strings.Repeat("i", 64)},
+		},
+		TextBillingModel: "custom-text-priced",
+		TextPricing: &PricingQuote{
+			Resolved: &ResolvedPricing{Mode: BillingModeToken, BasePricing: &ModelPricing{InputPricePerToken: 0.01, OutputPricePerToken: 0.02}, Source: PricingSourceLiteLLM},
+			Evidence: PricingEvidence{Source: PricingSourceLiteLLM, Revision: "text", Hash: strings.Repeat("t", 64)},
+		},
+	}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp-image-no-output", Model: "custom-text-priced", UpstreamModel: "custom-text-priced",
+			BillingModel: "gpt-image-2", BillingIdentity: identity,
+			Usage: OpenAIUsage{InputTokens: 10, OutputTokens: 2}, Duration: time.Second,
+		},
+		APIKey: &APIKey{ID: 101, Group: &Group{ID: 11, RateMultiplier: 1}},
+		User:   &User{ID: 201}, Account: &Account{ID: 301, Type: AccountTypeAPIKey},
+		APIKeyService: &openAIRecordUsageAPIKeyQuotaStub{},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.InDelta(t, 0.10, usageRepo.lastLog.InputCost, 1e-12)
+	require.InDelta(t, 0.04, usageRepo.lastLog.OutputCost, 1e-12)
+	require.Equal(t, "custom-text-priced", *usageRepo.lastLog.BillingModel)
+	require.Equal(t, PricingSourceLiteLLM, *usageRepo.lastLog.PricingSource)
+	require.Equal(t, "text", *usageRepo.lastLog.PricingRevision)
+	require.Equal(t, strings.Repeat("t", 64), *usageRepo.lastLog.PricingHash)
+}
+
 type openAIRecordUsageUserRepoStub struct {
 	UserRepository
 
@@ -1725,7 +1766,8 @@ func TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndSha
 	groupID := int64(123)
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	svc := newOpenAIRecordUsageServiceForTest(usageRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
-	svc.resolver = newOpenAIImageChannelPricingResolverForTest(t, groupID, "gpt-image-2", 0.25)
+	// Live pricing intentionally differs from the frozen preflight quote.
+	svc.resolver = newOpenAIImageChannelPricingResolverForTest(t, groupID, "gpt-image-2", 0.80)
 
 	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
 		Result: &OpenAIForwardResult{
@@ -1737,8 +1779,8 @@ func TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndSha
 			BillingIdentity: &ResolvedOpenAIBillingIdentity{
 				BillingModel: "gpt-image-2",
 				Pricing: &PricingQuote{
-					Resolved: &ResolvedPricing{Mode: BillingModeToken, BasePricing: &ModelPricing{InputPricePerToken: 99}},
-					Evidence: PricingEvidence{Source: PricingSourceLiteLLM, Revision: "wrong-image-quote", Hash: strings.Repeat("f", 64)},
+					Resolved: &ResolvedPricing{Mode: BillingModeImage, DefaultPerRequestPrice: 0.25, Source: PricingSourceChannel},
+					Evidence: PricingEvidence{Source: PricingSourceChannel, Revision: "image-effective-test", Hash: strings.Repeat("f", 64)},
 				},
 			},
 		},
@@ -1764,9 +1806,9 @@ func TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndSha
 	require.Equal(t, 3, usageRepo.lastLog.ImageCount)
 	require.NotNil(t, usageRepo.lastLog.BillingMode)
 	require.Equal(t, string(BillingModeImage), *usageRepo.lastLog.BillingMode)
-	require.Nil(t, usageRepo.lastLog.PricingSource, "unused text quote must not be recorded as image pricing evidence")
-	require.Nil(t, usageRepo.lastLog.PricingRevision)
-	require.Nil(t, usageRepo.lastLog.PricingHash)
+	require.Equal(t, PricingSourceChannel, *usageRepo.lastLog.PricingSource)
+	require.Equal(t, "image-effective-test", *usageRepo.lastLog.PricingRevision)
+	require.Equal(t, strings.Repeat("f", 64), *usageRepo.lastLog.PricingHash)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndIndependentMultiplier(t *testing.T) {

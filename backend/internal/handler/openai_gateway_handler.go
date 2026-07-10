@@ -409,6 +409,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			RequestedModel:          reqModel,
 			ChannelMapping:          channelMapping,
 			GroupID:                 apiKey.GroupID,
+			ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 			RequirePricingPreflight: true,
 		})
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
@@ -855,6 +856,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			RequestedModel:          reqModel,
 			ChannelMapping:          channelMappingMsg,
 			GroupID:                 apiKey.GroupID,
+			ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 			RequirePricingPreflight: true,
 		})
 
@@ -1461,9 +1463,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		RequestedModel:          reqModel,
 		ChannelMapping:          channelMappingWS,
 		GroupID:                 apiKey.GroupID,
+		ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 		RequirePricingPreflight: true,
 	}
-	_, err = h.gatewayService.ResolveOpenAIWSBillingIdentity(ctx, account, wsPreflightOptions)
+	_, err = h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(ctx, account, wsPreflightOptions, firstMessage)
 	if err != nil {
 		reqLog.Warn("openai.websocket_billing_preflight_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenAI billing preflight failed")
@@ -1476,7 +1479,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to get access token")
 		return
 	}
-	firstTurnBillingIdentity, err := h.gatewayService.ResolveOpenAIWSBillingIdentity(ctx, account, wsPreflightOptions)
+	firstTurnBillingIdentity, err := h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(ctx, account, wsPreflightOptions, firstMessage)
 	if err != nil {
 		reqLog.Warn("openai.websocket_first_turn_billing_preflight_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenAI billing preflight failed")
@@ -1498,7 +1501,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			if !gjson.ValidBytes(payload) {
 				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 			}
-			turnIdentity, preflightErr := h.gatewayService.ResolveOpenAIWSBillingIdentity(ctx, account, wsPreflightOptions)
+			turnIdentity, preflightErr := h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(ctx, account, wsPreflightOptions, payload)
 			if preflightErr != nil {
 				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "OpenAI billing preflight failed", preflightErr)
 			}
@@ -1627,6 +1630,17 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
+}
+
+func openAIImagePriceConfig(group *service.Group) *service.ImagePriceConfig {
+	if group == nil {
+		return nil
+	}
+	return &service.ImagePriceConfig{
+		Price1K: group.ImagePrice1K,
+		Price2K: group.ImagePrice2K,
+		Price4K: group.ImagePrice4K,
+	}
 }
 
 func (h *OpenAIGatewayHandler) recoverResponsesPanic(c *gin.Context, streamStarted *bool) {

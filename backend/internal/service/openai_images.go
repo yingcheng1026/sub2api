@@ -71,6 +71,7 @@ func (f OpenAIImageOutputAuditorFunc) AuditOpenAIImageOutput(ctx context.Context
 type OpenAIImagesForwardOptions struct {
 	SafetyIdentifier string
 	OutputAuditor    OpenAIImageOutputAuditor
+	Billing          OpenAIForwardOptions
 }
 
 type OpenAIImagesForwardOption func(*OpenAIImagesForwardOptions)
@@ -87,6 +88,14 @@ func WithOpenAIImagesOutputAuditor(auditor OpenAIImageOutputAuditor) OpenAIImage
 	return func(opts *OpenAIImagesForwardOptions) {
 		if opts != nil {
 			opts.OutputAuditor = auditor
+		}
+	}
+}
+
+func WithOpenAIImagesBillingPreflight(options OpenAIForwardOptions) OpenAIImagesForwardOption {
+	return func(opts *OpenAIImagesForwardOptions) {
+		if opts != nil {
+			opts.Billing = options
 		}
 	}
 }
@@ -746,14 +755,44 @@ func (s *OpenAIGatewayService) ForwardImages(
 		return nil, fmt.Errorf("parsed images request is required")
 	}
 	forwardOptions := resolveOpenAIImagesForwardOptions(options)
+	var billingIdentity *ResolvedOpenAIBillingIdentity
+	if forwardOptions.Billing.RequirePricingPreflight {
+		requestModel := firstNonEmptyModel(forwardOptions.Billing.RequestedModel, parsed.Model)
+		channelMapped := firstNonEmptyModel(channelMappedModel, requestModel)
+		upstreamModel := channelMapped
+		if account.Type == AccountTypeAPIKey {
+			upstreamModel = account.GetMappedModel(channelMapped)
+		}
+		identityInput := OpenAIBillingIdentityInput{
+			RequestedModel: requestModel, DispatchModel: channelMapped, ChannelMappedModel: channelMapped,
+			ChannelMappingApplied: forwardOptions.Billing.ChannelMapping.Mapped,
+			ChannelMappingExact:   forwardOptions.Billing.ChannelMapping.MappingExact,
+			AccountMappedModel:    upstreamModel, UpstreamModel: upstreamModel,
+			BillingModelSource: BillingModelSourceUpstream,
+			ChannelID:          forwardOptions.Billing.ChannelMapping.ChannelID,
+			ModelMappingChain:  forwardOptions.Billing.ChannelMapping.BuildModelMappingChain(requestModel, upstreamModel),
+			GroupID:            forwardOptions.Billing.GroupID,
+		}
+		var err error
+		billingIdentity, err = s.ResolveOpenAIImageBillingIdentity(ctx, identityInput, upstreamModel, parsed.SizeTier, forwardOptions.Billing.ImagePriceConfig)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var result *OpenAIForwardResult
+	var err error
 	switch account.Type {
 	case AccountTypeAPIKey:
-		return s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel, forwardOptions)
+		result, err = s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel, forwardOptions)
 	case AccountTypeOAuth:
-		return s.forwardOpenAIImagesOAuth(ctx, c, account, parsed, channelMappedModel, forwardOptions)
+		result, err = s.forwardOpenAIImagesOAuth(ctx, c, account, parsed, channelMappedModel, forwardOptions)
 	default:
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}
+	if result != nil && billingIdentity != nil {
+		attachOpenAIBillingIdentity(result, billingIdentity)
+	}
+	return result, err
 }
 
 func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(

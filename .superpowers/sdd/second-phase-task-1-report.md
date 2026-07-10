@@ -75,3 +75,60 @@ PASS
 ## 提交
 
 实现提交：`66ad9913` (`feat: add openai billing preflight evidence`)
+
+## 2026-07-10 Task 1 复审修复
+
+### 修复范围
+
+- Responses / passthrough 图片 intent 现在按请求中的最终 image tool model 与 size tier，在 token/HTTP/WS transport 前生成 image quote；不再用文本模型 quote 代替。
+- 独立 `/v1/images/generations`、`/v1/images/edits` handler 启用同一 image preflight；错误返回 400 `invalid_request_error`，不会落到 502/503。
+- API key 与 OAuth Images 的成功及部分成功结果都携带冻结 image identity/quote；`RecordUsage` 使用该 quote 的 image count、size tier 和 image multiplier 结算并保存 matching evidence，不再读取已变化的 live 价格。
+- WS 首轮及后续 turn 都从该 turn payload 判断 image intent 并冻结对应 image identity；文本 identity 禁止覆盖 image result。
+- channel image quote 必须命中本次请求的 exact size tier（或显式 default）；例如 4K 请求只有 1K 价格会在上游前拒绝，不能跨 tier 或按零价结算。
+- Responses 图片 intent 同时冻结 image quote 与文本 fallback quote：`ImageCount > 0` 才消费 image quote；零图片输出使用文本 quote，避免 per-request 默认 1 导致过扣。独立 Images 零输出不会被强制按 1 张计费。
+- token quote 必须至少有一项正数、有限的有效价格；空、全零、负数、NaN、Inf 的渠道价格 fail closed。非 GPT 正数渠道价格兼容性保留。
+- image quote 明确记录实际生效来源：channel、group image、LiteLLM effective 或已知 `gpt-image-*` 的 built-in fallback；未知且无显式价格的图片模型 fail closed。
+
+### 复审 RED
+
+```text
+go test -tags=unit ./internal/service -run 'ResolvePricingQuoteRejectsEmpty|ResolvePricingQuoteAllowsExplicitPositive|ChannelImageBillingUsesImageCountAndSharedMultiplier|ImagePricingPreflightRejectsBeforeUpstream' -count=1
+
+FAIL TestResolvePricingQuoteRejectsEmptyExactChannelTokenPricing
+An error is expected but got nil.
+
+FAIL TestOpenAIGatewayServiceRecordUsage_ChannelImageBillingUsesImageCountAndSharedMultiplier
+expected frozen quote total 0.75, actual live-price total 2.40.
+```
+
+### 复审 GREEN
+
+```text
+go test ./internal/service -run 'OpenAIBillingIdentity|ResolvePricingQuote|PricingEvidenceHash|ImagePricingPreflight|ForwardImages_|RecordUsage.*(ImmutablePreflightQuote|ChannelImageBilling)|OpenAIWSBilling|AttachOpenAIBillingIdentity' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/service 2.414s
+
+go test ./internal/handler -run 'OpenAI|Responses|Images|Messages|Chat|WebSocket|PricingPreflightErrorsReturn400|UnpriceableImageCloses|ImageTurnPersists' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/handler 0.951s
+
+go test -tags=unit ./internal/repository -count=1
+ok github.com/Wei-Shaw/sub2api/internal/repository 2.909s
+```
+
+新增真实边界测试包括：HTTP handler preflight 返回 400 且 upstream hit=0；WS handler 对不可计价 image turn 关闭 1008 且 upstream dial=0；WS image turn 最终 usage 的 billing model/quote/evidence 一致；独立 Images 在 token/transport 前拒绝非法价格。
+
+最终复审修复后再次运行：
+
+```text
+go test ./internal/service -run 'OpenAIBillingIdentity|ResolvePricingQuote|PricingEvidenceHash|ImagePricingPreflight|ForwardImages_|RecordUsage.*(ImmutablePreflightQuote|ChannelImageBilling|ImageIntentWithoutOutput)|OpenAIWSBilling|AttachOpenAIBillingIdentity|MissingRequestedSizeTier' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/service 1.374s
+
+go test ./internal/handler -run 'OpenAI|Responses|Images|Messages|Chat|WebSocket|PricingPreflightErrorsReturn400|UnpriceableImageCloses|ImageTurnPersists' -count=1
+ok github.com/Wei-Shaw/sub2api/internal/handler 0.800s
+
+go test -tags=unit ./internal/repository -count=1
+ok github.com/Wei-Shaw/sub2api/internal/repository 2.013s
+```
+
+`git diff --check`、迁移 172 不变检查、diff 级常见凭证扫描均通过。私有 503 报告继续保持未读取、未修改、未暂存。
+
+修复提交标题：`fix: close image billing preflight gaps`（本报告与修复代码同一提交）。

@@ -209,6 +209,10 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			channelMapping.MappedModel,
 			service.WithOpenAIImagesSafetyIdentifier(safetyIdentifier),
 			service.WithOpenAIImagesOutputAuditor(h.openAIImageOutputAuditor(c, apiKey, subject, parsed, safetyIdentifier)),
+			service.WithOpenAIImagesBillingPreflight(service.OpenAIForwardOptions{
+				RequestedModel: parsed.Model, ChannelMapping: channelMapping, GroupID: apiKey.GroupID,
+				ImagePriceConfig: openAIImagePriceConfig(apiKey.Group), RequirePricingPreflight: true,
+			}),
 		)
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		if accountReleaseFunc != nil {
@@ -224,6 +228,10 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			if errors.Is(err, service.ErrOpenAIBillingPreflight) || errors.Is(err, service.ErrOpenAIPricingUnavailable) {
+				h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "OpenAI billing preflight failed", streamStarted)
+				return
+			}
 			var outputAuditErr *service.OpenAIImageOutputAuditError
 			if errors.As(err, &outputAuditErr) {
 				decision := outputAuditErr.Decision

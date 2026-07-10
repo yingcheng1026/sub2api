@@ -147,6 +147,26 @@ func TestOpenAIGatewayServiceForward_ExplicitImageToolWorksWithBridgeDisabled(t 
 	require.NotContains(t, instructions, "image_generation")
 }
 
+func TestOpenAIGatewayServiceForward_ImagePricingPreflightRejectsBeforeUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := &httpUpstreamRecorder{}
+	svc := newOpenAIImageGenerationControlTestService(upstream)
+	c, _ := newOpenAIImageGenerationControlTestContext(true, "unit-test-agent/1.0")
+	account := newOpenAIImageGenerationControlTestAccount()
+	body := []byte(`{"model":"gpt-5.4","input":"draw","stream":false,"tools":[{"type":"image_generation","model":"custom-unpriceable-image","size":"1024x1024"}],"tool_choice":{"type":"image_generation"}}`)
+	groupID := int64(4242)
+
+	result, err := svc.ForwardWithOptions(context.Background(), c, account, body, OpenAIForwardOptions{
+		RequestedModel: "gpt-5.4", GroupID: &groupID, RequirePricingPreflight: true,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrOpenAIBillingPreflight)
+	require.Nil(t, result)
+	require.Nil(t, upstream.lastReq, "image pricing failure must happen before upstream transport")
+}
+
 func TestOpenAIGatewayServiceForward_ChannelBridgeOverrideEnablesCodexInjection(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

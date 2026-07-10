@@ -588,6 +588,7 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUsesResponsesAPI(t *testing.T) {
 	var auditCalled bool
 	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "",
 		WithOpenAIImagesSafetyIdentifier("hfc_test_safety_id"),
+		WithOpenAIImagesBillingPreflight(OpenAIForwardOptions{RequestedModel: "gpt-image-2", RequirePricingPreflight: true}),
 		WithOpenAIImagesOutputAuditor(OpenAIImageOutputAuditorFunc(func(ctx context.Context, req OpenAIImageOutputAuditRequest) (*ContentModerationDecision, error) {
 			auditCalled = true
 			require.NotEmpty(t, req.ModerationBody)
@@ -599,6 +600,10 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUsesResponsesAPI(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, "gpt-image-2", result.Model)
 	require.Equal(t, "gpt-image-2", result.UpstreamModel)
+	require.NotNil(t, result.BillingIdentity)
+	require.Equal(t, "gpt-image-2", result.BillingIdentity.BillingModel)
+	require.Equal(t, BillingModeImage, result.BillingIdentity.Pricing.Resolved.Mode)
+	require.NotEmpty(t, result.BillingIdentity.Pricing.Evidence.Hash)
 	require.Equal(t, 1, result.ImageCount)
 	require.Equal(t, 11, result.Usage.InputTokens)
 	require.Equal(t, 22, result.Usage.OutputTokens)
@@ -629,6 +634,33 @@ func TestOpenAIGatewayServiceForwardImages_OAuthUsesResponsesAPI(t *testing.T) {
 	require.Equal(t, "aGVsbG8=", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
 	require.Equal(t, "draw a cat", gjson.Get(rec.Body.String(), "data.0.revised_prompt").String())
 	require.True(t, auditCalled)
+}
+
+func TestOpenAIGatewayServiceForwardImages_InvalidImagePriceFailsBeforeTokenAndUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","size":"1024x1024"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+	upstream := &httpUpstreamRecorder{}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+	require.NoError(t, err)
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "must-not-be-read"}}
+	invalid := -1.0
+
+	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "",
+		WithOpenAIImagesBillingPreflight(OpenAIForwardOptions{
+			RequestedModel: "gpt-image-2", ImagePriceConfig: &ImagePriceConfig{Price1K: &invalid}, RequirePricingPreflight: true,
+		}),
+	)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrOpenAIBillingPreflight)
+	require.Nil(t, result)
+	require.Nil(t, upstream.lastReq)
 }
 
 func TestOpenAIGatewayServiceForwardImages_OAuthOutputAuditBlocksBeforeWrite(t *testing.T) {

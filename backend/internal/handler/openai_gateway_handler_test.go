@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -647,6 +648,63 @@ func TestOpenAIResponses_MissingDependencies_ReturnsServiceUnavailable(t *testin
 	assert.Equal(t, "Service temporarily unavailable", errorObj["message"])
 }
 
+func TestOpenAIPricingPreflightErrorsReturn400Not503_Responses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	h, apiKey := newOpenAIPreflightHandlerTestFixture(t, upstream.URL)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"custom-unpriceable","input":"hello","stream":false}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
+
+	h.Responses(c)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.NotEqual(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "invalid_request_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+	require.Zero(t, upstreamHits.Load())
+}
+
+func newOpenAIPreflightHandlerTestFixture(t *testing.T, upstreamURL string) (*OpenAIGatewayHandler, *service.APIKey) {
+	t.Helper()
+	groupID := int64(5101)
+	accountRepo := &openAIWSUsageHandlerAccountRepoStub{account: service.Account{
+		ID: 6101, Name: "preflight-account", Platform: service.PlatformOpenAI,
+		Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "test-only", "base_url": upstreamURL},
+	}}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Default.RateMultiplier = 1
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg)
+	gateway := service.NewOpenAIGatewayService(
+		accountRepo, nil, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
+		service.NewBillingService(cfg, nil), nil, billingCache, nil, &service.DeferredService{},
+		nil, nil, nil, nil, nil,
+	)
+	cache := &concurrencyCacheMock{
+		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
+		acquireAccountSlotFn: func(context.Context, int64, int, string) (bool, error) { return true, nil },
+	}
+	apiKey := &service.APIKey{
+		ID: 7101, GroupID: &groupID, Group: &service.Group{ID: groupID, RateMultiplier: 1},
+		User: &service.User{ID: 8101, Status: service.StatusActive},
+	}
+	return &OpenAIGatewayHandler{
+		gatewayService: gateway, billingCacheService: billingCache, apiKeyService: &service.APIKeyService{},
+		concurrencyHelper: NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
+	}, apiKey
+}
+
 func TestOpenAIResponses_SetsClientTransportHTTP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1238,14 +1296,18 @@ func newOpenAIWSHandlerTestServer(t *testing.T, h *OpenAIGatewayHandler, subject
 }
 
 type openAIResponsesWSUsageLogCase struct {
-	firstPayload   string
-	userAgent      *string
-	channelMapping map[string]string
+	firstPayload           string
+	userAgent              *string
+	channelMapping         map[string]string
+	upstreamCompletedEvent string
+	ingressMode            string
+	expectPreflightFailure bool
 }
 
 type openAIResponsesWSUsageLogResult struct {
 	log                  *service.UsageLog
 	upstreamFirstPayload []byte
+	upstreamHits         int32
 }
 
 type openAIWSUsageHandlerAccountRepoStub struct {
@@ -1310,7 +1372,9 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 
 	upstreamPayloadCh := make(chan []byte, 1)
 	upstreamErrCh := make(chan error, 1)
+	var upstreamHits atomic.Int32
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
 		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{
 			CompressionMode: coderws.CompressionContextTakeover,
 		})
@@ -1335,10 +1399,12 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		}
 		upstreamPayloadCh <- payload
 
+		completedEvent := tc.upstreamCompletedEvent
+		if completedEvent == "" {
+			completedEvent = `{"type":"response.completed","response":{"id":"resp_usage_e2e","model":"gpt-5.4","usage":{"input_tokens":2,"output_tokens":1}}}`
+		}
 		writeCtx, cancelWrite := context.WithTimeout(r.Context(), 3*time.Second)
-		writeErr := conn.Write(writeCtx, coderws.MessageText, []byte(
-			`{"type":"response.completed","response":{"id":"resp_usage_e2e","model":"gpt-5.4","usage":{"input_tokens":2,"output_tokens":1}}}`,
-		))
+		writeErr := conn.Write(writeCtx, coderws.MessageText, []byte(completedEvent))
 		cancelWrite()
 		if writeErr != nil {
 			upstreamErrCh <- writeErr
@@ -1350,6 +1416,10 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	defer upstreamServer.Close()
 
 	groupID := int64(4201)
+	ingressMode := tc.ingressMode
+	if ingressMode == "" {
+		ingressMode = service.OpenAIWSIngressModePassthrough
+	}
 	account := service.Account{
 		ID:          9901,
 		Name:        "openai-ws-passthrough-usage-e2e",
@@ -1364,7 +1434,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		},
 		Extra: map[string]any{
 			"openai_apikey_responses_websockets_v2_enabled": true,
-			"openai_apikey_responses_websockets_v2_mode":    service.OpenAIWSIngressModePassthrough,
+			"openai_apikey_responses_websockets_v2_mode":    ingressMode,
 		},
 	}
 
@@ -1441,7 +1511,10 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	apiKey := &service.APIKey{
 		ID:      1801,
 		GroupID: &groupID,
-		User:    &service.User{ID: 1701, Status: service.StatusActive},
+		Group: &service.Group{
+			ID: groupID, RateMultiplier: 1, AllowImageGeneration: true,
+		},
+		User: &service.User{ID: 1701, Status: service.StatusActive},
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -1473,6 +1546,18 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	err = clientConn.Write(writeCtx, coderws.MessageText, []byte(tc.firstPayload))
 	cancelWrite()
 	require.NoError(t, err)
+	if tc.expectPreflightFailure {
+		readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
+		_, _, readErr := clientConn.Read(readCtx)
+		cancelRead()
+		require.Error(t, readErr)
+		var closeErr coderws.CloseError
+		require.ErrorAs(t, readErr, &closeErr)
+		require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
+		require.Contains(t, strings.ToLower(closeErr.Reason), "billing preflight")
+		require.Zero(t, upstreamHits.Load())
+		return openAIResponsesWSUsageLogResult{upstreamHits: upstreamHits.Load()}
+	}
 
 	readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
 	_, event, err := clientConn.Read(readCtx)
@@ -1496,17 +1581,43 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		t.Fatal("等待上游 WebSocket 首帧超时")
 	}
 
-	select {
-	case upstreamErr := <-upstreamErrCh:
-		require.NoError(t, upstreamErr)
-	case <-time.After(3 * time.Second):
-		t.Fatal("等待上游 WebSocket 结束超时")
+	if ingressMode == service.OpenAIWSIngressModePassthrough {
+		select {
+		case upstreamErr := <-upstreamErrCh:
+			require.NoError(t, upstreamErr)
+		case <-time.After(3 * time.Second):
+			t.Fatal("等待上游 WebSocket 结束超时")
+		}
 	}
 
 	return openAIResponsesWSUsageLogResult{
 		log:                  usageLog,
 		upstreamFirstPayload: upstreamFirstPayload,
+		upstreamHits:         upstreamHits.Load(),
 	}
+}
+
+func TestOpenAIResponsesWebSocket_UnpriceableImageClosesBeforeUpstreamDial(t *testing.T) {
+	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+		firstPayload:           `{"type":"response.create","model":"gpt-5.4","stream":false,"input":"draw","tools":[{"type":"image_generation","model":"custom-unpriceable-image","size":"1024x1024"}]}`,
+		expectPreflightFailure: true,
+	})
+	require.Zero(t, got.upstreamHits)
+}
+
+func TestOpenAIResponsesWebSocket_ImageTurnPersistsImageBillingIdentity(t *testing.T) {
+	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+		firstPayload:           `{"type":"response.create","model":"gpt-5.4","stream":false,"input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024"}]}`,
+		upstreamCompletedEvent: `{"type":"response.completed","response":{"id":"resp_image_usage_e2e","model":"gpt-5.4","usage":{"input_tokens":2,"output_tokens":1},"output":[{"id":"ig_1","type":"image_generation_call","result":"aGVsbG8="}]}}`,
+		ingressMode:            service.OpenAIWSIngressModeCtxPool,
+	})
+
+	require.NotNil(t, got.log)
+	require.NotNil(t, got.log.BillingModel)
+	require.Equal(t, "gpt-image-2", *got.log.BillingModel)
+	require.NotNil(t, got.log.PricingSource)
+	require.NotNil(t, got.log.PricingRevision)
+	require.NotNil(t, got.log.PricingHash)
 }
 
 func testStringPtr(v string) *string {

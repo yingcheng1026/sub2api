@@ -196,6 +196,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			RequestedModel:          reqModel,
 			ChannelMapping:          channelMapping,
 			GroupID:                 apiKey.GroupID,
+			ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 			RequirePricingPreflight: true,
 		})
 
