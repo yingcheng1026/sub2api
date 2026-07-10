@@ -5,8 +5,10 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
+	dbmigrations "github.com/Wei-Shaw/sub2api/migrations"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,6 +59,7 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "usage_logs", "billing_type", "smallint", 0, false)
 	requireColumn(t, tx, "usage_logs", "request_type", "smallint", 0, false)
 	requireColumn(t, tx, "usage_logs", "openai_ws_mode", "boolean", 0, false)
+	requireColumn(t, tx, "usage_logs", "billing_model", "character varying", 100, true)
 
 	// usage_billing_dedup: billing idempotency narrow table
 	var usageBillingDedupRegclass sql.NullString
@@ -102,6 +105,57 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 
 	// user_allowed_groups: created_at should be timestamptz
 	requireColumn(t, tx, "user_allowed_groups", "created_at", "timestamp with time zone", 0, false)
+}
+
+func TestUsageLogBillingModelMigrationUpgradesHistoricalRowsWithoutBackfill(t *testing.T) {
+	tx := testTx(t)
+	ctx := context.Background()
+
+	content, err := dbmigrations.FS.ReadFile("172_add_usage_log_billing_model.sql")
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS billing_model VARCHAR(100);",
+		strings.TrimSpace(string(content)),
+	)
+
+	_, err = tx.ExecContext(ctx, `
+		CREATE TEMP TABLE usage_logs (
+			id BIGINT PRIMARY KEY,
+			actual_cost NUMERIC(20,10) NOT NULL
+		)
+	`)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "INSERT INTO usage_logs (id, actual_cost) VALUES (1, 12.34)")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, string(content))
+	require.NoError(t, err)
+
+	var (
+		billingModel sql.NullString
+		actualCost   float64
+	)
+	require.NoError(t, tx.QueryRowContext(ctx, "SELECT billing_model, actual_cost FROM usage_logs WHERE id = 1").Scan(&billingModel, &actualCost))
+	require.False(t, billingModel.Valid)
+	require.InDelta(t, 12.34, actualCost, 1e-12)
+
+	var (
+		dataType      string
+		maxLen        sql.NullInt64
+		nullable      string
+		columnDefault sql.NullString
+	)
+	require.NoError(t, tx.QueryRowContext(ctx, `
+		SELECT data_type, character_maximum_length, is_nullable, column_default
+		FROM information_schema.columns
+		WHERE table_schema = (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema())
+		  AND table_name = 'usage_logs'
+		  AND column_name = 'billing_model'
+	`).Scan(&dataType, &maxLen, &nullable, &columnDefault))
+	require.Equal(t, "character varying", dataType)
+	require.Equal(t, int64(100), maxLen.Int64)
+	require.Equal(t, "YES", nullable)
+	require.False(t, columnDefault.Valid)
 }
 
 func TestMigrationsRunner_AuthIdentityAndPaymentSchemaStayAligned(t *testing.T) {

@@ -425,6 +425,10 @@ type UsageLog struct {
 type AdminUsageLog struct {
 	UsageLog
 
+	RequestedModel string  `json:"requested_model"`
+	BillingModel   *string `json:"billing_model,omitempty"`
+	CompatMode     string  `json:"compat_mode"`
+
 	// UpstreamModel is the actual model sent to the upstream provider after mapping.
 	// Omitted when no mapping was applied (requested model was used as-is).
 	UpstreamModel *string `json:"upstream_model,omitempty"`

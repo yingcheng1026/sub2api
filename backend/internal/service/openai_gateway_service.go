@@ -5346,7 +5346,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if result.ServiceTier != nil {
 		serviceTier = strings.TrimSpace(*result.ServiceTier)
 	}
-	cost, err = s.calculateOpenAIRecordUsageCost(ctx, result, apiKey, billingModels, multiplier, imageMultiplier, tokens, serviceTier)
+	var successfulBillingModel string
+	cost, successfulBillingModel, err = s.calculateOpenAIRecordUsageCost(ctx, result, apiKey, billingModels, multiplier, imageMultiplier, tokens, serviceTier)
 	if err != nil {
 		return err
 	}
@@ -5370,7 +5371,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if input.OriginalModel != "" {
 		requestedModel = input.OriginalModel
 	}
-	logModel := usageLogModelForMappedClaudeCompat(requestedModel, result.Model, result.BillingModel, input.ChannelMappedModel, result.UpstreamModel, billingModel)
+	logModel := usageLogModelForMappedClaudeCompat(requestedModel, result.Model, successfulBillingModel, result.BillingModel, input.ChannelMappedModel, result.UpstreamModel, billingModel)
 
 	usageLog := &UsageLog{
 		UserID:              user.ID,
@@ -5380,6 +5381,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		Model:               logModel,
 		RequestedModel:      requestedModel,
 		UpstreamModel:       optionalNonEqualStringPtr(result.UpstreamModel, requestedModel),
+		BillingModel:        optionalTrimmedStringPtr(successfulBillingModel),
 		ServiceTier:         result.ServiceTier,
 		ReasoningEffort:     result.ReasoningEffort,
 		InboundEndpoint:     optionalTrimmedStringPtr(input.InboundEndpoint),
@@ -5491,13 +5493,13 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCost(
 	imageMultiplier float64,
 	tokens UsageTokens,
 	serviceTier string,
-) (*CostBreakdown, error) {
+) (*CostBreakdown, string, error) {
 	billingModel := firstUsageBillingModel(billingModels)
 	if result != nil && result.ImageCount > 0 {
-		return s.calculateOpenAIImageCost(ctx, billingModel, apiKey, result, imageMultiplier), nil
+		return s.calculateOpenAIImageCost(ctx, billingModel, apiKey, result, imageMultiplier), billingModel, nil
 	}
 	if len(billingModels) == 0 || billingModel == "" {
-		return nil, errors.New("openai usage billing model is empty")
+		return nil, "", errors.New("openai usage billing model is empty")
 	}
 	var lastErr error
 	for _, candidate := range billingModels {
@@ -5507,14 +5509,14 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCost(
 		}
 		cost, err := s.calculateOpenAIRecordUsageTokenCost(ctx, apiKey, candidate, multiplier, tokens, serviceTier)
 		if err == nil {
-			return cost, nil
+			return cost, candidate, nil
 		}
 		lastErr = err
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no non-empty billing model candidates")
 	}
-	return nil, fmt.Errorf("calculate OpenAI usage cost failed for billing models %s: %w", strings.Join(billingModels, ","), lastErr)
+	return nil, "", fmt.Errorf("calculate OpenAI usage cost failed for billing models %s: %w", strings.Join(billingModels, ","), lastErr)
 }
 
 func (s *OpenAIGatewayService) calculateOpenAIRecordUsageTokenCost(

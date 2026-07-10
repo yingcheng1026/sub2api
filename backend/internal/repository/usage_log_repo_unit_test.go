@@ -3,10 +3,13 @@
 package repository
 
 import (
+	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
@@ -64,4 +67,109 @@ func TestBuildUsageLogBatchInsertQuery_UsesConflictDoNothing(t *testing.T) {
 
 	require.Contains(t, query, "ON CONFLICT (request_id, api_key_id) DO NOTHING")
 	require.NotContains(t, strings.ToUpper(query), "DO UPDATE")
+}
+
+func TestUsageLogRepositoryBillingModelPersistenceContract(t *testing.T) {
+	billingModel := "gpt-5.4"
+	log := &service.UsageLog{
+		UserID:       1,
+		APIKeyID:     2,
+		AccountID:    3,
+		RequestID:    "req-billing-model-contract",
+		Model:        "gpt-5.4",
+		BillingModel: &billingModel,
+		InputTokens:  10,
+		OutputTokens: 5,
+		CreatedAt:    time.Now().UTC(),
+	}
+	prepared := prepareUsageLogInsert(log)
+
+	require.Contains(t, usageLogSelectColumns, "requested_model, upstream_model, billing_model, group_id")
+	require.Len(t, prepared.args, len(usageLogInsertArgTypes))
+	require.Equal(t, "text", usageLogInsertArgTypes[7])
+	require.Equal(t, sql.NullString{String: billingModel, Valid: true}, prepared.args[7])
+
+	key := usageLogBatchKey(log.RequestID, log.APIKeyID)
+	batchQuery, _ := buildUsageLogBatchInsertQuery([]string{key}, map[string]usageLogInsertPrepared{key: prepared})
+	bestEffortQuery, _ := buildUsageLogBestEffortInsertQuery([]usageLogInsertPrepared{prepared})
+	for _, query := range []string{batchQuery, bestEffortQuery} {
+		require.Contains(t, query, "requested_model,\n\t\t\tupstream_model,\n\t\t\tbilling_model,")
+		require.Contains(t, query, "billing_model")
+	}
+}
+
+func TestUsageLogRepositorySingleInsertPathsIncludeBillingModel(t *testing.T) {
+	billingModel := "gpt-5.6-terra"
+	log := &service.UsageLog{
+		UserID:       1,
+		APIKeyID:     2,
+		AccountID:    3,
+		RequestID:    "req-billing-model-single",
+		Model:        billingModel,
+		BillingModel: &billingModel,
+		CreatedAt:    time.Now().UTC(),
+	}
+	queryPattern := `(?s)INSERT INTO usage_logs \(.*requested_model,\s*upstream_model,\s*billing_model,.*VALUES`
+
+	t.Run("returning insert", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		mock.ExpectQuery(queryPattern).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(int64(9), log.CreatedAt))
+
+		repo := newUsageLogRepositoryWithSQL(nil, db)
+		inserted, err := repo.createSingle(context.Background(), db, log)
+		require.NoError(t, err)
+		require.True(t, inserted)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("no-result insert", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		mock.ExpectExec(queryPattern).WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err = execUsageLogInsertNoResult(context.Background(), db, prepareUsageLogInsert(log))
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestScanUsageLogBillingModelPreservesValueAndHistoricalNull(t *testing.T) {
+	now := time.Now().UTC()
+	values := []any{
+		int64(1), int64(10), int64(20), int64(30),
+		sql.NullString{Valid: true, String: "req-scan-billing"},
+		"gpt-5.4",
+		sql.NullString{Valid: true, String: "claude-sonnet-4-6"},
+		sql.NullString{Valid: true, String: "gpt-5.4"},
+		sql.NullString{Valid: true, String: "gpt-5.4"},
+		sql.NullInt64{}, sql.NullInt64{},
+		1, 2, 3, 4, 5, 6,
+		0, 0.0,
+		0.1, 0.2, 0.3, 0.4, 1.0, 0.9, 1.0,
+		sql.NullFloat64{},
+		int16(service.BillingTypeBalance), int16(service.RequestTypeSync),
+		false, false,
+		sql.NullInt64{}, sql.NullInt64{},
+		sql.NullString{}, sql.NullString{},
+		0, sql.NullString{},
+		sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{},
+		false,
+		sql.NullInt64{}, sql.NullString{}, sql.NullString{}, sql.NullString{},
+		sql.NullFloat64{},
+		now,
+	}
+
+	log, err := scanUsageLog(usageLogScannerStub{values: values})
+	require.NoError(t, err)
+	require.NotNil(t, log.BillingModel)
+	require.Equal(t, "gpt-5.4", *log.BillingModel)
+
+	values[8] = sql.NullString{}
+	historical, err := scanUsageLog(usageLogScannerStub{values: values})
+	require.NoError(t, err)
+	require.Nil(t, historical.BillingModel)
 }

@@ -1254,9 +1254,39 @@ func TestOpenAIGatewayServiceRecordUsage_FallsBackToUpstreamModelWhenPrimaryUnpr
 
 	require.NoError(t, err)
 	require.NotNil(t, usageRepo.lastLog)
+	require.NotNil(t, usageRepo.lastLog.BillingModel)
+	require.Equal(t, "gpt-5.4", *usageRepo.lastLog.BillingModel)
 	require.InDelta(t, expectedCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
 	require.True(t, usageRepo.lastLog.ActualCost > 0, "cost must not be zero")
 	require.InDelta(t, expectedCost.ActualCost, userRepo.lastAmount, 1e-12)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_PersistsExactNativeGPT56BillingTier(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(
+		usageRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		nil,
+	)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_native_gpt56_terra",
+			Model:         "gpt-5.6-terra",
+			UpstreamModel: "gpt-5.6-terra",
+			Usage:         OpenAIUsage{InputTokens: 20, OutputTokens: 10},
+			Duration:      time.Second,
+		},
+		APIKey:  &APIKey{ID: 10},
+		User:    &User{ID: 20},
+		Account: &Account{ID: 30},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.NotNil(t, usageRepo.lastLog.BillingModel)
+	require.Equal(t, "gpt-5.6-terra", *usageRepo.lastLog.BillingModel)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_ReturnsErrorWhenTokenModelCannotBePriced(t *testing.T) {

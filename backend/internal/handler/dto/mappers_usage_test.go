@@ -149,6 +149,94 @@ func TestUsageLogFromService_FallsBackToStoredModelWhenUpstreamMissing(t *testin
 	require.Equal(t, "gpt-5.4", adminDTO.Model)
 }
 
+func TestUsageLogFromServiceAdmin_IncludesBillingIdentityWithoutLeakingUserAuditFields(t *testing.T) {
+	t.Parallel()
+
+	upstreamModel := "gpt-5.4"
+	billingModel := "gpt-5.4"
+	log := &service.UsageLog{
+		RequestID:      "req_billing_identity",
+		Model:          "gpt-5.4",
+		RequestedModel: "claude-sonnet-4-6",
+		UpstreamModel:  &upstreamModel,
+		BillingModel:   &billingModel,
+	}
+
+	userJSON, err := json.Marshal(UsageLogFromService(log))
+	require.NoError(t, err)
+	require.NotContains(t, string(userJSON), "requested_model")
+	require.NotContains(t, string(userJSON), "billing_model")
+	require.NotContains(t, string(userJSON), "compat_mode")
+
+	adminJSON, err := json.Marshal(UsageLogFromServiceAdmin(log))
+	require.NoError(t, err)
+	for _, expected := range []string{
+		`"model":"gpt-5.4"`,
+		`"requested_model":"claude-sonnet-4-6"`,
+		`"upstream_model":"gpt-5.4"`,
+		`"billing_model":"gpt-5.4"`,
+		`"compat_mode":"legacy_claude_alias"`,
+	} {
+		require.Contains(t, string(adminJSON), expected)
+	}
+}
+
+func TestUsageLogFromServiceAdmin_DerivesCompatModeFromStoredIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		requestedModel string
+		executedModel  string
+		billingModel   *string
+		want           string
+	}{
+		{
+			name:           "native GPT",
+			requestedModel: "gpt-5.6-terra",
+			executedModel:  "gpt-5.6-terra",
+			billingModel:   stringPtr("gpt-5.6-terra"),
+			want:           "native_gpt",
+		},
+		{
+			name:           "legacy Claude alias",
+			requestedModel: "claude-sonnet-4-6",
+			executedModel:  "gpt-5.4",
+			billingModel:   stringPtr("gpt-5.4"),
+			want:           "legacy_claude_alias",
+		},
+		{
+			name:           "historical audit missing",
+			requestedModel: "claude-sonnet-4-6",
+			executedModel:  "gpt-5.4",
+			want:           "other",
+		},
+		{
+			name:           "other provider",
+			requestedModel: "gemini-3-pro",
+			executedModel:  "gemini-3-pro",
+			billingModel:   stringPtr("gemini-3-pro"),
+			want:           "other",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt := tt
+			dto := UsageLogFromServiceAdmin(&service.UsageLog{
+				Model:          tt.executedModel,
+				RequestedModel: tt.requestedModel,
+				BillingModel:   tt.billingModel,
+			})
+			require.Equal(t, tt.want, dto.CompatMode)
+		})
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
 func f64Ptr(value float64) *float64 {
 	return &value
 }

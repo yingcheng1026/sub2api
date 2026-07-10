@@ -1,0 +1,1 @@
+ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS billing_model VARCHAR(100);

@@ -104,6 +104,7 @@ type UsageLog struct {
 	// UpstreamModel is the actual model sent to the upstream provider after mapping.
 	// Nil means it was not captured or the upstream model matched the requested model.
 	UpstreamModel *string
+	BillingModel  *string
 	// ChannelID 渠道 ID
 	ChannelID *int64
 	// ModelMappingChain 模型映射链，如 "a→b→c"

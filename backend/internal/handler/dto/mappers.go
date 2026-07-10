@@ -621,6 +621,45 @@ func visibleUsageLogModel(l *service.UsageLog) string {
 	return strings.TrimSpace(l.RequestedModel)
 }
 
+func requestedUsageLogModel(l *service.UsageLog) string {
+	if requested := strings.TrimSpace(l.RequestedModel); requested != "" {
+		return requested
+	}
+	return strings.TrimSpace(l.Model)
+}
+
+func usageLogModelFamily(model string) string {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndex(normalized, "/"); slash >= 0 {
+		normalized = strings.TrimSpace(normalized[slash+1:])
+	}
+	switch {
+	case strings.HasPrefix(normalized, "gpt-"):
+		return "gpt"
+	case strings.HasPrefix(normalized, "claude-"):
+		return "claude"
+	default:
+		return "other"
+	}
+}
+
+func usageLogCompatMode(l *service.UsageLog) string {
+	requestedFamily := usageLogModelFamily(requestedUsageLogModel(l))
+	executedFamily := usageLogModelFamily(visibleUsageLogModel(l))
+	billingFamily := ""
+	if l.BillingModel != nil {
+		billingFamily = usageLogModelFamily(*l.BillingModel)
+	}
+	billingMatchesGPT := billingFamily == "gpt"
+	if requestedFamily == "gpt" && executedFamily == "gpt" && billingMatchesGPT {
+		return "native_gpt"
+	}
+	if requestedFamily == "claude" && executedFamily == "gpt" && billingMatchesGPT {
+		return "legacy_claude_alias"
+	}
+	return "other"
+}
+
 // UsageLogFromService converts a service UsageLog to DTO for regular users.
 // It excludes Account details and IP address - users should not see these.
 func UsageLogFromService(l *service.UsageLog) *UsageLog {
@@ -639,6 +678,9 @@ func UsageLogFromServiceAdmin(l *service.UsageLog) *AdminUsageLog {
 	}
 	return &AdminUsageLog{
 		UsageLog:              usageLogFromServiceUser(l),
+		RequestedModel:        requestedUsageLogModel(l),
+		BillingModel:          l.BillingModel,
+		CompatMode:            usageLogCompatMode(l),
 		UpstreamModel:         l.UpstreamModel,
 		ChannelID:             l.ChannelID,
 		ModelMappingChain:     l.ModelMappingChain,
