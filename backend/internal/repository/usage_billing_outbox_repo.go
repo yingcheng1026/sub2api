@@ -334,18 +334,21 @@ type usageBillingBindingQuerier interface {
 
 func validateUsageBillingBindingsAtEnqueue(ctx context.Context, q usageBillingBindingQuerier, envelope service.UsageBillingEnvelope) error {
 	groupID := envelope.GroupID()
-	if groupID == nil {
+	effectiveBillingGroupID := envelope.EffectiveBillingGroupID()
+	if groupID == nil || effectiveBillingGroupID == nil {
 		return service.ErrUsageBillingEnvelopeInvalid
 	}
 
 	var apiKeyUserID int64
 	var apiKeyGroupID sql.NullInt64
 	var apiKeyName string
+	var apiKeyHash sql.NullString
+	var apiKeyValue string
 	err := q.QueryRowContext(ctx, `
-		SELECT user_id, group_id, name FROM api_keys
+		SELECT user_id, group_id, name, key_hash, key FROM api_keys
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR SHARE
-	`, envelope.APIKeyID()).Scan(&apiKeyUserID, &apiKeyGroupID, &apiKeyName)
+	`, envelope.APIKeyID()).Scan(&apiKeyUserID, &apiKeyGroupID, &apiKeyName, &apiKeyHash, &apiKeyValue)
 	if errors.Is(err, sql.ErrNoRows) {
 		return service.ErrUsageBillingOutboxTargetNotFound
 	}
@@ -354,6 +357,15 @@ func validateUsageBillingBindingsAtEnqueue(ctx context.Context, q usageBillingBi
 	}
 	if apiKeyUserID != envelope.UserID() {
 		return service.ErrUsageBillingCrossTenant
+	}
+	if locator := envelope.AuthCacheLocator(); locator != "" {
+		expectedLocator := strings.TrimSpace(apiKeyHash.String)
+		if !apiKeyHash.Valid || expectedLocator == "" {
+			expectedLocator = service.APIKeyAuthCacheLocator(apiKeyValue)
+		}
+		if !strings.EqualFold(expectedLocator, locator) {
+			return service.ErrUsageBillingCrossTenant
+		}
 	}
 	universalWalletKey := !apiKeyGroupID.Valid
 	if universalWalletKey {
@@ -414,6 +426,9 @@ func validateUsageBillingBindingsAtEnqueue(ctx context.Context, q usageBillingBi
 
 	subscriptionID := envelope.SubscriptionID()
 	if subscriptionID == nil {
+		if *effectiveBillingGroupID != *groupID {
+			return service.ErrUsageBillingCrossTenant
+		}
 		return nil
 	}
 	var subscriptionUserID int64
@@ -437,16 +452,89 @@ func validateUsageBillingBindingsAtEnqueue(ctx context.Context, q usageBillingBi
 	if universalWalletKey && !walletBalance.Valid {
 		return service.ErrUsageBillingCrossTenant
 	}
-	if envelope.WalletCost() > 0 {
-		if !walletBalance.Valid || subscriptionGroupID.Valid {
+	if walletBalance.Valid {
+		if subscriptionGroupID.Valid || envelope.SubscriptionCost() > 0 || *effectiveBillingGroupID != *groupID {
 			return service.ErrUsageBillingCrossTenant
 		}
-	} else if envelope.SubscriptionCost() > 0 {
-		if walletBalance.Valid || !subscriptionGroupID.Valid || subscriptionGroupID.Int64 != *groupID {
+		return nil
+	}
+	if envelope.WalletCost() > 0 || !subscriptionGroupID.Valid || subscriptionGroupID.Int64 != *effectiveBillingGroupID {
+		return service.ErrUsageBillingCrossTenant
+	}
+	if *effectiveBillingGroupID != *groupID {
+		if err := lockActiveUsageBillingGroup(ctx, q, *effectiveBillingGroupID); err != nil {
+			return err
+		}
+		covered, err := lockUsageBillingPlanCoverage(ctx, q, *effectiveBillingGroupID, *groupID)
+		if err != nil {
+			return err
+		}
+		if !covered {
 			return service.ErrUsageBillingCrossTenant
 		}
 	}
 	return nil
+}
+
+func lockActiveUsageBillingGroup(ctx context.Context, q usageBillingBindingQuerier, groupID int64) error {
+	var status string
+	err := q.QueryRowContext(ctx, `
+		SELECT status FROM groups
+		WHERE id = $1 AND deleted_at IS NULL
+		FOR SHARE
+	`, groupID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return service.ErrUsageBillingOutboxTargetNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != service.StatusActive {
+		return service.ErrUsageBillingCrossTenant
+	}
+	return nil
+}
+
+func lockUsageBillingPlanCoverage(ctx context.Context, q usageBillingBindingQuerier, anchorGroupID, routedGroupID int64) (bool, error) {
+	var planID int64
+	err := q.QueryRowContext(ctx, `
+		SELECT sp.id
+		FROM subscription_plans sp
+		JOIN subscription_plan_groups target
+			ON target.plan_id = sp.id AND target.group_id = $2
+		WHERE sp.group_id = $1
+		LIMIT 1
+		FOR SHARE OF sp, target
+	`, anchorGroupID, routedGroupID).Scan(&planID)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+
+	err = q.QueryRowContext(ctx, `
+		SELECT sp.id
+		FROM subscription_plans sp
+		JOIN subscription_plan_groups anchor
+			ON anchor.plan_id = sp.id AND anchor.group_id = $1
+		JOIN groups anchor_group
+			ON anchor_group.id = anchor.group_id
+			AND anchor_group.subscription_type = $3
+			AND anchor_group.deleted_at IS NULL
+		JOIN subscription_plan_groups target
+			ON target.plan_id = sp.id AND target.group_id = $2
+		WHERE sp.group_id IS NULL
+		LIMIT 1
+		FOR SHARE OF sp, anchor, anchor_group, target
+	`, anchorGroupID, routedGroupID, service.SubscriptionTypeSubscription).Scan(&planID)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
 }
 
 func newUsageBillingLeaseToken() (string, error) {

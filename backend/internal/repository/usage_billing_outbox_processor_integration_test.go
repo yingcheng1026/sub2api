@@ -88,6 +88,7 @@ func TestUsageBillingOutboxProcessorIntegration_BalanceAckCrashReplayChargesAndL
 	envelope := integrationOutboxEnvelope(t, service.UsageBillingEnvelopeInput{
 		RequestID:           "outbox-ack-" + uuid.NewString(),
 		APIKeyID:            apiKey.ID,
+		AuthCacheLocator:    service.APIKeyAuthCacheLocator(apiKey.Key),
 		UserID:              user.ID,
 		AccountID:           account.ID,
 		GroupID:             &group.ID,
@@ -183,6 +184,59 @@ func TestUsageBillingOutboxProcessorIntegration_MonthlyAndWalletPreserveFrozenSu
 		require.InDelta(t, 2.5, monthly, 0.000001)
 	})
 
+	t.Run("monthly plan coverage", func(t *testing.T) {
+		_, _ = integrationDB.ExecContext(ctx, "TRUNCATE usage_billing_outbox RESTART IDENTITY")
+		user := mustCreateUser(t, client, &service.User{Email: fmt.Sprintf("outbox-monthly-coverage-%s@example.com", uuid.NewString())})
+		anchorGroup := mustCreateGroup(t, client, &service.Group{
+			Name:             "outbox-monthly-anchor-" + uuid.NewString(),
+			SubscriptionType: service.SubscriptionTypeSubscription,
+		})
+		routingGroup := mustCreateGroup(t, client, &service.Group{
+			Name:             "outbox-monthly-routing-" + uuid.NewString(),
+			SubscriptionType: service.SubscriptionTypeStandard,
+		})
+		plan, err := client.SubscriptionPlan.Create().
+			SetName("outbox-monthly-coverage-" + uuid.NewString()).
+			SetPrice(99).
+			SetWalletQuotaUsd(400).
+			SetValidityDays(30).
+			SetValidityUnit("day").
+			Save(ctx)
+		require.NoError(t, err)
+		for _, groupID := range []int64{anchorGroup.ID, routingGroup.ID} {
+			_, err = client.SubscriptionPlanGroup.Create().SetPlanID(plan.ID).SetGroupID(groupID).Save(ctx)
+			require.NoError(t, err)
+		}
+		apiKey := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, GroupID: &routingGroup.ID, Key: "sk-outbox-monthly-coverage-" + uuid.NewString()})
+		account := mustCreateAccount(t, client, &service.Account{Name: "outbox-monthly-coverage-account-" + uuid.NewString(), Type: service.AccountTypeOAuth})
+		mustBindAccountToGroup(t, client, account.ID, routingGroup.ID, 1)
+		subscription := mustCreateSubscription(t, client, &service.UserSubscription{UserID: user.ID, GroupID: &anchorGroup.ID})
+		envelope := integrationOutboxEnvelope(t, service.UsageBillingEnvelopeInput{
+			RequestID:               "outbox-monthly-coverage-" + uuid.NewString(),
+			APIKeyID:                apiKey.ID,
+			UserID:                  user.ID,
+			AccountID:               account.ID,
+			SubscriptionID:          &subscription.ID,
+			GroupID:                 &routingGroup.ID,
+			EffectiveBillingGroupID: &anchorGroup.ID,
+			AccountType:             service.AccountTypeOAuth,
+			BillingModel:            "gpt-5.6-sol",
+			BillingType:             service.BillingTypeSubscription,
+			SubscriptionCost:        2.5,
+		})
+
+		processIntegrationEnvelopeAfterEnqueue(t, ctx, envelope, nil)
+
+		var daily, weekly, monthly float64
+		require.NoError(t, integrationDB.QueryRowContext(ctx, `
+			SELECT daily_usage_usd, weekly_usage_usd, monthly_usage_usd
+			FROM user_subscriptions WHERE id = $1
+		`, subscription.ID).Scan(&daily, &weekly, &monthly))
+		require.InDelta(t, 2.5, daily, 0.000001)
+		require.InDelta(t, 2.5, weekly, 0.000001)
+		require.InDelta(t, 2.5, monthly, 0.000001)
+	})
+
 	t.Run("wallet", func(t *testing.T) {
 		_, _ = integrationDB.ExecContext(ctx, "TRUNCATE usage_billing_outbox RESTART IDENTITY")
 		user := mustCreateUser(t, client, &service.User{Email: fmt.Sprintf("outbox-wallet-%s@example.com", uuid.NewString())})
@@ -226,6 +280,74 @@ func TestUsageBillingOutboxProcessorIntegration_MonthlyAndWalletPreserveFrozenSu
 		require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM subscription_wallet_ledger WHERE subscription_id = $1 AND reason = 'usage'", walletID).Scan(&ledgerCount))
 		require.Equal(t, 1, ledgerCount)
 	})
+}
+
+func TestUsageBillingOutboxProcessorIntegration_PendingEventSurvivesWorkerRestart(t *testing.T) {
+	ctx := context.Background()
+	_, _ = integrationDB.ExecContext(ctx, "TRUNCATE usage_billing_outbox RESTART IDENTITY")
+	client := testEntClient(t)
+	user := mustCreateUser(t, client, &service.User{Email: fmt.Sprintf("outbox-restart-%s@example.com", uuid.NewString()), Balance: 100})
+	group := mustCreateGroup(t, client, &service.Group{Name: "outbox-restart-" + uuid.NewString()})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, GroupID: &group.ID, Key: "sk-outbox-restart-" + uuid.NewString()})
+	account := mustCreateAccount(t, client, &service.Account{Name: "outbox-restart-" + uuid.NewString(), Type: service.AccountTypeAPIKey})
+	mustBindAccountToGroup(t, client, account.ID, group.ID, 1)
+	billingModel := "gpt-5.6-sol"
+	upstreamModel := billingModel
+	pricingSource := service.PricingSourceBuiltinGPT56
+	pricingRevision := service.GPT56PricingRevision
+	pricingHash := "abababababababababababababababababababababababababababababababab"
+	accountRate := 1.0
+	requestID := "outbox-restart-" + uuid.NewString()
+	usageLog := &service.UsageLog{
+		UserID: user.ID, APIKeyID: apiKey.ID, AccountID: account.ID, RequestID: requestID,
+		Model: billingModel, RequestedModel: "claude-sonnet-4-6", UpstreamModel: &upstreamModel,
+		BillingModel: &billingModel, PricingSource: &pricingSource, PricingRevision: &pricingRevision,
+		PricingHash: &pricingHash, GroupID: &group.ID, InputTokens: 100, OutputTokens: 10,
+		InputCost: 1, OutputCost: 0.25, TotalCost: 1.25, ActualCost: 1.25,
+		RateMultiplier: 1, AccountRateMultiplier: &accountRate, BillingType: service.BillingTypeBalance,
+		RequestType: service.RequestTypeStream, CreatedAt: time.Now().UTC(),
+	}
+	cmd := &service.UsageBillingCommand{
+		RequestID: requestID, APIKeyID: apiKey.ID, UserID: user.ID, AccountID: account.ID,
+		AccountType: service.AccountTypeAPIKey, Model: billingModel, BillingType: service.BillingTypeBalance,
+		InputTokens: 100, OutputTokens: 10, BalanceCost: 1.25,
+	}
+	envelope, err := service.NewUsageBillingEnvelopeFromUsageLog(usageLog, cmd)
+	require.NoError(t, err)
+
+	firstProcessRepo := NewUsageBillingOutboxRepository(integrationDB)
+	_, inserted, err := firstProcessRepo.Enqueue(ctx, envelope)
+	require.NoError(t, err)
+	require.True(t, inserted)
+	// Simulate process exit before the in-memory wake hint or worker can run.
+	firstProcessRepo = nil
+
+	restartedOutboxRepo := NewUsageBillingOutboxRepository(integrationDB)
+	billingRepo := NewUsageBillingRepository(client, integrationDB)
+	usageRepo := NewUsageLogRepository(client, integrationDB)
+	processor := service.NewUsageBillingOutboxProcessor(
+		restartedOutboxRepo,
+		restartedOutboxRepo,
+		billingRepo,
+		service.NewUsageBillingReplayWriter(usageRepo),
+	)
+	processed, err := processor.ProcessBatch(ctx, "restart-worker", 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+
+	var balance float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
+	require.InDelta(t, 98.75, balance, 0.000001)
+	var count int
+	var model, requested, storedBilling string
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COUNT(*), MAX(model), MAX(requested_model), MAX(billing_model)
+		FROM usage_logs WHERE request_id = $1 AND api_key_id = $2
+	`, requestID, apiKey.ID).Scan(&count, &model, &requested, &storedBilling))
+	require.Equal(t, 1, count)
+	require.Equal(t, billingModel, model)
+	require.Equal(t, "claude-sonnet-4-6", requested)
+	require.Equal(t, billingModel, storedBilling)
 }
 
 func processIntegrationEnvelopeAfterEnqueue(t *testing.T, ctx context.Context, envelope service.UsageBillingEnvelope, afterEnqueue func()) {

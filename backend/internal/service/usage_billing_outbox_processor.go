@@ -17,6 +17,7 @@ type UsageBillingOutboxProcessor struct {
 	bindingValidator UsageBillingBindingValidator
 	billingRepo      UsageBillingRepository
 	replayWriter     UsageBillingReplayWriter
+	replayFinalizer  UsageBillingReplayFinalizer
 	now              func() time.Time
 }
 
@@ -25,12 +26,18 @@ func NewUsageBillingOutboxProcessor(
 	bindingValidator UsageBillingBindingValidator,
 	billingRepo UsageBillingRepository,
 	replayWriter UsageBillingReplayWriter,
+	replayFinalizers ...UsageBillingReplayFinalizer,
 ) *UsageBillingOutboxProcessor {
+	var replayFinalizer UsageBillingReplayFinalizer
+	if len(replayFinalizers) > 0 {
+		replayFinalizer = replayFinalizers[0]
+	}
 	return &UsageBillingOutboxProcessor{
 		outboxRepo:       outboxRepo,
 		bindingValidator: bindingValidator,
 		billingRepo:      billingRepo,
 		replayWriter:     replayWriter,
+		replayFinalizer:  replayFinalizer,
 		now:              time.Now,
 	}
 }
@@ -101,6 +108,11 @@ func (p *UsageBillingOutboxProcessor) ProcessEvent(ctx context.Context, event Us
 	if p.replayWriter != nil {
 		if err := p.replayWriter.WriteUsageBillingReplay(ctx, event.Envelope); err != nil {
 			return p.retry(ctx, event, "usage_log_replay_failed", err)
+		}
+	}
+	if p.replayFinalizer != nil {
+		if err := p.replayFinalizer.FinalizeUsageBillingReplay(ctx, event.Envelope, result); err != nil {
+			return p.retry(ctx, event, "billing_replay_finalize_failed", err)
 		}
 	}
 

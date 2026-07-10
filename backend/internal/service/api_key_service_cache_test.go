@@ -124,9 +124,12 @@ func (s *authRepoStub) GetRateLimitData(ctx context.Context, id int64) (*APIKeyR
 }
 
 type authCacheStub struct {
-	getAuthCache   func(ctx context.Context, key string) (*APIKeyAuthCacheEntry, error)
-	setAuthKeys    []string
-	deleteAuthKeys []string
+	getAuthCache    func(ctx context.Context, key string) (*APIKeyAuthCacheEntry, error)
+	setAuthKeys     []string
+	deleteAuthKeys  []string
+	publishAuthKeys []string
+	deleteAuthErr   error
+	publishAuthErr  error
 }
 
 func (s *authCacheStub) GetCreateAttemptCount(ctx context.Context, userID int64) (int, error) {
@@ -163,11 +166,12 @@ func (s *authCacheStub) SetAuthCache(ctx context.Context, key string, entry *API
 
 func (s *authCacheStub) DeleteAuthCache(ctx context.Context, key string) error {
 	s.deleteAuthKeys = append(s.deleteAuthKeys, key)
-	return nil
+	return s.deleteAuthErr
 }
 
 func (s *authCacheStub) PublishAuthCacheInvalidation(ctx context.Context, cacheKey string) error {
-	return nil
+	s.publishAuthKeys = append(s.publishAuthKeys, cacheKey)
+	return s.publishAuthErr
 }
 
 func (s *authCacheStub) SubscribeAuthCacheInvalidation(ctx context.Context, handler func(cacheKey string)) error {
@@ -470,6 +474,49 @@ func TestAPIKeyService_InvalidateAuthCacheByUserID(t *testing.T) {
 
 	svc.InvalidateAuthCacheByUserID(context.Background(), 7)
 	require.Len(t, cache.deleteAuthKeys, 2)
+}
+
+func TestAPIKeyService_InvalidateAuthCacheByUserIDReliable_ReportsRepositoryAndCacheFailures(t *testing.T) {
+	t.Run("repository", func(t *testing.T) {
+		sentinel := errors.New("list keys failed")
+		svc := NewAPIKeyService(&authRepoStub{
+			listKeysByUserID: func(context.Context, int64) ([]string, error) { return nil, sentinel },
+		}, nil, nil, nil, nil, &authCacheStub{}, &config.Config{})
+		require.ErrorIs(t, svc.InvalidateAuthCacheByUserIDReliable(context.Background(), 7), sentinel)
+	})
+
+	t.Run("delete and publish", func(t *testing.T) {
+		deleteErr := errors.New("delete failed")
+		publishErr := errors.New("publish failed")
+		cache := &authCacheStub{deleteAuthErr: deleteErr, publishAuthErr: publishErr}
+		svc := NewAPIKeyService(&authRepoStub{
+			listKeysByUserID: func(context.Context, int64) ([]string, error) { return []string{"k1", "k2"}, nil },
+		}, nil, nil, nil, nil, cache, &config.Config{})
+
+		err := svc.InvalidateAuthCacheByUserIDReliable(context.Background(), 7)
+		require.ErrorIs(t, err, deleteErr)
+		require.ErrorIs(t, err, publishErr)
+		require.Len(t, cache.deleteAuthKeys, 2)
+	})
+}
+
+func TestAPIKeyService_InvalidateAuthCacheByLocatorReliable_DoesNotDependOnActiveKeyRows(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	publishErr := errors.New("publish failed")
+	cache := &authCacheStub{deleteAuthErr: deleteErr, publishAuthErr: publishErr}
+	svc := NewAPIKeyService(&authRepoStub{
+		listKeysByUserID: func(context.Context, int64) ([]string, error) {
+			panic("locator invalidation must not enumerate active API keys")
+		},
+	}, nil, nil, nil, nil, cache, &config.Config{})
+	locator := APIKeyAuthCacheLocator("sk-soft-deleted")
+
+	err := svc.InvalidateAuthCacheByLocatorReliable(context.Background(), locator)
+	require.ErrorIs(t, err, deleteErr)
+	require.ErrorIs(t, err, publishErr)
+	require.Equal(t, []string{locator}, cache.deleteAuthKeys)
+	require.Equal(t, []string{locator}, cache.publishAuthKeys)
+	require.Error(t, svc.InvalidateAuthCacheByLocatorReliable(context.Background(), "not-a-sha256"))
 }
 
 func TestAPIKeyService_InvalidateAuthCacheByGroupID(t *testing.T) {

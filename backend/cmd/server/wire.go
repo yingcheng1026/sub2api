@@ -89,6 +89,7 @@ func provideCleanup(
 	emailQueue *service.EmailQueueService,
 	billingCache *service.BillingCacheService,
 	usageRecordWorkerPool *service.UsageRecordWorkerPool,
+	usageBillingOutboxWorker *service.UsageBillingOutboxWorker,
 	subscriptionService *service.SubscriptionService,
 	oauth *service.OAuthService,
 	openaiOAuth *service.OpenAIOAuthService,
@@ -103,6 +104,11 @@ func provideCleanup(
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if usageBillingOutboxWorker != nil {
+			if err := usageBillingOutboxWorker.Stop(ctx); err != nil {
+				log.Printf("[Cleanup] UsageBillingOutboxWorker stop failed: %v", err)
+			}
+		}
 
 		type cleanupStep struct {
 			name string

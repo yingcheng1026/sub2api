@@ -181,6 +181,38 @@ func ProvideDeferredService(accountRepo AccountRepository, timingWheel *TimingWh
 	return svc
 }
 
+func ProvideUsageBillingReplayCacheInvalidator(service *BillingCacheService) UsageBillingReplayCacheInvalidator {
+	return service
+}
+
+func ProvideUsageBillingReplayAccountToucher(service *DeferredService) UsageBillingReplayAccountToucher {
+	return service
+}
+
+func ProvideUsageBillingReplayAuthCacheInvalidator(service *APIKeyService) UsageBillingReplayAuthCacheInvalidator {
+	return service
+}
+
+func ProvideUsageBillingOutboxProcessor(
+	outboxRepo UsageBillingOutboxRepository,
+	bindingValidator UsageBillingBindingValidator,
+	billingRepo UsageBillingRepository,
+	replayWriter UsageBillingReplayWriter,
+	replayFinalizer UsageBillingReplayFinalizer,
+) *UsageBillingOutboxProcessor {
+	return NewUsageBillingOutboxProcessor(outboxRepo, bindingValidator, billingRepo, replayWriter, replayFinalizer)
+}
+
+func ProvideUsageBillingOutboxWorker(processor *UsageBillingOutboxProcessor) *UsageBillingOutboxWorker {
+	worker := NewUsageBillingOutboxWorker(processor)
+	worker.Start()
+	return worker
+}
+
+func ProvideModelRouterGroupRepository(groupRepo GroupRepository) ModelRouterGroupRepository {
+	return groupRepo
+}
+
 // ProvideConcurrencyService creates ConcurrencyService and starts slot cleanup worker.
 func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountRepository, cfg *config.Config) *ConcurrencyService {
 	svc := NewConcurrencyService(cache)
@@ -499,12 +531,20 @@ var ProviderSet = wire.NewSet(
 	NewPromoService,
 	NewUsageService,
 	NewDashboardService,
+	ProvideModelRouterGroupRepository,
 	NewModelRouterService,
 	wire.Bind(new(ModelRouter), new(*ModelRouterService)),
 	wire.Bind(new(ModelRouteProvider), new(*ModelRouterService)),
 	ProvidePricingService,
 	NewBillingService,
 	ProvideBillingCacheService,
+	NewUsageBillingReplayWriter,
+	ProvideUsageBillingReplayCacheInvalidator,
+	ProvideUsageBillingReplayAccountToucher,
+	ProvideUsageBillingReplayAuthCacheInvalidator,
+	NewUsageBillingReplayFinalizer,
+	ProvideUsageBillingOutboxProcessor,
+	ProvideUsageBillingOutboxWorker,
 	NewAnnouncementService,
 	NewAdminService,
 	NewGatewayService,

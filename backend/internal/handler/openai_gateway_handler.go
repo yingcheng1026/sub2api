@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -46,6 +47,28 @@ func resolveOpenAIMessagesDispatchMappedModel(apiKey *service.APIKey, requestedM
 		return ""
 	}
 	return strings.TrimSpace(apiKey.Group.ResolveMessagesDispatchModel(requestedModel))
+}
+
+func openAIWSBillingConnectionID(ctx context.Context, sessionHash string) string {
+	base := strings.TrimSpace(sessionHash)
+	if ctx != nil {
+		if clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientRequestID) != "" {
+			base = "client:" + strings.TrimSpace(clientRequestID)
+		} else if requestID, _ := ctx.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
+			base = "local:" + strings.TrimSpace(requestID)
+		}
+	}
+	if base == "" {
+		base = "generated:" + uuid.NewString()
+	}
+	return "ws:" + service.HashUsageRequestPayload([]byte(base))
+}
+
+func deriveOpenAIWSBillingRequestID(connectionID string, turn int) string {
+	if turn < 1 {
+		turn = 1
+	}
+	return fmt.Sprintf("%s:turn:%d", strings.TrimSpace(connectionID), turn)
 }
 
 // resolveOpenAIAccountRoutingModel returns the final model whose account
@@ -1396,6 +1419,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		firstMessage,
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
+	wsBillingConnectionID := openAIWSBillingConnectionID(ctx, sessionHash)
 	selection, scheduleDecision, err := h.gatewayService.SelectAccountWithScheduler(
 		ctx,
 		apiKey.GroupID,
@@ -1574,6 +1598,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			if result == nil {
 				return
 			}
+			result.RequestID = deriveOpenAIWSBillingRequestID(wsBillingConnectionID, turn)
 			service.AttachOpenAIBillingIdentity(result, turnBillingIdentity)
 			if account.Type == service.AccountTypeOAuth {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, result.ResponseHeaders)
@@ -1777,25 +1802,21 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(task service.UsageRecordTas
 }
 
 func (h *OpenAIGatewayHandler) submitOpenAIUsageRecordTask(result *service.OpenAIForwardResult, task service.UsageRecordTask) {
-	if result != nil && result.ImageCount > 0 {
-		h.submitMandatoryUsageRecordTask(task)
-		return
-	}
-	h.submitUsageRecordTask(task)
+	_ = result
+	h.runDurableUsageRecordTask(task)
 }
 
 func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(task service.UsageRecordTask) {
+	h.runDurableUsageRecordTask(task)
+}
+
+func (h *OpenAIGatewayHandler) runDurableUsageRecordTask(task service.UsageRecordTask) {
 	if task == nil {
 		return
 	}
-	if h.usageRecordWorkerPool != nil {
-		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDropped {
-			return
-		}
-		logger.L().With(
-			zap.String("component", "handler.openai_gateway.usage"),
-		).Warn("openai.usage_record_task_mandatory_sync_fallback")
-	}
+	// Standard-mode RecordUsage now performs the durable outbox insert. It must
+	// finish before this request goroutine can disappear; the in-memory worker
+	// pool remains available only to non-OpenAI/native usage paths.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	defer func() {

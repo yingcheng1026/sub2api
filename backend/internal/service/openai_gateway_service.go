@@ -314,30 +314,33 @@ var ErrNoAvailableCompactAccounts = errors.New("no available OpenAI accounts sup
 
 // OpenAIGatewayService handles OpenAI API gateway operations
 type OpenAIGatewayService struct {
-	accountRepo           AccountRepository
-	usageLogRepo          UsageLogRepository
-	usageBillingRepo      UsageBillingRepository
-	userRepo              UserRepository
-	userSubRepo           UserSubscriptionRepository
-	walletRepo            WalletRepository
-	cache                 GatewayCache
-	cfg                   *config.Config
-	codexDetector         CodexClientRestrictionDetector
-	schedulerSnapshot     *SchedulerSnapshotService
-	concurrencyService    *ConcurrencyService
-	billingService        *BillingService
-	rateLimitService      *RateLimitService
-	billingCacheService   *BillingCacheService
-	userGroupRateResolver *userGroupRateResolver
-	httpUpstream          HTTPUpstream
-	deferredService       *DeferredService
-	openAITokenProvider   *OpenAITokenProvider
-	toolCorrector         *CodexToolCorrector
-	openaiWSResolver      OpenAIWSProtocolResolver
-	resolver              *ModelPricingResolver
-	channelService        *ChannelService
-	balanceNotifyService  *BalanceNotifyService
-	settingService        *SettingService
+	accountRepo               AccountRepository
+	usageLogRepo              UsageLogRepository
+	usageBillingRepo          UsageBillingRepository
+	usageBillingOutboxRepo    UsageBillingOutboxRepository
+	usageBillingOutboxWake    interface{ Wake() }
+	requireUsageBillingOutbox bool
+	userRepo                  UserRepository
+	userSubRepo               UserSubscriptionRepository
+	walletRepo                WalletRepository
+	cache                     GatewayCache
+	cfg                       *config.Config
+	codexDetector             CodexClientRestrictionDetector
+	schedulerSnapshot         *SchedulerSnapshotService
+	concurrencyService        *ConcurrencyService
+	billingService            *BillingService
+	rateLimitService          *RateLimitService
+	billingCacheService       *BillingCacheService
+	userGroupRateResolver     *userGroupRateResolver
+	httpUpstream              HTTPUpstream
+	deferredService           *DeferredService
+	openAITokenProvider       *OpenAITokenProvider
+	toolCorrector             *CodexToolCorrector
+	openaiWSResolver          OpenAIWSProtocolResolver
+	resolver                  *ModelPricingResolver
+	channelService            *ChannelService
+	balanceNotifyService      *BalanceNotifyService
+	settingService            *SettingService
 
 	openaiWSPoolOnce              sync.Once
 	openaiWSStateStoreOnce        sync.Once
@@ -380,22 +383,27 @@ func NewOpenAIGatewayService(
 	channelService *ChannelService,
 	balanceNotifyService *BalanceNotifyService,
 	settingService *SettingService,
+	usageBillingOutboxRepo UsageBillingOutboxRepository,
+	usageBillingOutboxWorker *UsageBillingOutboxWorker,
 ) *OpenAIGatewayService {
 	svc := &OpenAIGatewayService{
-		accountRepo:         accountRepo,
-		usageLogRepo:        usageLogRepo,
-		usageBillingRepo:    usageBillingRepo,
-		userRepo:            userRepo,
-		userSubRepo:         userSubRepo,
-		walletRepo:          walletRepo,
-		cache:               cache,
-		cfg:                 cfg,
-		codexDetector:       NewOpenAICodexClientRestrictionDetector(cfg),
-		schedulerSnapshot:   schedulerSnapshot,
-		concurrencyService:  concurrencyService,
-		billingService:      billingService,
-		rateLimitService:    rateLimitService,
-		billingCacheService: billingCacheService,
+		accountRepo:               accountRepo,
+		usageLogRepo:              usageLogRepo,
+		usageBillingRepo:          usageBillingRepo,
+		usageBillingOutboxRepo:    usageBillingOutboxRepo,
+		usageBillingOutboxWake:    usageBillingOutboxWorker,
+		requireUsageBillingOutbox: true,
+		userRepo:                  userRepo,
+		userSubRepo:               userSubRepo,
+		walletRepo:                walletRepo,
+		cache:                     cache,
+		cfg:                       cfg,
+		codexDetector:             NewOpenAICodexClientRestrictionDetector(cfg),
+		schedulerSnapshot:         schedulerSnapshot,
+		concurrencyService:        concurrencyService,
+		billingService:            billingService,
+		rateLimitService:          rateLimitService,
+		billingCacheService:       billingCacheService,
 		userGroupRateResolver: newUserGroupRateResolver(
 			userGroupRateRepo,
 			nil,
@@ -5555,7 +5563,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	// Determine billing type。2026-05-17 follow-up:用户在 admin 切 key 到 plan_groups
 	// 链内 standard group 时,subscription 仍然由 middleware GetActiveSubscriptionCoveringGroup
 	// 找到,billing 应该按订阅扣 sub quota 而不是 fallback 主余额。EffectiveBillingContext 统一判断。
-	isSubscriptionBilling, _ := EffectiveBillingContext(apiKey.Group, subscription)
+	isSubscriptionBilling, effectiveBillingGroup := EffectiveBillingContext(apiKey.Group, subscription)
+	effectiveBillingGroupID := resolveEffectiveBillingGroupID(apiKey.GroupID, effectiveBillingGroup, subscription)
 	billingType := BillingTypeBalance
 	if isSubscriptionBilling {
 		billingType = BillingTypeSubscription
@@ -5571,7 +5580,17 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if input.OriginalModel != "" {
 		requestedModel = input.OriginalModel
 	}
-	logModel := usageLogModelForMappedClaudeCompat(requestedModel, result.Model, successfulBillingModel, result.BillingModel, input.ChannelMappedModel, result.UpstreamModel, billingModel)
+	// Product-visible OpenAI usage identity is always the model that actually
+	// executed upstream. Requested GPT aliases and Claude compatibility aliases
+	// remain available only in requested_model for audit and client debugging.
+	logModel := firstNonEmptyModel(
+		result.UpstreamModel,
+		successfulBillingModel,
+		result.BillingModel,
+		input.ChannelMappedModel,
+		result.Model,
+		requestedModel,
+	)
 
 	usageLog := &UsageLog{
 		UserID:              user.ID,
@@ -5667,20 +5686,45 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		return nil
 	}
 
-	billingErr := func() error {
-		_, err := applyUsageBilling(ctx, requestID, usageLog, &postUsageBillingParams{
-			Cost:                  cost,
-			User:                  user,
-			APIKey:                apiKey,
-			Account:               account,
-			Subscription:          subscription,
-			RequestPayloadHash:    resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
-			IsSubscriptionBill:    isSubscriptionBilling,
-			AccountRateMultiplier: accountRateMultiplier,
-			APIKeyService:         input.APIKeyService,
-		}, s.billingDeps(), s.usageBillingRepo)
-		return err
-	}()
+	billingParams := &postUsageBillingParams{
+		Cost:                    cost,
+		User:                    user,
+		APIKey:                  apiKey,
+		Account:                 account,
+		Subscription:            subscription,
+		EffectiveBillingGroupID: effectiveBillingGroupID,
+		RequestPayloadHash:      resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
+		IsSubscriptionBill:      isSubscriptionBilling,
+		AccountRateMultiplier:   accountRateMultiplier,
+		APIKeyService:           input.APIKeyService,
+	}
+	if s.requireUsageBillingOutbox {
+		if !usedPreflightQuote {
+			return fmt.Errorf("%w: immutable pricing quote is missing", ErrUsageBillingOutboxUnavailable)
+		}
+		if s.usageBillingOutboxRepo == nil {
+			return ErrUsageBillingOutboxUnavailable
+		}
+		cmd := buildUsageBillingCommand(requestID, usageLog, billingParams)
+		if cmd == nil {
+			return fmt.Errorf("%w: billing command is invalid", ErrUsageBillingEnvelopeInvalid)
+		}
+		envelope, err := NewUsageBillingEnvelopeFromUsageLog(usageLog, cmd)
+		if err != nil {
+			return err
+		}
+		billingCtx, cancel := detachedBillingContext(ctx)
+		defer cancel()
+		if _, _, err := s.usageBillingOutboxRepo.Enqueue(billingCtx, envelope); err != nil {
+			return err
+		}
+		if s.usageBillingOutboxWake != nil {
+			s.usageBillingOutboxWake.Wake()
+		}
+		return nil
+	}
+
+	_, billingErr := applyUsageBilling(ctx, requestID, usageLog, billingParams, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {
 		return billingErr

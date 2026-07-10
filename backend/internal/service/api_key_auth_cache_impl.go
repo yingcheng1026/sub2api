@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -105,8 +103,15 @@ func (s *APIKeyService) StartAuthCacheInvalidationSubscriber(ctx context.Context
 }
 
 func (s *APIKeyService) authCacheKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
+	return APIKeyAuthCacheLocator(key)
+}
+
+// APIKeyAuthCacheLocator returns the one-way locator used by both local and
+// distributed auth caches. Durable billing stores only this SHA-256 locator,
+// never the raw API key, so replay can invalidate a key even after soft delete
+// has replaced the database value with a tombstone.
+func APIKeyAuthCacheLocator(key string) string {
+	return HashAPIKey(key)
 }
 
 func (s *APIKeyService) getAuthCacheEntry(ctx context.Context, cacheKey string) (*APIKeyAuthCacheEntry, bool) {
@@ -152,15 +157,20 @@ func (s *APIKeyService) setAuthCacheEntry(ctx context.Context, cacheKey string, 
 }
 
 func (s *APIKeyService) deleteAuthCache(ctx context.Context, cacheKey string) {
+	_ = s.deleteAuthCacheReliable(ctx, cacheKey)
+}
+
+func (s *APIKeyService) deleteAuthCacheReliable(ctx context.Context, cacheKey string) error {
 	if s.authCacheL1 != nil {
 		s.authCacheL1.Del(cacheKey)
 	}
 	if s.cache == nil {
-		return
+		return nil
 	}
-	_ = s.cache.DeleteAuthCache(ctx, cacheKey)
+	deleteErr := s.cache.DeleteAuthCache(ctx, cacheKey)
 	// Publish invalidation message to other instances
-	_ = s.cache.PublishAuthCacheInvalidation(ctx, cacheKey)
+	publishErr := s.cache.PublishAuthCacheInvalidation(ctx, cacheKey)
+	return errors.Join(deleteErr, publishErr)
 }
 
 func (s *APIKeyService) loadAuthCacheEntry(ctx context.Context, key, cacheKey string) (*APIKeyAuthCacheEntry, error) {

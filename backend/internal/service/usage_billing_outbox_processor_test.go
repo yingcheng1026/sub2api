@@ -100,6 +100,20 @@ type outboxReplayWriterStub struct {
 	trace  *[]string
 }
 
+type outboxReplayFinalizerStub struct {
+	err   error
+	calls int
+	trace *[]string
+}
+
+func (s *outboxReplayFinalizerStub) FinalizeUsageBillingReplay(context.Context, UsageBillingEnvelope, *UsageBillingApplyResult) error {
+	s.calls++
+	if s.trace != nil {
+		*s.trace = append(*s.trace, "finalize")
+	}
+	return s.err
+}
+
 func (s *outboxReplayWriterStub) WriteUsageBillingReplay(context.Context, UsageBillingEnvelope) error {
 	if s.trace != nil {
 		*s.trace = append(*s.trace, "usage_log")
@@ -195,15 +209,29 @@ func TestUsageBillingOutboxProcessor_ApplyAckFailureReplayChargesOnce(t *testing
 }
 
 func TestUsageBillingOutboxProcessor_OrdersApplyUsageLogComplete(t *testing.T) {
-	trace := make([]string, 0, 3)
+	trace := make([]string, 0, 4)
 	repo := &outboxProcessorRepoStub{trace: &trace}
 	billing := &outboxBillingStub{trace: &trace}
 	writes := &outboxReplayWriterStub{trace: &trace}
-	processor := NewUsageBillingOutboxProcessor(repo, &outboxBindingStub{}, billing, writes)
+	finalizer := &outboxReplayFinalizerStub{trace: &trace}
+	processor := NewUsageBillingOutboxProcessor(repo, &outboxBindingStub{}, billing, writes, finalizer)
 	event := UsageBillingOutboxEvent{ID: 11, Envelope: processorEnvelope(t, "processor-order"), AttemptCount: 1, MaxAttempts: 8, LockedBy: "worker", LeaseToken: "lease-1"}
 
 	require.NoError(t, processor.ProcessEvent(context.Background(), event))
-	require.Equal(t, []string{"apply", "usage_log", "complete"}, trace)
+	require.Equal(t, []string{"apply", "usage_log", "finalize", "complete"}, trace)
+}
+
+func TestUsageBillingOutboxProcessor_FinalizerFailureRetriesBeforeComplete(t *testing.T) {
+	repo := &outboxProcessorRepoStub{}
+	billing := &outboxBillingStub{}
+	finalizer := &outboxReplayFinalizerStub{err: errors.New("cache temporarily unavailable")}
+	processor := NewUsageBillingOutboxProcessor(repo, &outboxBindingStub{}, billing, &outboxReplayWriterStub{}, finalizer)
+	event := UsageBillingOutboxEvent{ID: 12, Envelope: processorEnvelope(t, "processor-finalizer-retry"), AttemptCount: 1, MaxAttempts: 8, LockedBy: "worker", LeaseToken: "lease-1"}
+
+	require.NoError(t, processor.ProcessEvent(context.Background(), event))
+	require.True(t, repo.retried)
+	require.False(t, repo.completed)
+	require.Equal(t, "billing_replay_finalize_failed", repo.errorCode)
 }
 
 func TestUsageBillingOutboxProcessor_PreservesFrozenBalanceMonthlyWalletCommands(t *testing.T) {

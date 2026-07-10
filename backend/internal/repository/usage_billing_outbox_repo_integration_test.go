@@ -14,10 +14,11 @@ import (
 )
 
 type usageBillingOutboxBindingFixture struct {
-	userID    int64
-	apiKeyID  int64
-	accountID int64
-	groupID   int64
+	userID           int64
+	apiKeyID         int64
+	authCacheLocator string
+	accountID        int64
+	groupID          int64
 }
 
 func newUsageBillingOutboxBindingFixture(t *testing.T) usageBillingOutboxBindingFixture {
@@ -28,7 +29,10 @@ func newUsageBillingOutboxBindingFixture(t *testing.T) usageBillingOutboxBinding
 	apiKey := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, GroupID: &group.ID, Key: "sk-outbox-fixture-" + uuid.NewString()})
 	account := mustCreateAccount(t, client, &service.Account{Name: "outbox-fixture-" + uuid.NewString(), Type: service.AccountTypeAPIKey})
 	mustBindAccountToGroup(t, client, account.ID, group.ID, 1)
-	return usageBillingOutboxBindingFixture{userID: user.ID, apiKeyID: apiKey.ID, accountID: account.ID, groupID: group.ID}
+	return usageBillingOutboxBindingFixture{
+		userID: user.ID, apiKeyID: apiKey.ID, authCacheLocator: service.APIKeyAuthCacheLocator(apiKey.Key),
+		accountID: account.ID, groupID: group.ID,
+	}
 }
 
 func newOutboxEnvelope(t *testing.T, fixture usageBillingOutboxBindingFixture, requestID string, balanceCost float64) service.UsageBillingEnvelope {
@@ -36,6 +40,7 @@ func newOutboxEnvelope(t *testing.T, fixture usageBillingOutboxBindingFixture, r
 	envelope, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID:             requestID,
 		APIKeyID:              fixture.apiKeyID,
+		AuthCacheLocator:      fixture.authCacheLocator,
 		UserID:                fixture.userID,
 		AccountID:             fixture.accountID,
 		GroupID:               &fixture.groupID,
@@ -190,10 +195,18 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	mustBindAccountToGroup(t, client, account.ID, group.ID, 1)
 	subscriptionTwo := mustCreateSubscription(t, client, &service.UserSubscription{UserID: userTwo.ID, GroupID: &group.ID})
 
-	fixture := usageBillingOutboxBindingFixture{userID: userOne.ID, apiKeyID: apiKeyOne.ID, accountID: account.ID, groupID: group.ID}
+	fixture := usageBillingOutboxBindingFixture{
+		userID: userOne.ID, apiKeyID: apiKeyOne.ID, authCacheLocator: service.APIKeyAuthCacheLocator(apiKeyOne.Key),
+		accountID: account.ID, groupID: group.ID,
+	}
 	valid := newOutboxEnvelope(t, fixture, "outbox-owner-valid-"+uuid.NewString(), 1)
 	_, _, err = repo.Enqueue(ctx, valid)
 	require.NoError(t, err)
+
+	wrongLocatorFixture := fixture
+	wrongLocatorFixture.authCacheLocator = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	_, _, err = repo.Enqueue(ctx, newOutboxEnvelope(t, wrongLocatorFixture, "outbox-owner-locator-"+uuid.NewString(), 1))
+	require.ErrorIs(t, err, service.ErrUsageBillingCrossTenant)
 
 	wrongOwnerFixture := fixture
 	wrongOwnerFixture.userID = userTwo.ID
@@ -221,6 +234,33 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	})
 	require.NoError(t, err)
 	_, _, err = repo.Enqueue(ctx, wrongSubscriptionOwner)
+	require.ErrorIs(t, err, service.ErrUsageBillingCrossTenant)
+
+	uncoveredAnchorGroup := mustCreateGroup(t, client, &service.Group{
+		Name:             "outbox-uncovered-anchor-" + uuid.NewString(),
+		SubscriptionType: service.SubscriptionTypeSubscription,
+	})
+	uncoveredSubscription := mustCreateSubscription(t, client, &service.UserSubscription{UserID: userOne.ID, GroupID: &uncoveredAnchorGroup.ID})
+	uncoveredSubscriptionEnvelope, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
+		RequestID:               "outbox-uncovered-sub-" + uuid.NewString(),
+		APIKeyID:                apiKeyOne.ID,
+		UserID:                  userOne.ID,
+		AccountID:               account.ID,
+		SubscriptionID:          &uncoveredSubscription.ID,
+		GroupID:                 &group.ID,
+		EffectiveBillingGroupID: &uncoveredAnchorGroup.ID,
+		AccountType:             service.AccountTypeAPIKey,
+		BillingModel:            "gpt-5.6-sol",
+		BillingType:             service.BillingTypeSubscription,
+		PricingSource:           service.PricingSourceBuiltinGPT56,
+		PricingRevision:         service.GPT56PricingRevision,
+		PricingHash:             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		RateMultiplier:          1,
+		AccountRateMultiplier:   1,
+		SubscriptionCost:        1,
+	})
+	require.NoError(t, err)
+	_, _, err = repo.Enqueue(ctx, uncoveredSubscriptionEnvelope)
 	require.ErrorIs(t, err, service.ErrUsageBillingCrossTenant)
 
 	otherGroup := mustCreateGroup(t, client, &service.Group{Name: "outbox-other-group-" + uuid.NewString()})

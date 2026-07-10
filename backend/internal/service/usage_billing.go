@@ -16,17 +16,22 @@ var ErrUsageBillingRequestConflict = errors.New("usage billing request fingerpri
 type UsageBillingCommand struct {
 	RequestID          string
 	APIKeyID           int64
+	AuthCacheLocator   string
 	RequestFingerprint string
 	RequestPayloadHash string
 
-	UserID          int64
-	AccountID       int64
-	SubscriptionID  *int64
-	AccountType     string
-	Model           string
-	ServiceTier     string
-	ReasoningEffort string
-	BillingType     int8
+	UserID         int64
+	AccountID      int64
+	SubscriptionID *int64
+	// EffectiveBillingGroupID freezes the group whose subscription cache and
+	// quota windows are authoritative. It may differ from the routed API-key
+	// group when a monthly plan covers multiple groups.
+	EffectiveBillingGroupID *int64
+	AccountType             string
+	Model                   string
+	ServiceTier             string
+	ReasoningEffort         string
+	BillingType             int8
 	// BindingsFrozen means the command came from an outbox envelope whose
 	// tenant, group, account and billing-mode bindings were locked and verified
 	// atomically at enqueue time. Replay may therefore finish charging rows that
@@ -67,7 +72,7 @@ func buildUsageBillingFingerprint(c *UsageBillingCommand) string {
 		return ""
 	}
 	raw := fmt.Sprintf(
-		"%d|%d|%d|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%s|%d|%0.10f|%0.10f|%0.10f|%0.10f|%0.10f|%0.10f",
+		"%d|%d|%d|%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%s|%d|%d|%0.10f|%0.10f|%0.10f|%0.10f|%0.10f|%0.10f",
 		c.UserID,
 		c.AccountID,
 		c.APIKeyID,
@@ -83,6 +88,7 @@ func buildUsageBillingFingerprint(c *UsageBillingCommand) string {
 		c.ImageCount,
 		strings.TrimSpace(c.MediaType),
 		valueOrZero(c.SubscriptionID),
+		valueOrZero(c.EffectiveBillingGroupID),
 		c.BalanceCost,
 		c.SubscriptionCost,
 		c.APIKeyQuotaCost,

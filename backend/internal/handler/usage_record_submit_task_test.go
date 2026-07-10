@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
@@ -22,6 +23,17 @@ func newUsageRecordTestPool(t *testing.T) *service.UsageRecordWorkerPool {
 	})
 	t.Cleanup(pool.Stop)
 	return pool
+}
+
+func TestOpenAIWSBillingRequestID_IsStablePerConnectionTurnAndDistinctAcrossTurns(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.RequestID, "connection-request-1")
+	connectionID := openAIWSBillingConnectionID(ctx, "session-hash")
+	first := deriveOpenAIWSBillingRequestID(connectionID, 1)
+	second := deriveOpenAIWSBillingRequestID(connectionID, 2)
+
+	require.Equal(t, first, deriveOpenAIWSBillingRequestID(openAIWSBillingConnectionID(ctx, "different-session"), 1))
+	require.NotEqual(t, first, second)
+	require.Contains(t, first, ":turn:1")
 }
 
 func TestGatewayHandlerSubmitUsageRecordTask_WithPool(t *testing.T) {
@@ -188,4 +200,17 @@ func TestOpenAIGatewayHandlerSubmitOpenAIUsageRecordTask_ImageResultUsesMandator
 	close(release)
 
 	require.True(t, called.Load(), "image usage task must be mandatory when async submit is dropped")
+}
+
+func TestOpenAIGatewayHandlerSubmitOpenAIUsageRecordTask_BypassesInMemoryPool(t *testing.T) {
+	pool := newUsageRecordTestPool(t)
+	h := &OpenAIGatewayHandler{usageRecordWorkerPool: pool}
+	var called atomic.Bool
+
+	h.submitOpenAIUsageRecordTask(&service.OpenAIForwardResult{}, func(ctx context.Context) {
+		called.Store(true)
+	})
+
+	require.True(t, called.Load(), "durable producer must finish before helper returns")
+	require.Zero(t, pool.Stats().SubmittedTasks, "billable OpenAI usage must not enter drop/sample worker pool")
 }

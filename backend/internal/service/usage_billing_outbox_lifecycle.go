@@ -24,6 +24,7 @@ var (
 	ErrUsageBillingOutboxLeaseLost      = errors.New("usage billing outbox lease lost")
 	ErrUsageBillingCrossTenant          = errors.New("usage billing binding crosses tenants")
 	ErrUsageBillingOutboxTargetNotFound = errors.New("usage billing binding target not found")
+	ErrUsageBillingOutboxUnavailable    = errors.New("usage billing durable outbox is unavailable")
 )
 
 type UsageBillingOutboxEvent struct {
@@ -63,4 +64,11 @@ type UsageBillingBindingValidator interface {
 // usage-log replay. Task 2B owns the concrete producer/log wiring.
 type UsageBillingReplayWriter interface {
 	WriteUsageBillingReplay(ctx context.Context, envelope UsageBillingEnvelope) error
+}
+
+// UsageBillingReplayFinalizer performs only idempotent post-commit effects such
+// as authoritative cache invalidation. It must be safe to run again after an
+// Apply commit followed by a process crash.
+type UsageBillingReplayFinalizer interface {
+	FinalizeUsageBillingReplay(ctx context.Context, envelope UsageBillingEnvelope, result *UsageBillingApplyResult) error
 }

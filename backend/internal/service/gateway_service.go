@@ -7911,15 +7911,16 @@ type usageLogBestEffortWriter interface {
 
 // postUsageBillingParams 统一扣费所需的参数
 type postUsageBillingParams struct {
-	Cost                  *CostBreakdown
-	User                  *User
-	APIKey                *APIKey
-	Account               *Account
-	Subscription          *UserSubscription
-	RequestPayloadHash    string
-	IsSubscriptionBill    bool
-	AccountRateMultiplier float64
-	APIKeyService         APIKeyQuotaUpdater
+	Cost                    *CostBreakdown
+	User                    *User
+	APIKey                  *APIKey
+	Account                 *Account
+	Subscription            *UserSubscription
+	EffectiveBillingGroupID *int64
+	RequestPayloadHash      string
+	IsSubscriptionBill      bool
+	AccountRateMultiplier   float64
+	APIKeyService           APIKeyQuotaUpdater
 }
 
 func (p *postUsageBillingParams) shouldDeductAPIKeyQuota() bool {
@@ -8032,12 +8033,14 @@ func buildUsageBillingCommand(requestID string, usageLog *UsageLog, p *postUsage
 	}
 
 	cmd := &UsageBillingCommand{
-		RequestID:          requestID,
-		APIKeyID:           p.APIKey.ID,
-		UserID:             p.User.ID,
-		AccountID:          p.Account.ID,
-		AccountType:        p.Account.Type,
-		RequestPayloadHash: strings.TrimSpace(p.RequestPayloadHash),
+		RequestID:               requestID,
+		APIKeyID:                p.APIKey.ID,
+		AuthCacheLocator:        APIKeyAuthCacheLocator(p.APIKey.Key),
+		UserID:                  p.User.ID,
+		AccountID:               p.Account.ID,
+		EffectiveBillingGroupID: copyInt64(p.EffectiveBillingGroupID),
+		AccountType:             p.Account.Type,
+		RequestPayloadHash:      strings.TrimSpace(p.RequestPayloadHash),
 	}
 	if usageLog != nil {
 		cmd.Model = usageLog.Model
@@ -8088,6 +8091,17 @@ func buildUsageBillingCommand(requestID string, usageLog *UsageLog, p *postUsage
 
 	cmd.Normalize()
 	return cmd
+}
+
+func resolveEffectiveBillingGroupID(calledGroupID *int64, effectiveGroup *Group, subscription *UserSubscription) *int64 {
+	if effectiveGroup != nil && effectiveGroup.ID > 0 {
+		id := effectiveGroup.ID
+		return &id
+	}
+	if subscription != nil && !subscription.IsWalletMode() && subscription.GroupID != nil && *subscription.GroupID > 0 {
+		return copyInt64(subscription.GroupID)
+	}
+	return copyInt64(calledGroupID)
 }
 
 func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog, p *postUsageBillingParams, deps *billingDeps, repo UsageBillingRepository) (bool, error) {
@@ -8447,7 +8461,8 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	// 判断计费方式：订阅模式 vs 余额模式。2026-05-17 follow-up:用户切 key 到
 	// plan_groups 链内 standard group 时,subscription 由 middleware GetActiveSubscriptionCoveringGroup
 	// 找到,billing 应该按订阅扣 sub quota。EffectiveBillingContext 统一判断。
-	isSubscriptionBilling, _ := EffectiveBillingContext(apiKey.Group, subscription)
+	isSubscriptionBilling, effectiveBillingGroup := EffectiveBillingContext(apiKey.Group, subscription)
+	effectiveBillingGroupID := resolveEffectiveBillingGroupID(apiKey.GroupID, effectiveBillingGroup, subscription)
 	billingType := BillingTypeBalance
 	if isSubscriptionBilling {
 		billingType = BillingTypeSubscription
@@ -8484,15 +8499,16 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 
 	requestID := usageLog.RequestID
 	_, billingErr := applyUsageBilling(ctx, requestID, usageLog, &postUsageBillingParams{
-		Cost:                  cost,
-		User:                  user,
-		APIKey:                apiKey,
-		Account:               account,
-		Subscription:          subscription,
-		RequestPayloadHash:    resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
-		IsSubscriptionBill:    isSubscriptionBilling,
-		AccountRateMultiplier: accountRateMultiplier,
-		APIKeyService:         input.APIKeyService,
+		Cost:                    cost,
+		User:                    user,
+		APIKey:                  apiKey,
+		Account:                 account,
+		Subscription:            subscription,
+		EffectiveBillingGroupID: effectiveBillingGroupID,
+		RequestPayloadHash:      resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
+		IsSubscriptionBill:      isSubscriptionBilling,
+		AccountRateMultiplier:   accountRateMultiplier,
+		APIKeyService:           input.APIKeyService,
 	}, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {
