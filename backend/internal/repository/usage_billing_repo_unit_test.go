@@ -22,7 +22,7 @@ func TestDeductUsageBillingWallet_HappyPath(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
-		WithArgs(int64(42)).
+		WithArgs(int64(42), false).
 		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(100.0))
 	mock.ExpectExec("UPDATE user_subscriptions").
 		WithArgs(98.5, int64(42)).
@@ -35,7 +35,7 @@ func TestDeductUsageBillingWallet_HappyPath(t *testing.T) {
 	tx, err := db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 
-	newBalance, insufficient, err := deductUsageBillingWallet(context.Background(), tx, 42, 1.5)
+	newBalance, insufficient, err := deductUsageBillingWallet(context.Background(), tx, 42, 1.5, false)
 	require.NoError(t, err)
 	require.False(t, insufficient)
 	require.InDelta(t, 98.5, newBalance, 0.0001)
@@ -53,14 +53,14 @@ func TestDeductUsageBillingWallet_Insufficient(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
-		WithArgs(int64(42)).
+		WithArgs(int64(42), false).
 		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(0.5))
 	mock.ExpectCommit()
 
 	tx, err := db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 
-	balance, insufficient, err := deductUsageBillingWallet(context.Background(), tx, 42, 1.0)
+	balance, insufficient, err := deductUsageBillingWallet(context.Background(), tx, 42, 1.0, false)
 	require.NoError(t, err)
 	require.True(t, insufficient)
 	require.InDelta(t, 0.5, balance, 0.0001)
@@ -78,14 +78,14 @@ func TestDeductUsageBillingWallet_NotWalletMode(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
-		WithArgs(int64(42)).
+		WithArgs(int64(42), false).
 		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(nil))
 	mock.ExpectRollback()
 
 	tx, err := db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 
-	_, _, err = deductUsageBillingWallet(context.Background(), tx, 42, 1.0)
+	_, _, err = deductUsageBillingWallet(context.Background(), tx, 42, 1.0, false)
 	require.ErrorIs(t, err, service.ErrSubscriptionNotFound)
 
 	require.NoError(t, tx.Rollback())

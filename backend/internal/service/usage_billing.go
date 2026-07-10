@@ -19,14 +19,19 @@ type UsageBillingCommand struct {
 	RequestFingerprint string
 	RequestPayloadHash string
 
-	UserID              int64
-	AccountID           int64
-	SubscriptionID      *int64
-	AccountType         string
-	Model               string
-	ServiceTier         string
-	ReasoningEffort     string
-	BillingType         int8
+	UserID          int64
+	AccountID       int64
+	SubscriptionID  *int64
+	AccountType     string
+	Model           string
+	ServiceTier     string
+	ReasoningEffort string
+	BillingType     int8
+	// BindingsFrozen means the command came from an outbox envelope whose
+	// tenant, group, account and billing-mode bindings were locked and verified
+	// atomically at enqueue time. Replay may therefore finish charging rows that
+	// were soft-deleted after the upstream request succeeded.
+	BindingsFrozen      bool
 	InputTokens         int
 	OutputTokens        int
 	CacheCreationTokens int
