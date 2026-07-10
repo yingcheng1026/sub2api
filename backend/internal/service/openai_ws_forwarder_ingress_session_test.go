@@ -219,6 +219,9 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_DedicatedModeDoe
 		Concurrency: 1,
 		Credentials: map[string]any{
 			"api_key": "sk-test",
+			"model_mapping": map[string]any{
+				"gpt-5.1": "gpt-5.4",
+			},
 		},
 		Extra: map[string]any{
 			"openai_apikey_responses_websockets_v2_mode": OpenAIWSIngressModeDedicated,
@@ -339,6 +342,9 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughModeR
 		Concurrency: 1,
 		Credentials: map[string]any{
 			"api_key": "sk-test",
+			"model_mapping": map[string]any{
+				"gpt-5.1": "gpt-5.4",
+			},
 		},
 		Extra: map[string]any{
 			"openai_apikey_responses_websockets_v2_mode": OpenAIWSIngressModePassthrough,
@@ -426,6 +432,8 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughModeR
 	select {
 	case result := <-resultCh:
 		require.Equal(t, "resp_passthrough_turn_1", result.RequestID)
+		require.Equal(t, "gpt-5.4", result.BillingModel)
+		require.Equal(t, "gpt-5.4", result.UpstreamModel)
 		require.True(t, result.OpenAIWSMode)
 		require.Equal(t, 2, result.Usage.InputTokens)
 		require.Equal(t, 3, result.Usage.OutputTokens)
@@ -439,6 +447,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughModeR
 
 	require.Equal(t, 1, captureDialer.DialCount(), "passthrough 模式应直接建立上游 websocket")
 	require.Len(t, upstreamConn.writes, 1, "passthrough 模式应透传首条 response.create")
+	require.Equal(t, "gpt-5.4", upstreamConn.writes[0]["model"])
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_ModeOffReturnsPolicyViolation(t *testing.T) {

@@ -7,29 +7,25 @@ import "strings"
 // 不作为普通 OpenAI 请求的未知模型兜底。
 func resolveOpenAIForwardModel(account *Account, requestedModel, defaultMappedModel string) string {
 	defaultMappedModel = strings.TrimSpace(defaultMappedModel)
-	if defaultMappedModel != "" && claudeMessagesDispatchFamily(requestedModel) != "" {
-		if dispatchTier, isGPT56Family := classifyOpenAIGPT56PreviewModel(defaultMappedModel); isGPT56Family {
-			if dispatchTier == "" || account == nil || !account.IsModelSupported(dispatchTier) {
-				return ""
-			}
-			mappedDispatch, matched := account.ResolveMappedModel(dispatchTier)
-			if !matched || !ValidateOpenAIGPT56ModelTransition(dispatchTier, mappedDispatch) {
-				return ""
-			}
-			return strings.TrimSpace(mappedDispatch)
-		}
-	}
+	hasMessagesDispatch := defaultMappedModel != "" && claudeMessagesDispatchFamily(requestedModel) != ""
 	if account == nil {
-		if defaultMappedModel != "" && claudeMessagesDispatchFamily(requestedModel) != "" {
+		if hasMessagesDispatch {
 			return defaultMappedModel
 		}
 		return requestedModel
 	}
 
-	mappedModel, matched := account.ResolveMappedModel(requestedModel)
-	if !matched && defaultMappedModel != "" && claudeMessagesDispatchFamily(requestedModel) != "" {
-		return defaultMappedModel
+	targetModel := requestedModel
+	if hasMessagesDispatch {
+		if _, aliasMatched := resolveRequestedModelInMapping(account.GetModelMapping(), requestedModel); aliasMatched && !account.IsModelSupported(requestedModel) {
+			return ""
+		}
+		targetModel = defaultMappedModel
 	}
+	if !account.IsModelSupported(targetModel) {
+		return ""
+	}
+	mappedModel, _ := account.ResolveMappedModel(targetModel)
 	return mappedModel
 }
 

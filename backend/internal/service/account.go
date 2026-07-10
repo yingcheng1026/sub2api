@@ -668,18 +668,24 @@ func (a *Account) ResolveMappedModel(requestedModel string) (mappedModel string,
 				return requestedModel, false
 			}
 			mappedModel, exists := mapping[normalizedGPT56]
-			if !exists || !ValidateOpenAIGPT56ModelTransition(requestedModel, mappedModel) {
+			if !exists || !openAIGPT56MappingTargetEntitled(mapping, requestedModel, mappedModel) {
 				return requestedModel, false
 			}
 			return mappedModel, true
 		}
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
+		if a.Platform == PlatformOpenAI && !openAIGPT56MappingTargetEntitled(mapping, requestedModel, mappedModel) {
+			return requestedModel, false
+		}
 		return mappedModel, true
 	}
 	normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
 	if normalized != requestedModel {
 		if mappedModel, matched := resolveRequestedModelInMapping(mapping, normalized); matched {
+			if a.Platform == PlatformOpenAI && !openAIGPT56MappingTargetEntitled(mapping, normalized, mappedModel) {
+				return requestedModel, false
+			}
 			return mappedModel, true
 		}
 	}

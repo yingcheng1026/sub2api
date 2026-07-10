@@ -387,6 +387,63 @@ func TestForwardAsAnthropic_GPT56DispatchTargetWinsOverConflictingClaudeAliasMap
 	require.Equal(t, "gpt-5.6-terra", result.UpstreamModel)
 }
 
+func TestForwardAsAnthropic_StableDispatchIsAuthoritativeOverClaudeAliasGPT56Mapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+
+	tests := []struct {
+		name              string
+		gpt56Entitled     bool
+		wantErr           bool
+		wantUpstreamModel string
+	}{
+		{name: "unauthorized alias target fails before upstream", wantErr: true},
+		{name: "authorized alias target cannot override stable dispatch", gpt56Entitled: true, wantUpstreamModel: "gpt-5.4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			upstream := &httpUpstreamRecorder{resp: openAIIdentitySSE("gpt-5.4", false)}
+			svc := &OpenAIGatewayService{
+				httpUpstream: upstream,
+				cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+			}
+			mapping := map[string]any{
+				"claude-sonnet-4-6": "gpt-5.6-sol",
+				"gpt-5.4":           "gpt-5.4",
+			}
+			if tt.gpt56Entitled {
+				mapping["gpt-5.6-sol"] = "gpt-5.6-sol"
+			}
+			account := &Account{
+				ID:       3,
+				Name:     "openai-stable-dispatch",
+				Platform: PlatformOpenAI,
+				Type:     AccountTypeAPIKey,
+				Credentials: map[string]any{
+					"api_key":       "test-key",
+					"model_mapping": mapping,
+				},
+			}
+
+			result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.4")
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Nil(t, result)
+				require.Nil(t, upstream.lastReq)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, tt.wantUpstreamModel, gjson.GetBytes(upstream.lastBody, "model").String())
+			require.Equal(t, tt.wantUpstreamModel, result.BillingModel)
+			require.Equal(t, tt.wantUpstreamModel, result.UpstreamModel)
+		})
+	}
+}
+
 func TestForwardAsAnthropic_InjectsPromptCacheKeyForAPIKeyMessagesDispatch(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)

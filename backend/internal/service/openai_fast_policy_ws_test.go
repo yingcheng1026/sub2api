@@ -695,38 +695,30 @@ func TestForwardAsAnthropicMessages_BetaFastModeTriggersOpenAIFastPolicy(t *test
 	require.NotContains(t, string(upstreamBody), `"service_tier"`, "default policy 命中 gpt-5.5 priority 应当 filter 掉 service_tier")
 }
 
-// --- Fix1: passthrough capturedSessionModel must follow session.update ---
-
-// TestPolicyEnforcingFrameConn_SessionUpdateRotatesCapturedModel covers the
-// fix1 bypass: client opens with a whitelist-miss model (gpt-4o → pass under
-// gpt-5.5 whitelist), rotates to gpt-5.5 via session.update, then sends
-// response.create without "model". Without the session.update sniffing the
-// follow-up frame would fall back to the stale gpt-4o capture and pass — the
-// fix updates capturedSessionModel from session.* events so the fallback now
-// resolves to gpt-5.5 and the policy filters service_tier.
-func TestPolicyEnforcingFrameConn_SessionUpdateRotatesCapturedModel(t *testing.T) {
+func TestPolicyEnforcingFrameConn_RejectsSessionModelRotation(t *testing.T) {
 	svc := newOpenAIGatewayServiceWithSettings(t, gpt55WhitelistFastPolicy())
 	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
 
-	// Frame 1: response.create with whitelist-miss model — under default
-	// rule fallback=pass, service_tier stays.
 	first := []byte(`{"type":"response.create","model":"gpt-4o","service_tier":"priority"}`)
-	// Frame 2: session.update rotates the session model to gpt-5.5.
 	rotate := []byte(`{"type":"session.update","session":{"model":"gpt-5.5"}}`)
-	// Frame 3: response.create WITHOUT model — must inherit gpt-5.5.
-	followup := []byte(`{"type":"response.create","service_tier":"priority"}`)
+	inner := &fakePassthroughFrameConn{reads: [][]byte{first, rotate}}
 
-	inner := &fakePassthroughFrameConn{reads: [][]byte{first, rotate, followup}}
-
-	// Replicate the production wiring in openai_ws_v2_passthrough_adapter.go
-	// so capturedSessionModel state is shared across frames.
 	capturedSessionModel := openAIWSPassthroughPolicyModelForFrame(account, first)
 	require.Equal(t, "gpt-4o", capturedSessionModel)
+	initialCanonical, ok := resolveOpenAIWSSessionCanonicalModel(account, "gpt-4o")
+	require.True(t, ok)
 	wrapper := &openAIWSPolicyEnforcingFrameConn{
 		inner: inner,
 		filter: func(msgType coderws.MessageType, payload []byte) ([]byte, *OpenAIFastBlockedError, error) {
 			if msgType != coderws.MessageText {
 				return payload, nil, nil
+			}
+			candidateModel := openAIWSPassthroughRequestModelForFrame(payload)
+			if candidateModel == "" {
+				candidateModel = openAIWSPassthroughRequestModelFromSessionFrame(payload)
+			}
+			if err := validateOpenAIWSSessionModel(account, initialCanonical, candidateModel); err != nil {
+				return payload, nil, err
 			}
 			if updated := openAIWSPassthroughPolicyModelFromSessionFrame(account, payload); updated != "" {
 				capturedSessionModel = updated
@@ -739,23 +731,15 @@ func TestPolicyEnforcingFrameConn_SessionUpdateRotatesCapturedModel(t *testing.T
 		},
 	}
 
-	// Frame 1: gpt-4o miss whitelist → pass (service_tier preserved).
 	_, payload1, err := wrapper.ReadFrame(context.Background())
 	require.NoError(t, err)
-	require.Contains(t, string(payload1), `"service_tier"`, "frame1: gpt-4o miss whitelist → pass keeps service_tier")
-
-	// Frame 2: session.update — not response.create, untouched, but its
-	// side effect updates capturedSessionModel to gpt-5.5.
-	_, payload2, err := wrapper.ReadFrame(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, string(rotate), string(payload2), "session.update frame is forwarded verbatim")
-	require.Equal(t, "gpt-5.5", capturedSessionModel, "fix1: session.update must rotate capturedSessionModel")
-
-	// Frame 3: empty model + new captured gpt-5.5 → matches whitelist → filter.
-	_, payload3, err := wrapper.ReadFrame(context.Background())
-	require.NoError(t, err)
-	require.NotContains(t, string(payload3), `"service_tier"`,
-		"fix1: post-rotate response.create without model must use refreshed capturedSessionModel and trigger filter")
+	require.Contains(t, string(payload1), `"service_tier"`)
+	_, _, err = wrapper.ReadFrame(context.Background())
+	require.Error(t, err)
+	var closeErr *OpenAIWSClientCloseError
+	require.ErrorAs(t, err, &closeErr)
+	require.Equal(t, coderws.StatusPolicyViolation, closeErr.StatusCode())
+	require.Equal(t, "gpt-4o", capturedSessionModel)
 }
 
 // TestPolicyModelFromSessionFrame_OnlySessionUpdate covers the negative
@@ -1064,7 +1048,7 @@ func TestWSPassthroughSessionUpdateGPT56SuffixAppliesToModelLessResponseCreate(t
 			"model_mapping": map[string]any{"gpt-5.6-luna": "gpt-5.6-luna"},
 		},
 	}
-	meta := newOpenAIWSPassthroughUsageMeta("gpt-5.4", nil)
+	meta := newOpenAIWSPassthroughUsageMeta("gpt-5.6-luna", nil)
 	sessionFrame := []byte(`{"type":"session.update","session":{"model":"gpt-5.6-luna-xhigh"}}`)
 	meta.updateSessionRequestModel(sessionFrame)
 
@@ -1081,6 +1065,38 @@ func TestWSPassthroughSessionUpdateGPT56SuffixAppliesToModelLessResponseCreate(t
 	meta.updateFromResponseCreate(rewrittenCreate, "")
 	require.NotNil(t, meta.reasoningEffort.Load())
 	require.Equal(t, "xhigh", *meta.reasoningEffort.Load())
+}
+
+func TestOpenAIWSSessionCanonicalModelGuard(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"gpt-5.4":      "gpt-5.4",
+			"gpt-5.6-luna": "gpt-5.6-luna",
+		}},
+	}
+
+	initial, ok := resolveOpenAIWSSessionCanonicalModel(account, "gpt-5.4")
+	require.True(t, ok)
+	require.Equal(t, "gpt-5.4", initial)
+	require.NoError(t, validateOpenAIWSSessionModel(account, initial, "gpt-5.4-high"))
+	require.Error(t, validateOpenAIWSSessionModel(account, initial, "gpt-5.6-luna"))
+
+	luna, ok := resolveOpenAIWSSessionCanonicalModel(account, "gpt-5.6-luna-low")
+	require.True(t, ok)
+	require.NoError(t, validateOpenAIWSSessionModel(account, luna, "gpt-5.6-luna-xhigh"))
+	require.Error(t, validateOpenAIWSSessionModel(account, luna, "gpt-5.6-sol"))
+
+	unauthorized := &Account{
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"gpt-5.4": "gpt-5.6-luna",
+		}},
+	}
+	_, ok = resolveOpenAIWSSessionCanonicalModel(unauthorized, "gpt-5.4")
+	require.False(t, ok)
+	_, err := rewriteOpenAIWSPassthroughMappedModel(unauthorized, []byte(`{"type":"session.update","session":{"model":"gpt-5.4"}}`))
+	require.Error(t, err)
 }
 
 // TestPassthroughBilling_BlockedFrameDoesNotMutateServiceTier locks in the

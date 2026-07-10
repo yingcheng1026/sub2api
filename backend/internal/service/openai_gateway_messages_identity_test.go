@@ -59,7 +59,11 @@ func TestForwardAsAnthropic_ModelIdentityMatrix(t *testing.T) {
 			}
 			account := openAIIdentityTestAccount(tt.accountType, tt.requestedModel, tt.mappedModel)
 
-			result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "local-identity-session", "gpt-5.4")
+			defaultMappedModel := "gpt-5.4"
+			if strings.HasPrefix(tt.requestedModel, "claude-") {
+				defaultMappedModel = ""
+			}
+			result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "local-identity-session", defaultMappedModel)
 			require.NoError(t, err)
 			require.NotNil(t, result)
 
@@ -101,9 +105,11 @@ func TestForwardAsAnthropic_ModelIdentityMatrix(t *testing.T) {
 }
 
 func openAIIdentityTestAccount(accountType, requestedModel, mappedModel string) *Account {
-	credentials := map[string]any{
-		"model_mapping": map[string]any{requestedModel: mappedModel},
+	mapping := map[string]any{requestedModel: mappedModel}
+	if tier, isGPT56Family := classifyOpenAIGPT56PreviewModel(mappedModel); isGPT56Family && tier != "" {
+		mapping[tier] = tier
 	}
+	credentials := map[string]any{"model_mapping": mapping}
 	if accountType == AccountTypeOAuth {
 		credentials["access_token"] = "oauth-local-test"
 		credentials["chatgpt_account_id"] = "chatgpt-local-test"

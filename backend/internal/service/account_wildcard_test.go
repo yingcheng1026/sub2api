@@ -376,6 +376,19 @@ func TestAccountGetMappedModel(t *testing.T) {
 	}
 }
 
+func TestAccountResolveMappedModel_GPT56TargetRequiresExactEntitlement(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"gpt-5.4": "gpt-5.6-sol",
+		}},
+	}
+
+	mapped, matched := account.ResolveMappedModel("gpt-5.4")
+	require.Equal(t, "gpt-5.4", mapped)
+	require.False(t, matched)
+}
+
 func TestAccountResolveMappedModel(t *testing.T) {
 	tests := []struct {
 		name           string

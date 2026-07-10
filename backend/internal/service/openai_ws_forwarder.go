@@ -227,6 +227,43 @@ type OpenAIWSIngressHooks struct {
 	AfterTurn           func(turn int, result *OpenAIForwardResult, turnErr error)
 }
 
+func resolveOpenAIWSSessionCanonicalModel(account *Account, model string) (string, bool) {
+	model = strings.TrimSpace(model)
+	if account == nil || model == "" {
+		return "", false
+	}
+	routingModel := NormalizeOpenAICompatRequestedModel(model)
+	if !account.IsModelSupported(model) && (routingModel == model || !account.IsModelSupported(routingModel)) {
+		return "", false
+	}
+	mappedModel := normalizeOpenAIModelForUpstream(account, account.GetMappedModel(routingModel))
+	if mappedModel == "" {
+		return "", false
+	}
+	if normalized := normalizeKnownOpenAICodexModel(mappedModel); normalized != "" {
+		return normalized, true
+	}
+	if canonical := canonicalizeOpenAIModelAliasSpelling(NormalizeOpenAICompatRequestedModel(mappedModel)); canonical != "" {
+		return canonical, true
+	}
+	fallback := strings.ToLower(lastOpenAIModelSegment(NormalizeOpenAICompatRequestedModel(mappedModel)))
+	return fallback, fallback != ""
+}
+
+func validateOpenAIWSSessionModel(account *Account, initialCanonicalModel, candidateModel string) error {
+	if strings.TrimSpace(candidateModel) == "" {
+		return nil
+	}
+	candidateCanonical, ok := resolveOpenAIWSSessionCanonicalModel(account, candidateModel)
+	if !ok {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "websocket model is not supported by selected account", nil)
+	}
+	if initialCanonicalModel == "" || candidateCanonical != initialCanonicalModel {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "websocket model cannot change within a connection", nil)
+	}
+	return nil
+}
+
 func normalizeOpenAIWSLogValue(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -2484,6 +2521,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return rebuilt, nil
 	}
 
+	initialCanonicalRoutingModel := ""
 	parseClientPayload := func(raw []byte) (openAIWSClientPayload, error) {
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) == 0 {
@@ -2527,10 +2565,20 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				nil,
 			)
 		}
-		if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(originalModel); isGPT56Family && !account.IsModelSupported(originalModel) {
+		candidateCanonical, modelSupported := resolveOpenAIWSSessionCanonicalModel(account, originalModel)
+		if !modelSupported {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
-				"invalid GPT-5.6 websocket model mapping",
+				"websocket model is not supported by selected account",
+				nil,
+			)
+		}
+		if initialCanonicalRoutingModel == "" {
+			initialCanonicalRoutingModel = candidateCanonical
+		} else if candidateCanonical != initialCanonicalRoutingModel {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
+				coderws.StatusPolicyViolation,
+				"websocket model cannot change within a connection",
 				nil,
 			)
 		}

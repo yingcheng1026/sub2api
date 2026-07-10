@@ -157,8 +157,8 @@ func rewriteOpenAIWSPassthroughMappedModelForRequest(account *Account, payload [
 	if originalModel == "" && effectiveModel == "" {
 		return payload, nil
 	}
-	if _, isGPT56Family := classifyOpenAIGPT56PreviewModel(effectiveModel); isGPT56Family && !account.IsModelSupported(effectiveModel) {
-		return nil, errors.New("invalid GPT-5.6 websocket model mapping")
+	if _, modelSupported := resolveOpenAIWSSessionCanonicalModel(account, effectiveModel); !modelSupported {
+		return nil, errors.New("websocket model is not supported by selected account")
 	}
 
 	updated := payload
@@ -303,6 +303,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		return errors.New("token is empty")
 	}
 	requestModel := strings.TrimSpace(gjson.GetBytes(firstClientMessage, "model").String())
+	initialCanonicalRoutingModel, modelSupported := resolveOpenAIWSSessionCanonicalModel(account, requestModel)
+	if !modelSupported {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "websocket model is not supported by selected account", nil)
+	}
+	sessionBillingModel := account.GetMappedModel(NormalizeOpenAICompatRequestedModel(requestModel))
+	sessionUpstreamModel := normalizeOpenAIModelForUpstream(account, sessionBillingModel)
 	requestPreviousResponseID := strings.TrimSpace(gjson.GetBytes(firstClientMessage, "previous_response_id").String())
 	logOpenAIWSV2Passthrough(
 		"relay_start account_id=%d model=%s previous_response_id=%s first_message_type=%s first_message_bytes=%d",
@@ -447,6 +453,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if msgType != coderws.MessageText {
 				return payload, nil, nil
 			}
+			candidateModel := openAIWSPassthroughRequestModelForFrame(payload)
+			if candidateModel == "" {
+				candidateModel = openAIWSPassthroughRequestModelFromSessionFrame(payload)
+			}
+			if err := validateOpenAIWSSessionModel(account, initialCanonicalRoutingModel, candidateModel); err != nil {
+				return payload, nil, err
+			}
 			if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" && hooks != nil && hooks.BeforeRequest != nil {
 				turnNo := int(completedTurns.Load()) + 1
 				if turnNo < 2 {
@@ -545,6 +558,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 						CacheReadInputTokens:     turn.Usage.CacheReadInputTokens,
 					},
 					Model:           turn.RequestModel,
+					BillingModel:    sessionBillingModel,
+					UpstreamModel:   sessionUpstreamModel,
 					ServiceTier:     usageMeta.serviceTier.Load(),
 					ReasoningEffort: usageMeta.reasoningEffort.Load(),
 					Stream:          true,
@@ -594,6 +609,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			CacheReadInputTokens:     relayResult.Usage.CacheReadInputTokens,
 		},
 		Model:           relayResult.RequestModel,
+		BillingModel:    sessionBillingModel,
+		UpstreamModel:   sessionUpstreamModel,
 		ServiceTier:     usageMeta.serviceTier.Load(),
 		ReasoningEffort: usageMeta.reasoningEffort.Load(),
 		Stream:          true,
