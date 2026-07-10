@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { execFileSync } from 'node:child_process'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
@@ -79,10 +80,10 @@ describe('UseKeyModal', () => {
   })
 
   it.each([
-    ['macOS / Linux', 'export ', '=\"'],
-    ['Windows CMD', 'set ', '='],
-    ['PowerShell', '$env:', '=\"']
-  ])('uses stable native GPT identities for OpenAI Claude Code on %s', async (shellLabel, prefix, separator) => {
+    'macOS / Linux',
+    'Windows CMD',
+    'PowerShell'
+  ])('uses stable native GPT identities for OpenAI Claude Code on %s', async (shellLabel) => {
     const wrapper = mountModal('openai', { allowMessagesDispatch: true })
     await clickClientTab(wrapper, 'keys.useKeyModal.cliTabs.claudeCode')
     await clickShellTab(wrapper, shellLabel)
@@ -92,7 +93,13 @@ describe('UseKeyModal', () => {
     const settings = JSON.parse(files[1]) as { env: Record<string, string> }
 
     for (const [name, model] of Object.entries(nativeModelAssignments)) {
-      expect(terminal).toContain(`${prefix}${name}${separator}${model}`)
+      if (shellLabel === 'macOS / Linux') {
+        expect(terminal).toContain(`export ${name}='${model}'`)
+      } else if (shellLabel === 'PowerShell') {
+        expect(terminal).toContain(`$env:${name}='${model}'`)
+      } else {
+        expect(terminal).toContain(`set "${name}=${model}"`)
+      }
       expect(settings.env[name]).toBe(model)
     }
     expect(files.join('\n')).not.toMatch(/claude-/i)
@@ -111,6 +118,53 @@ describe('UseKeyModal', () => {
     const settings = JSON.parse(settingsContent) as { env: Record<string, string> }
     expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-local-"quoted"\\tail')
     expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://example.com/v1?label="quoted"')
+  })
+
+  it('shell-encodes hostile OpenAI Claude Code values and fails closed for CMD', async () => {
+    const hostile = '$(printf INJECTED)`printf INJECTED`&|\'"%VAR%!\r\nnext'
+    const hostileBaseUrl = `https://example.com/v1/${hostile}`
+    const hostileApiKey = `sk-local-${hostile}`
+    const wrapper = mountModal('openai', {
+      allowMessagesDispatch: true,
+      apiKey: hostileApiKey,
+      baseUrl: hostileBaseUrl
+    })
+    await clickClientTab(wrapper, 'keys.useKeyModal.cliTabs.claudeCode')
+
+    const posixTerminal = wrapper.findAll('pre code')[0].text()
+    const posixQuote = (value: string) => `'${value.replace(/'/g, "'\"'\"'")}'`
+    expect(posixTerminal).toContain(`export ANTHROPIC_BASE_URL=${posixQuote(hostileBaseUrl)}`)
+    expect(posixTerminal).toContain(`export ANTHROPIC_AUTH_TOKEN=${posixQuote(hostileApiKey)}`)
+    expect(() => execFileSync('/bin/sh', ['-eu', '-c', `${posixTerminal}
+test "$ANTHROPIC_BASE_URL" = "$EXPECTED_BASE_URL"
+test "$ANTHROPIC_AUTH_TOKEN" = "$EXPECTED_AUTH_TOKEN"`], {
+      env: {
+        ...process.env,
+        EXPECTED_BASE_URL: hostileBaseUrl,
+        EXPECTED_AUTH_TOKEN: hostileApiKey
+      }
+    })).not.toThrow()
+
+    await clickShellTab(wrapper, 'PowerShell')
+    const powerShellTerminal = wrapper.findAll('pre code')[0].text()
+    const powerShellQuote = (value: string) => `'${value.replace(/'/g, "''")}'`
+    expect(powerShellTerminal).toContain(`$env:ANTHROPIC_BASE_URL=${powerShellQuote(hostileBaseUrl)}`)
+    expect(powerShellTerminal).toContain(`$env:ANTHROPIC_AUTH_TOKEN=${powerShellQuote(hostileApiKey)}`)
+
+    await clickShellTab(wrapper, 'Windows CMD')
+    const files = wrapper.findAll('pre code').map((code) => code.text())
+    const cmdTerminal = files[0]
+    expect(cmdTerminal).toContain('Unsafe value omitted')
+    expect(cmdTerminal).toContain('settings.json')
+    expect(cmdTerminal).not.toContain(hostileBaseUrl)
+    expect(cmdTerminal).not.toContain(hostileApiKey)
+    expect(cmdTerminal).not.toContain('%VAR%')
+    expect(cmdTerminal).not.toContain('\r')
+    expect(cmdTerminal).not.toContain('next')
+
+    const settings = JSON.parse(files[1]) as { env: Record<string, string> }
+    expect(settings.env.ANTHROPIC_BASE_URL).toBe(hostileBaseUrl)
+    expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBe(hostileApiKey)
   })
 
   it('keeps the Anthropic Claude Code fixture unchanged', () => {

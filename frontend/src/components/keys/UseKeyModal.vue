@@ -184,6 +184,10 @@ const OPENAI_CLAUDE_CODE_MODELS = {
   CLAUDE_CODE_SUBAGENT_MODEL: 'inherit'
 } as const
 
+const quotePosixShell = (value: string) => `'${value.replace(/'/g, "'\"'\"'")}'`
+const quotePowerShell = (value: string) => `'${value.replace(/'/g, "''")}'`
+const isCmdSafeConfigValue = (value: string) => /^[A-Za-z0-9:/.~_+\-]+$/.test(value)
+
 // Reset tabs when platform changes
 const defaultClientTab = computed(() => {
   switch (props.platform) {
@@ -450,28 +454,35 @@ function generateOpenAINativeClaudeFiles(baseUrl: string, apiKey: string): FileC
     case 'unix':
       path = 'Terminal'
       content = [
-        `export ANTHROPIC_BASE_URL="${baseUrl}"`,
-        `export ANTHROPIC_AUTH_TOKEN="${apiKey}"`,
-        'export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
-        ...modelEntries.map(([name, model]) => `export ${name}="${model}"`)
+        `export ANTHROPIC_BASE_URL=${quotePosixShell(baseUrl)}`,
+        `export ANTHROPIC_AUTH_TOKEN=${quotePosixShell(apiKey)}`,
+        `export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${quotePosixShell('1')}`,
+        ...modelEntries.map(([name, model]) => `export ${name}=${quotePosixShell(model)}`)
       ].join('\n')
       break
     case 'cmd':
       path = 'Command Prompt'
-      content = [
-        `set ANTHROPIC_BASE_URL=${baseUrl}`,
-        `set ANTHROPIC_AUTH_TOKEN=${apiKey}`,
-        'set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
-        ...modelEntries.map(([name, model]) => `set ${name}=${model}`)
-      ].join('\n')
+      if (!isCmdSafeConfigValue(baseUrl) || !isCmdSafeConfigValue(apiKey)) {
+        content = [
+          'REM Unsafe value omitted; no environment variables were changed.',
+          'REM Configure this client with the JSON-safe settings.json file shown below.'
+        ].join('\n')
+      } else {
+        content = [
+          `set "ANTHROPIC_BASE_URL=${baseUrl}"`,
+          `set "ANTHROPIC_AUTH_TOKEN=${apiKey}"`,
+          'set "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"',
+          ...modelEntries.map(([name, model]) => `set "${name}=${model}"`)
+        ].join('\n')
+      }
       break
     case 'powershell':
       path = 'PowerShell'
       content = [
-        `$env:ANTHROPIC_BASE_URL="${baseUrl}"`,
-        `$env:ANTHROPIC_AUTH_TOKEN="${apiKey}"`,
-        '$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
-        ...modelEntries.map(([name, model]) => `$env:${name}="${model}"`)
+        `$env:ANTHROPIC_BASE_URL=${quotePowerShell(baseUrl)}`,
+        `$env:ANTHROPIC_AUTH_TOKEN=${quotePowerShell(apiKey)}`,
+        `$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${quotePowerShell('1')}`,
+        ...modelEntries.map(([name, model]) => `$env:${name}=${quotePowerShell(model)}`)
       ].join('\n')
       break
     default:
