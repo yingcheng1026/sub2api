@@ -312,6 +312,11 @@ var defaultOpenAICodexSnapshotPersistThrottle = newAccountWriteThrottle(openAICo
 // support but no compatible account is available.
 var ErrNoAvailableCompactAccounts = errors.New("no available OpenAI accounts support /responses/compact")
 
+// ErrNoAvailableOpenAIAccounts is the typed OpenAI selection sentinel used by
+// protocol handlers to distinguish model availability from repository or
+// scheduler failures.
+var ErrNoAvailableOpenAIAccounts = errors.New("no available OpenAI accounts")
+
 // OpenAIGatewayService handles OpenAI API gateway operations
 type OpenAIGatewayService struct {
 	accountRepo               AccountRepository
@@ -1279,9 +1284,9 @@ func noAvailableOpenAISelectionError(requestedModel string, compactBlocked bool)
 		return ErrNoAvailableCompactAccounts
 	}
 	if requestedModel != "" {
-		return fmt.Errorf("no available OpenAI accounts supporting model: %s", requestedModel)
+		return fmt.Errorf("%w supporting model: %s", ErrNoAvailableOpenAIAccounts, requestedModel)
 	}
-	return errors.New("no available OpenAI accounts")
+	return ErrNoAvailableOpenAIAccounts
 }
 
 // openAICompactSupportTier classifies an OpenAI account by compact capability.
@@ -2093,9 +2098,23 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(statusCode i
 	return isOpenAITransientProcessingError(statusCode, upstreamMsg, upstreamBody)
 }
 
-func (s *OpenAIGatewayService) handleFailoverSideEffects(ctx context.Context, resp *http.Response, account *Account) {
+func (s *OpenAIGatewayService) handleOpenAIUpstreamError(
+	ctx context.Context,
+	account *Account,
+	model string,
+	statusCode int,
+	headers http.Header,
+	body []byte,
+) bool {
+	if s == nil || s.rateLimitService == nil {
+		return false
+	}
+	return s.rateLimitService.HandleUpstreamErrorForModel(ctx, account, model, statusCode, headers, body)
+}
+
+func (s *OpenAIGatewayService) handleFailoverSideEffects(ctx context.Context, resp *http.Response, account *Account, model string) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, body)
+	s.handleOpenAIUpstreamError(ctx, account, model, resp.StatusCode, resp.Header, body)
 }
 
 // Forward forwards request to OpenAI API
@@ -2936,7 +2955,7 @@ func (s *OpenAIGatewayService) ForwardWithOptions(ctx context.Context, c *gin.Co
 					Detail:             upstreamDetail,
 				})
 
-				s.handleFailoverSideEffects(ctx, resp, account)
+				s.handleFailoverSideEffects(ctx, resp, account, upstreamModel)
 				return nil, &UpstreamFailoverError{
 					StatusCode:             resp.StatusCode,
 					ResponseBody:           respBody,
@@ -3494,9 +3513,8 @@ func (s *OpenAIGatewayService) handleFailoverErrorResponsePassthrough(
 	}
 	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
 	logOpenAIInstructionsRequiredDebug(ctx, c, account, resp.StatusCode, upstreamMsg, requestBody, body)
-	if s.rateLimitService != nil {
-		_ = s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, body)
-	}
+	requestModel, _, _ := extractOpenAIRequestMetaFromBody(requestBody)
+	_ = s.handleOpenAIUpstreamError(ctx, account, requestModel, resp.StatusCode, resp.Header, body)
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform:             account.Platform,
 		AccountID:            account.ID,
@@ -3537,12 +3555,11 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 	}
 	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
 	logOpenAIInstructionsRequiredDebug(ctx, c, account, resp.StatusCode, upstreamMsg, requestBody, body)
-	if s.rateLimitService != nil {
-		// Passthrough mode preserves the raw upstream error response, but runtime
-		// account state still needs to be updated so sticky routing can stop
-		// reusing a freshly rate-limited account.
-		_ = s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, body)
-	}
+	// Passthrough mode preserves the raw upstream error response, but runtime
+	// account state still needs to be updated so sticky routing can stop
+	// reusing a freshly rate-limited account.
+	requestModel, _, _ := extractOpenAIRequestMetaFromBody(requestBody)
+	_ = s.handleOpenAIUpstreamError(ctx, account, requestModel, resp.StatusCode, resp.Header, body)
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform:             account.Platform,
 		AccountID:            account.ID,
@@ -4252,9 +4269,8 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 
 	// Handle upstream error (mark account status)
 	shouldDisable := false
-	if s.rateLimitService != nil {
-		shouldDisable = s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, body)
-	}
+	requestModel, _, _ := extractOpenAIRequestMetaFromBody(requestBody)
+	shouldDisable = s.handleOpenAIUpstreamError(ctx, account, requestModel, resp.StatusCode, resp.Header, body)
 	kind := "http_error"
 	if shouldDisable {
 		kind = "failover"
@@ -4330,6 +4346,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	resp *http.Response,
 	c *gin.Context,
 	account *Account,
+	model string,
 	writeError compatErrorWriter,
 ) (*OpenAIForwardResult, error) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
@@ -4387,11 +4404,9 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 
 	// Track rate limits and decide whether to trigger secondary failover.
 	shouldDisable := false
-	if s.rateLimitService != nil {
-		shouldDisable = s.rateLimitService.HandleUpstreamError(
-			c.Request.Context(), account, resp.StatusCode, resp.Header, body,
-		)
-	}
+	shouldDisable = s.handleOpenAIUpstreamError(
+		c.Request.Context(), account, model, resp.StatusCode, resp.Header, body,
+	)
 	kind := "http_error"
 	if shouldDisable {
 		kind = "failover"

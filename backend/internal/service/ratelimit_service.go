@@ -64,6 +64,7 @@ const (
 	openAI403CooldownMinutesDefault = 10
 	openAI403DisableThreshold       = 3
 	openAI403CounterWindowMinutes   = 180
+	openAIGPT56Model403Cooldown     = 180 * time.Minute
 )
 
 // NewRateLimitService 创建RateLimitService实例
@@ -260,14 +261,14 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	case 403:
 		logger.LegacyPrintf(
 			"service.ratelimit",
-			"[HandleUpstreamErrorRaw] account_id=%d platform=%s type=%s status=403 request_id=%s cf_ray=%s upstream_msg=%s raw_body=%s",
+			"[HandleUpstreamError] account_id=%d platform=%s type=%s status=403 request_id=%s cf_ray=%s upstream_msg=%s response_bytes=%d",
 			account.ID,
 			account.Platform,
 			account.Type,
 			strings.TrimSpace(headers.Get("x-request-id")),
 			strings.TrimSpace(headers.Get("cf-ray")),
 			upstreamMsg,
-			truncateForLog(responseBody, 1024),
+			len(responseBody),
 		)
 		shouldDisable = s.handle403(ctx, account, upstreamMsg, responseBody)
 	case 429:
@@ -293,6 +294,74 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	}
 
 	return shouldDisable
+}
+
+// HandleUpstreamErrorForModel applies model-aware isolation before the legacy
+// account-wide policy. An exact GPT-5.6 tier returning 403 means that this
+// account lacks access to that model; it must never disable or temporarily
+// unschedule the account for unrelated OpenAI models.
+func (s *RateLimitService) HandleUpstreamErrorForModel(
+	ctx context.Context,
+	account *Account,
+	model string,
+	statusCode int,
+	headers http.Header,
+	responseBody []byte,
+) (shouldFailover bool) {
+	if statusCode == http.StatusForbidden && account != nil && account.Platform == PlatformOpenAI {
+		if modelKey, ok := resolveOpenAIGPT56ModelIsolationKey(account, model); ok {
+			return s.handleOpenAIGPT56Model403(ctx, account, modelKey, responseBody)
+		}
+	}
+	return s.HandleUpstreamError(ctx, account, statusCode, headers, responseBody)
+}
+
+func resolveOpenAIGPT56ModelIsolationKey(account *Account, model string) (string, bool) {
+	if account == nil {
+		return "", false
+	}
+	normalizedTier, isFamily := classifyOpenAIGPT56PreviewModel(model)
+	if !isFamily || normalizedTier == "" {
+		return "", false
+	}
+	mappedModel, matched := account.ResolveMappedModel(normalizedTier)
+	if !matched {
+		return "", false
+	}
+	modelKey := strings.TrimSpace(mappedModel)
+	mappedTier, mappedIsFamily := classifyOpenAIGPT56PreviewModel(modelKey)
+	if !mappedIsFamily || mappedTier != normalizedTier {
+		return "", false
+	}
+	return modelKey, true
+}
+
+func (s *RateLimitService) handleOpenAIGPT56Model403(
+	ctx context.Context,
+	account *Account,
+	modelKey string,
+	responseBody []byte,
+) bool {
+	resetAt := time.Now().Add(openAIGPT56Model403Cooldown)
+	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, modelKey, resetAt); err != nil {
+		// Fail over the current request, but never fall back to SetError or an
+		// account-wide cooldown when model isolation persistence is unavailable.
+		slog.Error("openai_gpt56_model_403_isolation_failed",
+			"account_id", account.ID,
+			"model", modelKey,
+			"error", err,
+		)
+		return true
+	}
+
+	upstreamMsg := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(responseBody))
+	slog.Warn("openai_gpt56_model_403_isolated",
+		"account_id", account.ID,
+		"model", modelKey,
+		"reset_at", resetAt,
+		"upstream_message", truncateForLog([]byte(upstreamMsg), 256),
+	)
+	return true
 }
 
 // PreCheckUsage proactively checks local quota before dispatching a request.

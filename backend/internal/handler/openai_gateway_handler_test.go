@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	coderws "github.com/coder/websocket"
@@ -673,13 +674,188 @@ func TestOpenAIPricingPreflightErrorsReturn400Not503_Responses(t *testing.T) {
 	require.Zero(t, upstreamHits.Load())
 }
 
+func TestOpenAIGPT56UnavailableReturnsStable403AcrossHTTPProtocols(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+		run  func(*OpenAIGatewayHandler, *gin.Context)
+	}{
+		{
+			name: "responses", path: "/v1/responses",
+			body: `{"model":"gpt-5.6-sol","input":"hello","stream":false}`,
+			run:  func(h *OpenAIGatewayHandler, c *gin.Context) { h.Responses(c) },
+		},
+		{
+			name: "chat completions", path: "/v1/chat/completions",
+			body: `{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"hello"}],"stream":false}`,
+			run:  func(h *OpenAIGatewayHandler, c *gin.Context) { h.ChatCompletions(c) },
+		},
+		{
+			name: "anthropic messages compat", path: "/v1/messages",
+			body: `{"model":"gpt-5.6-sol","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`,
+			run:  func(h *OpenAIGatewayHandler, c *gin.Context) { h.Messages(c) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			var upstreamHits atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamHits.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			h, apiKey := newOpenAIPreflightHandlerTestFixture(t, upstream.URL)
+			apiKey.Group.AllowMessagesDispatch = true
+			_, _, selectionErr := h.gatewayService.SelectAccountWithScheduler(
+				context.Background(), apiKey.GroupID, "", "", "gpt-5.6-sol", nil,
+				service.OpenAIUpstreamTransportAny, false,
+			)
+			require.ErrorIsf(t, selectionErr, service.ErrNoAvailableOpenAIAccounts, "selectionErr=%v", selectionErr)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+			c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
+
+			tt.run(h, c)
+
+			require.Equalf(t, http.StatusForbidden, rec.Code, "response=%s", rec.Body.String())
+			require.Equal(t, "model_not_available", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+			require.Contains(t, gjson.GetBytes(rec.Body.Bytes(), "error.message").String(), "gpt-5.6-sol")
+			require.Zero(t, upstreamHits.Load())
+		})
+	}
+}
+
+func TestOpenAIGPT56AvailabilityError_DoesNotMaskInfrastructureFailures(t *testing.T) {
+	status, errType, message, ok := openAIGPT56AvailabilityError("gpt-5.6-sol", errors.New("database unavailable"), nil)
+	require.False(t, ok)
+	require.Zero(t, status)
+	require.Empty(t, errType)
+	require.Empty(t, message)
+
+	status, errType, message, ok = openAIGPT56AvailabilityError("gpt-5.6-sol", service.ErrNoAvailableOpenAIAccounts, nil)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, status)
+	require.Equal(t, "model_not_available", errType)
+	require.Contains(t, message, "gpt-5.6-sol")
+
+	_, _, _, ok = openAIGPT56AvailabilityError(
+		"gpt-5.6-sol",
+		service.ErrNoAvailableOpenAIAccounts,
+		&service.UpstreamFailoverError{StatusCode: http.StatusInternalServerError},
+	)
+	require.False(t, ok, "a prior 5xx must remain the authoritative client error")
+
+	_, _, _, ok = openAIGPT56AvailabilityError(
+		"gpt-5.6-sol",
+		service.ErrNoAvailableOpenAIAccounts,
+		&service.UpstreamFailoverError{StatusCode: http.StatusForbidden},
+	)
+	require.True(t, ok, "an exact GPT-5.6 403 may collapse to model_not_available")
+}
+
+func TestOpenAIGPT56PriorUpstream5xxIsNotReclassifiedAsModelUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream internal failure"}}`))
+	}))
+	defer upstream.Close()
+
+	h, apiKey := newOpenAIPreflightHandlerTestFixtureWithMapping(t, upstream.URL, map[string]any{
+		"gpt-5.6-sol": "gpt-5.6-sol",
+	})
+	h.maxAccountSwitches = 1
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","input":"hello","stream":false}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
+
+	h.Responses(c)
+
+	require.Equalf(t, http.StatusBadGateway, rec.Code, "response=%s", rec.Body.String())
+	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+	require.NotEqual(t, "model_not_available", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+	require.Equal(t, int32(1), upstreamHits.Load())
+}
+
+func TestOpenAIResponsesWebSocket_GPT56UnavailableClosesWithPolicyViolation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unavailable GPT-5.6 must fail before upstream")
+	}))
+	defer upstream.Close()
+
+	h, _ := newOpenAIPreflightHandlerTestFixture(t, upstream.URL)
+	wsServer := newOpenAIWSHandlerTestServer(t, h, middleware.AuthSubject{UserID: 1, Concurrency: 1})
+	defer wsServer.Close()
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http")+"/openai/v1/responses", nil)
+	cancelDial()
+	require.NoError(t, err)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
+	err = clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}`))
+	cancelWrite()
+	require.NoError(t, err)
+
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
+	_, _, readErr := clientConn.Read(readCtx)
+	cancelRead()
+	var closeErr coderws.CloseError
+	require.ErrorAs(t, readErr, &closeErr)
+	require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
+	require.Contains(t, closeErr.Reason, "gpt-5.6-sol")
+}
+
 func newOpenAIPreflightHandlerTestFixture(t *testing.T, upstreamURL string) (*OpenAIGatewayHandler, *service.APIKey) {
+	return newOpenAIPreflightHandlerTestFixtureWithMapping(t, upstreamURL, nil)
+}
+
+type openAIPreflightHTTPUpstream struct{}
+
+func (openAIPreflightHTTPUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return http.DefaultClient.Do(req)
+}
+
+func (openAIPreflightHTTPUpstream) DoWithTLS(
+	req *http.Request,
+	_ string,
+	_ int64,
+	_ int,
+	_ *tlsfingerprint.Profile,
+) (*http.Response, error) {
+	return http.DefaultClient.Do(req)
+}
+
+func newOpenAIPreflightHandlerTestFixtureWithMapping(
+	t *testing.T,
+	upstreamURL string,
+	modelMapping map[string]any,
+) (*OpenAIGatewayHandler, *service.APIKey) {
 	t.Helper()
 	groupID := int64(5101)
+	credentials := map[string]any{"api_key": "test-only", "base_url": upstreamURL}
+	if len(modelMapping) > 0 {
+		credentials["model_mapping"] = modelMapping
+	}
 	accountRepo := &openAIWSUsageHandlerAccountRepoStub{account: service.Account{
 		ID: 6101, Name: "preflight-account", Platform: service.PlatformOpenAI,
 		Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1,
-		Credentials: map[string]any{"api_key": "test-only", "base_url": upstreamURL},
+		Credentials: credentials,
 	}}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Default.RateMultiplier = 1
@@ -688,7 +864,7 @@ func newOpenAIPreflightHandlerTestFixture(t *testing.T, upstreamURL string) (*Op
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg)
 	gateway := service.NewOpenAIGatewayService(
 		accountRepo, nil, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
-		service.NewBillingService(cfg, nil), nil, billingCache, nil, &service.DeferredService{},
+		service.NewBillingService(cfg, nil), nil, billingCache, openAIPreflightHTTPUpstream{}, &service.DeferredService{},
 		nil, nil, nil, nil, nil, nil, nil,
 	)
 	cache := &concurrencyCacheMock{

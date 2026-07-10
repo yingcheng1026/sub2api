@@ -105,6 +105,29 @@ func openAISelectedAccountSupportsRoutingModel(account *service.Account, routing
 	return routingModel == "" || account.IsModelSupported(routingModel)
 }
 
+func openAIGPT56AvailabilityError(
+	model string,
+	selectionErr error,
+	lastFailoverErr *service.UpstreamFailoverError,
+) (status int, errType, message string, ok bool) {
+	normalized, isFamily := service.NormalizeOpenAIGPT56PreviewModel(model)
+	if !isFamily || normalized == "" {
+		return 0, "", "", false
+	}
+	if selectionErr != nil &&
+		!errors.Is(selectionErr, service.ErrNoAvailableAccounts) &&
+		!errors.Is(selectionErr, service.ErrNoAvailableOpenAIAccounts) {
+		return 0, "", "", false
+	}
+	if lastFailoverErr != nil && lastFailoverErr.StatusCode != http.StatusForbidden {
+		return 0, "", "", false
+	}
+	return http.StatusForbidden,
+		"model_not_available",
+		fmt.Sprintf("Model %s is not available for this API key or group", normalized),
+		true
+}
+
 func openAIWSChannelMappingKeepsCanonicalModel(requestedModel string, channelMapping service.ChannelMappingResult) bool {
 	if !channelMapping.Mapped {
 		return true
@@ -373,7 +396,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available OpenAI accounts support /responses/compact", streamStarted)
 					return
 				}
+				if status, errType, message, ok := openAIGPT56AvailabilityError(routingModel, err, lastFailoverErr); ok {
+					h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+					return
+				}
 				h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
+				return
+			}
+			if status, errType, message, ok := openAIGPT56AvailabilityError(routingModel, err, lastFailoverErr); ok {
+				h.handleStreamingAwareError(c, status, errType, message, streamStarted)
 				return
 			}
 			if lastFailoverErr != nil {
@@ -384,6 +415,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			if status, errType, message, ok := openAIGPT56AvailabilityError(routingModel, nil, lastFailoverErr); ok {
+				h.handleStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 			return
 		}
@@ -822,6 +857,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Error(err),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if status, errType, message, ok := openAIGPT56AvailabilityError(currentRoutingModel, err, lastFailoverErr); ok {
+				h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				if err != nil {
 					h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
@@ -839,6 +878,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		if selection == nil || selection.Account == nil {
 			if isClientCanceledAccountSelectError(c, nil) {
 				reqLog.Info("openai_messages.account_select_empty_client_canceled")
+				return
+			}
+			if status, errType, message, ok := openAIGPT56AvailabilityError(currentRoutingModel, nil, lastFailoverErr); ok {
+				h.anthropicStreamingAwareError(c, status, errType, message, streamStarted)
 				return
 			}
 			h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
@@ -1432,10 +1475,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	)
 	if err != nil {
 		reqLog.Warn("openai.websocket_account_select_failed", zap.Error(err))
+		if _, _, message, ok := openAIGPT56AvailabilityError(routingModel, err, nil); ok {
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, message)
+			return
+		}
 		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
 		return
 	}
 	if selection == nil || selection.Account == nil {
+		if _, _, message, ok := openAIGPT56AvailabilityError(routingModel, nil, nil); ok {
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, message)
+			return
+		}
 		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
 		return
 	}

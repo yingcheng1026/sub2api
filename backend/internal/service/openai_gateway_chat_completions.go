@@ -294,16 +294,14 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletionsWithOptions(
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
 			})
-			if s.rateLimitService != nil {
-				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
-			}
+			s.handleOpenAIUpstreamError(ctx, account, upstreamModel, resp.StatusCode, resp.Header, respBody)
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
 				RetryableOnSameAccount: account.IsPoolMode() && (isPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
 			}
 		}
-		return s.handleChatCompletionsErrorResponse(resp, c, account)
+		return s.handleChatCompletionsErrorResponse(resp, c, account, upstreamModel)
 	}
 
 	// 9. Handle normal response
@@ -379,8 +377,9 @@ func (s *OpenAIGatewayService) handleChatCompletionsErrorResponse(
 	resp *http.Response,
 	c *gin.Context,
 	account *Account,
+	model string,
 ) (*OpenAIForwardResult, error) {
-	return s.handleCompatErrorResponse(resp, c, account, writeChatCompletionsError)
+	return s.handleCompatErrorResponse(resp, c, account, model, writeChatCompletionsError)
 }
 
 // handleChatBufferedStreamingResponse reads all Responses SSE events from the

@@ -17,7 +17,11 @@ type rateLimitAccountRepoStub struct {
 	mockAccountRepoForGemini
 	setErrorCalls          int
 	tempCalls              int
+	modelRateLimitCalls    int
 	updateCredentialsCalls int
+	lastModelRateLimitKey  string
+	lastModelRateLimitAt   time.Time
+	modelRateLimitErr      error
 	lastCredentials        map[string]any
 	lastErrorMsg           string
 	lastTempReason         string
@@ -35,6 +39,13 @@ func (r *rateLimitAccountRepoStub) SetTempUnschedulable(ctx context.Context, id 
 	return nil
 }
 
+func (r *rateLimitAccountRepoStub) SetModelRateLimit(_ context.Context, _ int64, scope string, resetAt time.Time) error {
+	r.modelRateLimitCalls++
+	r.lastModelRateLimitKey = scope
+	r.lastModelRateLimitAt = resetAt
+	return r.modelRateLimitErr
+}
+
 func (r *rateLimitAccountRepoStub) UpdateCredentials(ctx context.Context, id int64, credentials map[string]any) error {
 	r.updateCredentialsCalls++
 	r.lastCredentials = cloneCredentials(credentials)
@@ -49,10 +60,12 @@ type tokenCacheInvalidatorRecorder struct {
 type openAI403CounterCacheStub struct {
 	counts     []int64
 	resetCalls []int64
+	increments int
 	err        error
 }
 
 func (s *openAI403CounterCacheStub) IncrementOpenAI403Count(_ context.Context, _ int64, _ int) (int64, error) {
+	s.increments++
 	if s.err != nil {
 		return 0, s.err
 	}
