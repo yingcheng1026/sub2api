@@ -21,6 +21,22 @@
         </div>
       </div>
 
+      <!-- GPT-5.6 is intentionally bound to the exact openai-default group. -->
+      <div
+        v-else-if="openAIGroupMismatch"
+        class="flex items-start gap-3 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800"
+      >
+        <Icon name="exclamationCircle" size="md" class="text-yellow-500 flex-shrink-0 mt-0.5" />
+        <div>
+          <p class="text-sm font-medium text-yellow-800 dark:text-yellow-200">
+            {{ t('keys.useKeyModal.openai.groupMismatchTitle') }}
+          </p>
+          <p class="text-sm text-yellow-700 dark:text-yellow-300 mt-1">
+            {{ t('keys.useKeyModal.openai.groupMismatchDescription', { group: groupName || '-' }) }}
+          </p>
+        </div>
+      </div>
+
       <!-- Platform-specific content -->
       <template v-else>
         <!-- Description -->
@@ -146,6 +162,7 @@ interface Props {
   apiKey: string
   baseUrl: string
   platform: GroupPlatform | null
+  groupName?: string | null
   allowMessagesDispatch?: boolean
 }
 
@@ -175,6 +192,9 @@ const { copyToClipboard: clipboardCopy } = useClipboard()
 const copiedIndex = ref<number | null>(null)
 const activeTab = ref<string>('unix')
 const activeClientTab = ref<string>('claude')
+const openAIGroupMismatch = computed(() =>
+  props.platform === 'openai' && props.groupName !== 'openai-default'
+)
 
 const OPENAI_CLAUDE_CODE_MODELS = {
   ANTHROPIC_MODEL: 'gpt-5.6-terra',
@@ -386,17 +406,41 @@ const operator = (value: string) => wrapToken('text-slate-400', value)
 const string = (value: string) => wrapToken('text-amber-200', value)
 const comment = (value: string) => wrapToken('text-slate-500', value)
 
+function normalizeOpenAIProviderBases(value: string): { baseRoot: string; apiBase: string } {
+  const raw = value.trim().replace(/\/+$/, '')
+
+  try {
+    const parsed = new URL(raw)
+    const suffix = raw.match(/[?#].*$/)?.[0] ?? ''
+    const path = parsed.pathname.replace(/\/+$/, '')
+
+    if (path === '' || path === '/v1') {
+      return {
+        baseRoot: `${parsed.origin}${suffix}`,
+        apiBase: `${parsed.origin}/v1${suffix}`
+      }
+    }
+  } catch {
+    // Keep custom/non-URL endpoints usable and normalize them conservatively below.
+  }
+
+  const baseRoot = raw.replace(/\/v1\/?$/, '').replace(/\/+$/, '')
+  return {
+    baseRoot,
+    apiBase: baseRoot.endsWith('/v1') ? baseRoot : `${baseRoot}/v1`
+  }
+}
+
 // Syntax highlighting helpers
 // Generate file configs based on platform and active tab
 const currentFiles = computed((): FileConfig[] => {
   const baseUrl = props.baseUrl || window.location.origin
   const apiKey = props.apiKey
-  const baseRoot = baseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '')
+  const { baseRoot, apiBase } = normalizeOpenAIProviderBases(baseUrl)
   const ensureV1 = (value: string) => {
     const trimmed = value.replace(/\/+$/, '')
     return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`
   }
-  const apiBase = ensureV1(baseRoot)
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)
   const antigravityGeminiBase = (() => {
     const trimmed = `${baseRoot}/antigravity`.replace(/\/+$/, '')
@@ -428,12 +472,12 @@ const currentFiles = computed((): FileConfig[] => {
   switch (props.platform) {
     case 'openai':
       if (activeClientTab.value === 'claude') {
-        return generateOpenAINativeClaudeFiles(baseUrl, apiKey)
+        return generateOpenAINativeClaudeFiles(baseRoot, apiKey)
       }
       if (activeClientTab.value === 'codex-ws') {
-        return generateOpenAIWsFiles(baseUrl, apiKey)
+        return generateOpenAIWsFiles(apiBase, apiKey)
       }
-      return generateOpenAIFiles(baseUrl, apiKey)
+      return generateOpenAIFiles(apiBase, apiKey)
     case 'gemini':
       return [generateGeminiCliContent(baseUrl, apiKey)]
     case 'antigravity':
@@ -607,26 +651,22 @@ function generateOpenAIFiles(baseUrl: string, apiKey: string): FileConfig[] {
   const configDir = isWindows ? '%userprofile%\\.codex' : '~/.codex'
 
   // config.toml content
-  const configContent = `model_provider = "OpenAI"
+  const configContent = `model_provider = "handsfree"
 model = "gpt-5.6-terra"
 review_model = "gpt-5.6-terra"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "high"
 disable_response_storage = true
 network_access = "enabled"
 windows_wsl_setup_acknowledged = true
-model_context_window = 1000000
-model_auto_compact_token_limit = 900000
 
-[model_providers.OpenAI]
-name = "OpenAI"
+[model_providers.handsfree]
+name = "Handsfree Club"
 base_url = "${baseUrl}"
 wire_api = "responses"
 requires_openai_auth = true`
 
   // auth.json content
-  const authContent = `{
-  "OPENAI_API_KEY": "${apiKey}"
-}`
+  const authContent = JSON.stringify({ OPENAI_API_KEY: apiKey }, null, 2)
 
   return [
     {
@@ -636,7 +676,8 @@ requires_openai_auth = true`
     },
     {
       path: `${configDir}/auth.json`,
-      content: authContent
+      content: authContent,
+      hint: t('keys.useKeyModal.openai.authJsonHint')
     }
   ]
 }
@@ -646,7 +687,7 @@ function generateOpenAIWsFiles(baseUrl: string, apiKey: string): FileConfig[] {
   const configDir = isWindows ? '%userprofile%\\.codex' : '~/.codex'
 
   // config.toml content with WebSocket v2
-  const configContent = `model_provider = "OpenAI"
+  const configContent = `model_provider = "handsfree"
 model = "gpt-5.4"
 review_model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
@@ -656,8 +697,8 @@ windows_wsl_setup_acknowledged = true
 model_context_window = 1000000
 model_auto_compact_token_limit = 900000
 
-[model_providers.OpenAI]
-name = "OpenAI"
+[model_providers.handsfree]
+name = "Handsfree Club"
 base_url = "${baseUrl}"
 wire_api = "responses"
 supports_websockets = true
@@ -667,9 +708,7 @@ requires_openai_auth = true
 responses_websockets_v2 = true`
 
   // auth.json content
-  const authContent = `{
-  "OPENAI_API_KEY": "${apiKey}"
-}`
+  const authContent = JSON.stringify({ OPENAI_API_KEY: apiKey }, null, 2)
 
   return [
     {
@@ -679,7 +718,8 @@ responses_websockets_v2 = true`
     },
     {
       path: `${configDir}/auth.json`,
-      content: authContent
+      content: authContent,
+      hint: t('keys.useKeyModal.openai.authJsonHint')
     }
   ]
 }

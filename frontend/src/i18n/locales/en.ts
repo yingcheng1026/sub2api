@@ -722,10 +722,13 @@ export default {
       noGroupTitle: 'Please assign a group first',
       noGroupDescription: 'This API key has not been assigned to a group. Please click the group column in the key list to assign one before viewing the configuration.',
       openai: {
-        description: 'Add the following configuration files to your Codex CLI config directory.',
-        configTomlHint: 'Make sure the following content is at the beginning of the config.toml file',
-        note: 'Make sure the config directory exists. macOS/Linux users can run mkdir -p ~/.codex to create it.',
-        noteWindows: 'Press Win+R and enter %userprofile%\\.codex to open the config directory. Create it manually if it does not exist.',
+        description: 'GPT-5.6 is available only to the openai-default group. Keep the same key and base URL; Codex defaults to gpt-5.6-terra and all tiers require exact model IDs.',
+        groupMismatchTitle: 'GPT-5.6 is not enabled for this group',
+        groupMismatchDescription: 'This key belongs to {group}, so a GPT-5.6 config cannot be generated. Switch it to openai-default or contact an administrator to avoid a 403 on the first request.',
+        configTomlHint: 'Use the user-level ~/.codex/config.toml, not a project config. Bare gpt-5.6 returns 400.',
+        authJsonHint: 'auth.json contains your API key: use chmod 600 on macOS/Linux and owner-only ACLs on Windows. Never commit it or share screenshots.',
+        note: 'Run codex update first if needed, but upgrading does not switch models automatically. GPT-5.6 uses HTTP Responses; the WebSocket template remains on GPT-5.4.',
+        noteWindows: 'Press Win+R and enter %userprofile%\\.codex to open the user-level config directory. Create it manually if it does not exist.',
       },
       cliTabs: {
         claudeCode: 'Claude Code',

@@ -16,6 +16,34 @@ describe('useModelWhitelist', () => {
     expect(models).toContain('codex-auto-review')
   })
 
+  it('openai 模型列表只暴露 GPT-5.6 的三个精确档位', () => {
+    const models = getModelsByPlatform('openai')
+
+    expect(models).toEqual(expect.arrayContaining([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna'
+    ]))
+    expect(models).not.toContain('gpt-5.6')
+    expect(models).not.toContain('gpt-5.6-*')
+  })
+
+  it('whitelist 仅保留 GPT-5.6 精确档位并丢弃裸模型和通配符', () => {
+    const mapping = buildModelMappingObject('whitelist', [
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+      'gpt-5.6',
+      'gpt-5.6-*'
+    ], [])
+
+    expect(mapping).toEqual({
+      'gpt-5.6-sol': 'gpt-5.6-sol',
+      'gpt-5.6-terra': 'gpt-5.6-terra',
+      'gpt-5.6-luna': 'gpt-5.6-luna'
+    })
+  })
+
   it('openai 模型列表不再暴露已下线的 ChatGPT 登录 Codex 模型', () => {
     const models = getModelsByPlatform('openai')
 

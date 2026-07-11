@@ -1,5 +1,7 @@
 # HFC GPT-5.6 客户接入说明
 
+仅 `openai-default` 分组可以使用 GPT-5.6。现有客户不需要更换 API Key 或 Base URL；非授权分组返回 `403`，裸 `gpt-5.6` 返回 `400`。升级 Codex 是建议步骤，但不会自动切换模型，仍需显式填写 exact tier。
+
 ## 可用模型
 
 GPT-5.6 只接受以下 exact tier，不接受裸 `gpt-5.6`：
@@ -12,7 +14,7 @@ GPT-5.6 只接受以下 exact tier，不接受裸 `gpt-5.6`：
 | `gpt-5.6-terra` | 平衡，默认推荐 | $2.50 | $15.00 | $3.125 | $0.25 |
 | `gpt-5.6-luna` | 经济 | $1.00 | $6.00 | $1.25 | $0.10 |
 
-现有 `claude-*` alias 继续使用原映射，不会静默切换到 GPT-5.6。要使用 GPT-5.6，客户端必须直接填写上表中的 exact model ID。
+现有 `claude-*` alias 继续使用原映射，不会静默切换到 GPT-5.6。要使用 GPT-5.6，客户端必须直接填写上表中的 exact model ID。Legacy alias 只代表兼容身份，日志主模型、上游模型和计费模型显示真实执行的 GPT。
 
 ## Claude Code
 
@@ -38,18 +40,28 @@ Windows 客户建议使用 HFC 页面生成的 PowerShell 配置。持久化后�
 `~/.codex/config.toml`，Windows 对应 `%USERPROFILE%\.codex\config.toml`：
 
 ```toml
-model_provider = "OpenAI"
+model_provider = "handsfree"
 model = "gpt-5.6-terra"
 review_model = "gpt-5.6-terra"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
-[model_providers.OpenAI]
-name = "OpenAI"
+[model_providers.handsfree]
+name = "Handsfree Club"
 base_url = "https://api.handsfreeclub.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
+
+`~/.codex/auth.json`（Windows 对应 `%USERPROFILE%\.codex\auth.json`）：
+
+```json
+{
+  "OPENAI_API_KEY": "<HFC key>"
+}
+```
+
+自定义 provider 必须放在用户级 `~/.codex/config.toml`，不要放进项目级 `.codex/config.toml`。建议先运行 `codex update`，旧安装也可用 `npm i -g @openai/codex@latest` 升级。
 
 首发默认使用 HTTP Responses，不默认打开 WebSocket。
 

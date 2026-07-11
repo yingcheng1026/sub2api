@@ -721,11 +721,14 @@ export default {
       noGroupDescription:
         '此 API 密钥尚未分配分组，请先在密钥列表中点击分组列进行分配，然后才能查看使用配置。',
       openai: {
-        description: '将以下配置文件添加到 Codex CLI 配置目录中。',
-        configTomlHint: '请确保以下内容位于 config.toml 文件的开头部分',
-        note: '请确保配置目录存在。macOS/Linux 用户可运行 mkdir -p ~/.codex 创建目录。',
+        description: 'GPT-5.6 仅限 openai-default 分组。原 Key 和 Base URL 不变；Codex 默认使用 gpt-5.6-terra，Sol/Terra/Luna 必须填写精确模型名。',
+        groupMismatchTitle: '当前分组未开放 GPT-5.6',
+        groupMismatchDescription: '此密钥属于 {group}，不能生成 GPT-5.6 配置。请先切换到 openai-default 分组或联系管理员，避免首次请求返回 403。',
+        configTomlHint: '请写入用户级 ~/.codex/config.toml；不要放在项目级配置。裸 gpt-5.6 返回 400。',
+        authJsonHint: 'auth.json 含 API Key：macOS/Linux 请设置 chmod 600；Windows 请限制为当前用户可读。不要提交到 Git 或发送截图。',
+        note: '建议先运行 codex update，但升级不会自动切换模型。GPT-5.6 使用 HTTP Responses；WebSocket 模板仍固定 GPT-5.4。',
         noteWindows:
-          '按 Win+R，输入 %userprofile%\\.codex 打开配置目录。如目录不存在，请先手动创建。'
+          '按 Win+R，输入 %userprofile%\\.codex 打开用户级配置目录。如目录不存在，请先手动创建。'
       },
       cliTabs: {
         claudeCode: 'Claude Code',

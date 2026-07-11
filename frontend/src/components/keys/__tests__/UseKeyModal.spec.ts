@@ -32,6 +32,7 @@ const mountModal = (platform: 'anthropic' | 'openai' | 'antigravity', overrides 
     apiKey: 'sk-local-test',
     baseUrl: 'https://example.com/v1',
     platform,
+    groupName: platform === 'openai' ? 'openai-default' : undefined,
     ...overrides
   },
   global: {
@@ -63,6 +64,14 @@ const nativeModelAssignments = {
 }
 
 describe('UseKeyModal', () => {
+  it('does not advertise GPT-5.6 for a non-openai-default group', () => {
+    const wrapper = mountModal('openai', { groupName: 'openai-legacy' })
+
+    expect(wrapper.text()).toContain('keys.useKeyModal.openai.groupMismatchTitle')
+    expect(wrapper.text()).toContain('keys.useKeyModal.openai.groupMismatchDescription')
+    expect(wrapper.find('pre code').exists()).toBe(false)
+  })
+
   it('renders exact GPT-5.6 tiers in OpenCode config', async () => {
     const wrapper = mountModal('openai')
 
@@ -89,8 +98,66 @@ describe('UseKeyModal', () => {
 
     expect(config).toContain('model = "gpt-5.6-terra"')
     expect(config).toContain('review_model = "gpt-5.6-terra"')
+    expect(config).toContain('model_provider = "handsfree"')
+    expect(config).toContain('[model_providers.handsfree]')
     expect(config).toContain('wire_api = "responses"')
+    expect(config).toContain('base_url = "https://example.com/v1"')
+    expect(config).toContain('model_reasoning_effort = "high"')
     expect(config).not.toContain('supports_websockets = true')
+    expect(config).not.toContain('model_context_window')
+    expect(config).not.toContain('model_auto_compact_token_limit')
+    expect(wrapper.text()).toContain('keys.useKeyModal.openai.authJsonHint')
+  })
+
+  it('serializes the Codex auth file as JSON even for hostile values', () => {
+    const apiKey = 'sk-local-"quoted"\\tail'
+    const wrapper = mountModal('openai', { apiKey })
+    const auth = JSON.parse(wrapper.findAll('pre code')[1].text()) as { OPENAI_API_KEY: string }
+
+    expect(auth.OPENAI_API_KEY).toBe(apiKey)
+  })
+
+  it('normalizes the provider root for Claude Code while keeping /v1 for Codex', async () => {
+    const wrapper = mountModal('openai', {
+      allowMessagesDispatch: true,
+      baseUrl: 'https://example.com/v1/'
+    })
+
+    const codexConfig = wrapper.findAll('pre code')[0].text()
+    expect(codexConfig).toContain('base_url = "https://example.com/v1"')
+
+    await clickClientTab(wrapper, 'keys.useKeyModal.cliTabs.claudeCode')
+    const settings = JSON.parse(wrapper.findAll('pre code')[1].text()) as { env: Record<string, string> }
+    expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://example.com')
+  })
+
+  it('adds /v1 for Codex when the configured endpoint is a provider root', () => {
+    const wrapper = mountModal('openai', { baseUrl: 'https://example.com/' })
+    const config = wrapper.findAll('pre code')[0].text()
+
+    expect(config).toContain('base_url = "https://example.com/v1"')
+  })
+
+  it.each([
+    'https://example.com',
+    'https://example.com/',
+    'https://example.com/v1',
+    'https://example.com/v1/'
+  ])('normalizes production-style OpenAI endpoints exactly once: %s', async (baseUrl) => {
+    const wrapper = mountModal('openai', { allowMessagesDispatch: true, baseUrl })
+    const codexConfig = wrapper.findAll('pre code')[0].text()
+
+    expect(codexConfig).toContain('base_url = "https://example.com/v1"')
+    expect(codexConfig).not.toContain('/v1/v1')
+
+    await clickClientTab(wrapper, 'keys.useKeyModal.cliTabs.opencode')
+    const openCodeConfig = wrapper.find('pre code').text()
+    expect(openCodeConfig).toContain('"baseURL": "https://example.com/v1"')
+    expect(openCodeConfig).not.toContain('/v1/v1')
+
+    await clickClientTab(wrapper, 'keys.useKeyModal.cliTabs.claudeCode')
+    const settings = JSON.parse(wrapper.findAll('pre code')[1].text()) as { env: Record<string, string> }
+    expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://example.com')
   })
 
   it('keeps the WebSocket template on its validated GPT-5.4 boundary', async () => {
@@ -100,6 +167,7 @@ describe('UseKeyModal', () => {
 
     expect(config).toContain('model = "gpt-5.4"')
     expect(config).toContain('review_model = "gpt-5.4"')
+    expect(config).toContain('model_provider = "handsfree"')
     expect(config).toContain('supports_websockets = true')
     expect(config).not.toContain('gpt-5.6')
   })
@@ -142,7 +210,7 @@ describe('UseKeyModal', () => {
     const settingsContent = wrapper.findAll('pre code')[1].text()
     const settings = JSON.parse(settingsContent) as { env: Record<string, string> }
     expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-local-"quoted"\\tail')
-    expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://example.com/v1?label="quoted"')
+    expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://example.com?label="quoted"')
   })
 
   it('shell-encodes hostile OpenAI Claude Code values and fails closed for CMD', async () => {
