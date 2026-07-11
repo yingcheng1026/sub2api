@@ -80,9 +80,17 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	setOpsRequestContext(c, reqModel, reqStream, body)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
+	if status, errType, message, reject := genericGatewayGPT56AccessError(reqModel); reject {
+		h.responsesErrorResponse(c, status, errType, message)
+		return
+	}
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	if status, errType, message, reject := genericGatewayGPT56MappedAccessError(channelMapping); reject {
+		h.responsesErrorResponse(c, status, errType, message)
+		return
+	}
 
 	// Claude Code only restriction:
 	// /v1/responses is never a Claude Code endpoint.
@@ -194,6 +202,13 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		}
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+		if status, errType, message, reject := genericGatewayGPT56AccountAccessError(account, reqModel, channelMapping); reject {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			h.responsesErrorResponse(c, status, errType, message)
+			return
+		}
 
 		// 4. Acquire account concurrency slot
 		accountReleaseFunc := selection.ReleaseFunc

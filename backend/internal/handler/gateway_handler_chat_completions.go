@@ -80,9 +80,17 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 	setOpsRequestContext(c, reqModel, reqStream, body)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
+	if status, errType, message, reject := genericGatewayGPT56AccessError(reqModel); reject {
+		h.chatCompletionsErrorResponse(c, status, errType, message)
+		return
+	}
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	if status, errType, message, reject := genericGatewayGPT56MappedAccessError(channelMapping); reject {
+		h.chatCompletionsErrorResponse(c, status, errType, message)
+		return
+	}
 
 	// Claude Code only restriction
 	if apiKey.Group != nil && apiKey.Group.ClaudeCodeOnly {
@@ -189,6 +197,13 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+		if status, errType, message, reject := genericGatewayGPT56AccountAccessError(account, reqModel, channelMapping); reject {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			h.chatCompletionsErrorResponse(c, status, errType, message)
+			return
+		}
 
 		// 4. Acquire account concurrency slot
 		accountReleaseFunc := selection.ReleaseFunc
