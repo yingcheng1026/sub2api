@@ -177,10 +177,11 @@ const activeTab = ref<string>('unix')
 const activeClientTab = ref<string>('claude')
 
 const OPENAI_CLAUDE_CODE_MODELS = {
-  ANTHROPIC_MODEL: 'gpt-5.5',
-  ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-5.5',
-  ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-5.4',
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-5.4-mini',
+  ANTHROPIC_MODEL: 'gpt-5.6-terra',
+  ANTHROPIC_CUSTOM_MODEL_OPTION: 'gpt-5.6-terra',
+  ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-5.6-sol',
+  ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-5.6-terra',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-5.6-luna',
   CLAUDE_CODE_SUBAGENT_MODEL: 'inherit'
 } as const
 
@@ -607,8 +608,8 @@ function generateOpenAIFiles(baseUrl: string, apiKey: string): FileConfig[] {
 
   // config.toml content
   const configContent = `model_provider = "OpenAI"
-model = "gpt-5.4"
-review_model = "gpt-5.4"
+model = "gpt-5.6-terra"
+review_model = "gpt-5.6-terra"
 model_reasoning_effort = "xhigh"
 disable_response_storage = true
 network_access = "enabled"
@@ -693,6 +694,39 @@ function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: strin
     }
   }
   const openaiModels = {
+    'gpt-5.6-sol': {
+      name: 'GPT-5.6 Sol',
+      options: { store: false },
+      variants: {
+        none: {},
+        low: {},
+        medium: {},
+        high: {},
+        xhigh: {}
+      }
+    },
+    'gpt-5.6-terra': {
+      name: 'GPT-5.6 Terra',
+      options: { store: false },
+      variants: {
+        none: {},
+        low: {},
+        medium: {},
+        high: {},
+        xhigh: {}
+      }
+    },
+    'gpt-5.6-luna': {
+      name: 'GPT-5.6 Luna',
+      options: { store: false },
+      variants: {
+        none: {},
+        low: {},
+        medium: {},
+        high: {},
+        xhigh: {}
+      }
+    },
     'gpt-5.2': {
       name: 'GPT-5.2',
       limit: {

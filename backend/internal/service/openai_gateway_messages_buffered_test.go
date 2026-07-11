@@ -18,7 +18,6 @@ import (
 
 func TestForwardAsAnthropic_BufferedMissingTerminalWithTextSynthesizesResponse(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -65,7 +64,6 @@ func TestForwardAsAnthropic_BufferedMissingTerminalWithTextSynthesizesResponse(t
 
 func TestHandleChatBufferedStreamingResponse_MissingTerminalWithTextSynthesizesResponse(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -98,7 +96,6 @@ func TestHandleChatBufferedStreamingResponse_MissingTerminalWithTextSynthesizesR
 
 func TestForwardAsAnthropic_BufferedMissingTerminalWithToolCallReturnsFailover(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -148,7 +145,6 @@ func TestForwardAsAnthropic_BufferedMissingTerminalWithToolCallReturnsFailover(t
 
 func TestForwardAsAnthropic_StreamingEmptyTerminalReturnsFailoverBeforeOutput(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -195,7 +191,6 @@ func TestForwardAsAnthropic_StreamingEmptyTerminalReturnsFailoverBeforeOutput(t 
 
 func TestForwardAsAnthropic_BufferedEmptyTerminalReturnsFailoverBeforeOutput(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)

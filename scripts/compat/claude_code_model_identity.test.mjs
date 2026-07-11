@@ -27,7 +27,7 @@ test('Claude Code local Messages model identity', async (t) => {
     {
       name: 'opus role alias resolves from template environment',
       cliModel: 'opus',
-      expectedRequestModel: 'gpt-5.5',
+      expectedRequestModel: 'gpt-5.6-sol',
       authMode: 'token',
       useBare: false,
       isolatedCwd: true,
@@ -36,7 +36,7 @@ test('Claude Code local Messages model identity', async (t) => {
     {
       name: 'sonnet role alias resolves from environment',
       cliModel: 'sonnet',
-      expectedRequestModel: 'gpt-5.4',
+      expectedRequestModel: 'gpt-5.6-terra',
       authMode: 'token',
       useBare: false,
       isolatedCwd: true,
@@ -45,7 +45,7 @@ test('Claude Code local Messages model identity', async (t) => {
     {
       name: 'haiku role alias resolves from template environment',
       cliModel: 'haiku',
-      expectedRequestModel: 'gpt-5.4-mini',
+      expectedRequestModel: 'gpt-5.6-luna',
       authMode: 'token',
       useBare: false,
       isolatedCwd: true,
@@ -77,7 +77,7 @@ test('Claude Code local Messages model identity', async (t) => {
   await t.test('exact UI template uses bearer auth and ANTHROPIC_MODEL without --model', async () => {
     const modelCase = {
       name: 'exact UI template environment',
-      expectedRequestModel: 'gpt-5.5',
+      expectedRequestModel: 'gpt-5.6-terra',
       authMode: 'token',
       useBare: false,
       isolatedCwd: true,
@@ -87,13 +87,13 @@ test('Claude Code local Messages model identity', async (t) => {
     assert.equal(run.requests.length, 1, `expected one /v1/messages request, got ${run.requests.length}`)
     assert.equal(run.invocationArgs.includes('--model'), false, 'exact UI template case must not pass --model')
     assert.equal(run.invocationArgs.includes('--safe-mode'), true, 'exact UI template case must use safe-mode')
-    assert.equal(run.requests[0].model, 'gpt-5.5')
+    assert.equal(run.requests[0].model, 'gpt-5.6-terra')
     assertLocalBearerRequests(run.requestMetadata)
     assert.equal(run.result.type, 'result')
     assert.equal(run.result.subtype, 'success')
     assert.equal(run.result.is_error, false)
-    assert.match(run.result.result, /local-model:gpt-5\.5/)
-    assertModelUsageIdentity(run.result.modelUsage, 'gpt-5.5', true)
+    assert.match(run.result.result, /local-model:gpt-5\.6-terra/)
+    assertModelUsageIdentity(run.result.modelUsage, 'gpt-5.6-terra', true)
   })
 
   await t.test('read-only tool round trip keeps model identity', async () => {
@@ -124,10 +124,10 @@ test('Claude Code local Messages model identity', async (t) => {
     assertModelUsageIdentity(run.result.modelUsage, 'gpt-5.6-terra')
   })
 
-  await t.test('CLAUDE_CODE_SUBAGENT_MODEL=inherit keeps a custom read-only agent on gpt-5.5', async () => {
+  await t.test('CLAUDE_CODE_SUBAGENT_MODEL=inherit keeps a custom read-only agent on gpt-5.6-terra', async () => {
     const modelCase = {
       name: 'custom subagent inheritance',
-      expectedRequestModel: 'gpt-5.5',
+      expectedRequestModel: 'gpt-5.6-terra',
       authMode: 'token',
       useBare: false,
       useSafeMode: false,
@@ -143,7 +143,7 @@ test('Claude Code local Messages model identity', async (t) => {
     assert.match(run.agentToolSchema.name, /^(Agent|Task)$/)
     assert.equal(run.invocationArgs.includes('--model'), false, 'subagent inheritance case must not pass --model')
     assert.equal(run.requests.length, 5, `expected async main/agent request round trip, got ${run.requests.length}: ${JSON.stringify(summarizeRequests(run.requests))}`)
-    assert.deepEqual(run.requests.map((request) => request.model), Array(5).fill('gpt-5.5'))
+    assert.deepEqual(run.requests.map((request) => request.model), Array(5).fill('gpt-5.6-terra'))
     assertLocalBearerRequests(run.requestMetadata)
 
     const childToolResultRequest = run.requests.find((request) => findToolResult(request, 'toolu_local_subagent_read'))
@@ -160,12 +160,12 @@ test('Claude Code local Messages model identity', async (t) => {
     assert.ok(mainToolResultRequest, 'main agent did not receive the custom Agent/Task tool_result')
     assert.ok(completionNotificationRequest, 'main agent did not receive the custom subagent completion notification')
     assert.ok(
-      requestContainsText(completionNotificationRequest, 'subagent-read-complete:gpt-5.5'),
+      requestContainsText(completionNotificationRequest, 'subagent-read-complete:gpt-5.6-terra'),
       'custom subagent completion notification did not carry the mocked read result',
     )
     assert.equal(run.result.subtype, 'success')
-    assert.match(run.result.result, /local-subagent-launched:gpt-5\.5/)
-    assertModelUsageIdentity(run.result.modelUsage, 'gpt-5.5', true)
+    assert.match(run.result.result, /local-subagent-launched:gpt-5\.6-terra/)
+    assertModelUsageIdentity(run.result.modelUsage, 'gpt-5.6-terra', true)
   })
 })
 
@@ -494,10 +494,11 @@ function assertModelUsageIdentity(modelUsage, expectedModel, required = false) {
 
 function nativeGPTTemplateEnv() {
   return {
-    ANTHROPIC_MODEL: 'gpt-5.5',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-5.5',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-5.4',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-5.4-mini',
+    ANTHROPIC_MODEL: 'gpt-5.6-terra',
+    ANTHROPIC_CUSTOM_MODEL_OPTION: 'gpt-5.6-terra',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-5.6-sol',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-5.6-terra',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-5.6-luna',
     CLAUDE_CODE_SUBAGENT_MODEL: 'inherit',
   }
 }

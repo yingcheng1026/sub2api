@@ -54,15 +54,16 @@ const clickShellTab = async (wrapper: ReturnType<typeof mount>, label: string) =
 }
 
 const nativeModelAssignments = {
-  ANTHROPIC_MODEL: 'gpt-5.5',
-  ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-5.5',
-  ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-5.4',
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-5.4-mini',
+  ANTHROPIC_MODEL: 'gpt-5.6-terra',
+  ANTHROPIC_CUSTOM_MODEL_OPTION: 'gpt-5.6-terra',
+  ANTHROPIC_DEFAULT_OPUS_MODEL: 'gpt-5.6-sol',
+  ANTHROPIC_DEFAULT_SONNET_MODEL: 'gpt-5.6-terra',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'gpt-5.6-luna',
   CLAUDE_CODE_SUBAGENT_MODEL: 'inherit'
 }
 
 describe('UseKeyModal', () => {
-  it('renders GPT-5.4 mini entry in OpenCode config', async () => {
+  it('renders exact GPT-5.6 tiers in OpenCode config', async () => {
     const wrapper = mountModal('openai')
 
     const opencodeTab = wrapper.findAll('button').find((button) =>
@@ -76,7 +77,31 @@ describe('UseKeyModal', () => {
     const codeBlock = wrapper.find('pre code')
     expect(codeBlock.exists()).toBe(true)
     expect(codeBlock.text()).toContain('"name": "GPT-5.4 Mini"')
+    expect(codeBlock.text()).toContain('"name": "GPT-5.6 Sol"')
+    expect(codeBlock.text()).toContain('"name": "GPT-5.6 Terra"')
+    expect(codeBlock.text()).toContain('"name": "GPT-5.6 Luna"')
     expect(codeBlock.text()).not.toContain('"name": "GPT-5.4 Nano"')
+  })
+
+  it('uses GPT-5.6 Terra over HTTP Responses in the default Codex config', () => {
+    const wrapper = mountModal('openai')
+    const config = wrapper.findAll('pre code')[0].text()
+
+    expect(config).toContain('model = "gpt-5.6-terra"')
+    expect(config).toContain('review_model = "gpt-5.6-terra"')
+    expect(config).toContain('wire_api = "responses"')
+    expect(config).not.toContain('supports_websockets = true')
+  })
+
+  it('keeps the WebSocket template on its validated GPT-5.4 boundary', async () => {
+    const wrapper = mountModal('openai')
+    await clickClientTab(wrapper, 'keys.useKeyModal.cliTabs.codexCliWs')
+    const config = wrapper.findAll('pre code')[0].text()
+
+    expect(config).toContain('model = "gpt-5.4"')
+    expect(config).toContain('review_model = "gpt-5.4"')
+    expect(config).toContain('supports_websockets = true')
+    expect(config).not.toContain('gpt-5.6')
   })
 
   it.each([
@@ -103,7 +128,7 @@ describe('UseKeyModal', () => {
       expect(settings.env[name]).toBe(model)
     }
     expect(files.join('\n')).not.toMatch(/claude-/i)
-    expect(files.join('\n')).not.toContain('gpt-5.6')
+    expect(files.join('\n')).toContain('gpt-5.6-terra')
   })
 
   it('serializes the OpenAI Claude Code settings file as valid JSON', async () => {
@@ -135,15 +160,17 @@ describe('UseKeyModal', () => {
     const posixQuote = (value: string) => `'${value.replace(/'/g, "'\"'\"'")}'`
     expect(posixTerminal).toContain(`export ANTHROPIC_BASE_URL=${posixQuote(hostileBaseUrl)}`)
     expect(posixTerminal).toContain(`export ANTHROPIC_AUTH_TOKEN=${posixQuote(hostileApiKey)}`)
-    expect(() => execFileSync('/bin/sh', ['-eu', '-c', `${posixTerminal}
+    if (process.platform !== 'win32') {
+      expect(() => execFileSync('/bin/sh', ['-eu', '-c', `${posixTerminal}
 test "$ANTHROPIC_BASE_URL" = "$EXPECTED_BASE_URL"
 test "$ANTHROPIC_AUTH_TOKEN" = "$EXPECTED_AUTH_TOKEN"`], {
-      env: {
-        ...process.env,
-        EXPECTED_BASE_URL: hostileBaseUrl,
-        EXPECTED_AUTH_TOKEN: hostileApiKey
-      }
-    })).not.toThrow()
+        env: {
+          ...process.env,
+          EXPECTED_BASE_URL: hostileBaseUrl,
+          EXPECTED_AUTH_TOKEN: hostileApiKey
+        }
+      })).not.toThrow()
+    }
 
     await clickShellTab(wrapper, 'PowerShell')
     const powerShellTerminal = wrapper.findAll('pre code')[0].text()

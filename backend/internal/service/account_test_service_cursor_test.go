@@ -27,7 +27,6 @@ func (r *cursorAccountTestRepo) GetByID(_ context.Context, id int64) (*Account, 
 }
 
 func TestAccountTestService_CursorUsesSidecarAccountRef(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	t.Setenv("CURSOR_SIDECAR_URL", "")
 	t.Setenv("CURSOR_SIDECAR_API_KEY", "")
 	t.Setenv("CURSOR_REQUEST_TIMEOUT_SECONDS", "")
@@ -114,7 +113,6 @@ func TestNormalizeCursorTestModelHonorsCursorMapping(t *testing.T) {
 }
 
 func TestAccountTestService_CursorRequiresSidecarConfigured(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	t.Setenv("CURSOR_SIDECAR_URL", "")
 	t.Setenv("CURSOR_SIDECAR_API_KEY", "")
 	t.Setenv("CURSOR_REQUEST_TIMEOUT_SECONDS", "")

@@ -10,6 +10,50 @@ permissions:
   contents: read
 
 jobs:
+  repository-secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - name: Test tracked-file secret scanner
+        run: python3 -m unittest tools.test_secret_scan
+      - name: Scan tracked files
+        run: make secret-scan
+      - name: Scan current repository tree with gitleaks
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            -w /repo \
+            zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            dir --redact --no-banner /repo
+      - name: Scan commits introduced by this event
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CURRENT_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            exit 0
+          elif [ "$EVENT_NAME" = "pull_request" ] && [ -n "$BASE_SHA" ]; then
+            RANGE="$BASE_SHA..$CURRENT_SHA"
+          elif [ -n "$BEFORE_SHA" ] && ! printf '%s' "$BEFORE_SHA" | grep -Eq '^0+$'; then
+            RANGE="$BEFORE_SHA..$CURRENT_SHA"
+          elif [ -n "$DEFAULT_BRANCH" ]; then
+            git fetch --no-tags origin "$DEFAULT_BRANCH"
+            BASE_SHA="$(git merge-base "$CURRENT_SHA" "origin/$DEFAULT_BRANCH")"
+            RANGE="$BASE_SHA..$CURRENT_SHA"
+          else
+            RANGE="$CURRENT_SHA^..$CURRENT_SHA"
+          fi
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            -w /repo \
+            zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git --redact --no-banner --log-opts="$RANGE" /repo
+
   backend-security:
     runs-on: ubuntu-latest
     timeout-minutes: 15

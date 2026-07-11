@@ -187,7 +187,6 @@ func TestPricingEvidenceHashCanonicalAndSensitive(t *testing.T) {
 }
 
 func TestForwardWithOptionsUnpriceablePreflightNeverCallsUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"custom-unpriceable","stream":false,"input":"hello"}`)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -216,7 +215,6 @@ func TestForwardWithOptionsUnpriceablePreflightNeverCallsUpstream(t *testing.T) 
 }
 
 func TestOpenAISharedHTTPDispatchUnpriceablePreflightNeverCallsUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name         string

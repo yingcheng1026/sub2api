@@ -15,7 +15,6 @@ import (
 )
 
 func TestOpenAIGatewayService_Forward_CompactOnlyModelMappingOverridesOAuthUpstreamModel(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -54,7 +53,6 @@ func TestOpenAIGatewayService_Forward_CompactOnlyModelMappingOverridesOAuthUpstr
 }
 
 func TestOpenAIGatewayService_Forward_NonCompactRequestIgnoresCompactOnlyModelMapping(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -93,7 +91,6 @@ func TestOpenAIGatewayService_Forward_NonCompactRequestIgnoresCompactOnlyModelMa
 }
 
 func TestOpenAIGatewayService_OAuthPassthrough_CompactOnlyModelMappingOverridesUpstreamModel(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -135,7 +132,6 @@ func TestOpenAIGatewayService_OAuthPassthrough_CompactOnlyModelMappingOverridesU
 }
 
 func TestOpenAIGatewayService_Forward_CompactGPT56UnsafeMappingFailsBeforeUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -170,7 +166,6 @@ func TestOpenAIGatewayService_Forward_CompactGPT56UnsafeMappingFailsBeforeUpstre
 }
 
 func TestOpenAIGatewayService_Forward_LegacyMappingToGPT56WithoutEntitlementFailsBeforeUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -204,7 +199,6 @@ func TestOpenAIGatewayService_Forward_LegacyMappingToGPT56WithoutEntitlementFail
 }
 
 func TestOpenAIGatewayService_Forward_CompactLegacyMappingToGPT56WithoutEntitlementFailsBeforeUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -239,7 +233,6 @@ func TestOpenAIGatewayService_Forward_CompactLegacyMappingToGPT56WithoutEntitlem
 }
 
 func TestOpenAIGatewayService_Passthrough_CompactGPT56UnsafeMappingFailsBeforeUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"testing/fstest"
 
@@ -204,6 +205,10 @@ func TestApplyMigrationsFS_TransactionalMigration(t *testing.T) {
 		WithArgs("001_add_col.sql").
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectBegin()
+	mock.ExpectExec("SET LOCAL lock_timeout = '5s'").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET LOCAL statement_timeout = '10min'").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("ALTER TABLE t ADD COLUMN name TEXT").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("INSERT INTO schema_migrations \\(filename, checksum\\) VALUES \\(\\$1, \\$2\\)").
@@ -223,6 +228,45 @@ func TestApplyMigrationsFS_TransactionalMigration(t *testing.T) {
 	err = applyMigrationsFS(context.Background(), db, fsys)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestApplyMigrationsFS_TransactionalTimeoutSetupFailureRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		failStatement   string
+		expectLockSetup bool
+	}{
+		{name: "lock timeout", failStatement: "SET LOCAL lock_timeout = '5s'"},
+		{name: "statement timeout", failStatement: "SET LOCAL statement_timeout = '10min'", expectLockSetup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+
+			prepareMigrationsBootstrapExpectations(mock)
+			mock.ExpectQuery("SELECT checksum FROM schema_migrations WHERE filename = \\$1").
+				WithArgs("001_add_col.sql").
+				WillReturnError(sql.ErrNoRows)
+			mock.ExpectBegin()
+			if tc.expectLockSetup {
+				mock.ExpectExec("SET LOCAL lock_timeout = '5s'").
+					WillReturnResult(sqlmock.NewResult(0, 0))
+			}
+			mock.ExpectExec(tc.failStatement).WillReturnError(errors.New("injected timeout setup failure"))
+			mock.ExpectRollback()
+			mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
+				WithArgs(migrationsAdvisoryLockID).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+
+			fsys := fstest.MapFS{
+				"001_add_col.sql": &fstest.MapFile{Data: []byte("ALTER TABLE t ADD COLUMN name TEXT;")},
+			}
+			err = applyMigrationsFS(context.Background(), db, fsys)
+			require.ErrorContains(t, err, "timeout for migration")
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func prepareMigrationsBootstrapExpectations(mock sqlmock.Sqlmock) {

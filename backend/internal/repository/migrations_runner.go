@@ -241,6 +241,14 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 		if err != nil {
 			return fmt.Errorf("begin migration %s: %w", name, err)
 		}
+		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '5s'"); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("set lock timeout for migration %s: %w", name, err)
+		}
+		if _, err := tx.ExecContext(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("set statement timeout for migration %s: %w", name, err)
+		}
 
 		// 执行迁移 SQL
 		if _, err := tx.ExecContext(ctx, content); err != nil {

@@ -18,7 +18,6 @@ import (
 
 func TestForwardAsAnthropic_ModelIdentityMatrix(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name           string
