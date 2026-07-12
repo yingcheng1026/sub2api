@@ -625,8 +625,8 @@ export default {
     chatOpening: '打开中',
     chatModels: {
       gpt55: '默认推荐，综合体验最好',
-      claudeOpus47: '适合复杂推理和长文写作',
-      claudeSonnet46: '适合日常工作，稳定均衡',
+      claudeOpus47: '兼容别名；使用记录与计费显示实际 GPT',
+      claudeSonnet46: '兼容别名；使用记录与计费显示实际 GPT',
       gemini31Pro: '适合长内容和多模态任务',
       gpt54Mini: '速度快，成本更低'
     },

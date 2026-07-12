@@ -15,17 +15,17 @@ export const chatModelChoices: ChatModelChoice[] = [
     taglineKey: 'dashboard.chatModels.gpt55'
   },
   {
-    label: 'Claude Opus 4.7',
+    label: 'Legacy alias · Claude Opus 4.7',
     model: 'claude-opus-4-7',
     provider: 'openai',
-    tagline: 'Deep reasoning and long writing',
+    tagline: 'Compatibility alias; usage and billing show the actual GPT model',
     taglineKey: 'dashboard.chatModels.claudeOpus47'
   },
   {
-    label: 'Claude Sonnet 4.6',
+    label: 'Legacy alias · Claude Sonnet 4.6',
     model: 'claude-sonnet-4-6',
     provider: 'openai',
-    tagline: 'Balanced daily work',
+    tagline: 'Compatibility alias; usage and billing show the actual GPT model',
     taglineKey: 'dashboard.chatModels.claudeSonnet46'
   },
   {

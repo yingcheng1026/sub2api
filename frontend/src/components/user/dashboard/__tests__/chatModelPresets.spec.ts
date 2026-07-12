@@ -25,6 +25,24 @@ describe('chat model presets', () => {
     )
   })
 
+  it('does not advertise group-gated GPT-5.6 tiers in the generic quick chat', () => {
+    const models = chatModelChoices
+      .map((choice) => choice.model)
+      .filter((model) => model.startsWith('gpt-5.6'))
+
+    expect(models).toEqual([])
+  })
+
+  it('marks Claude-to-GPT model names as legacy compatibility aliases', () => {
+    const legacyAliases = chatModelChoices.filter((choice) => choice.model.startsWith('claude-'))
+
+    expect(legacyAliases.length).toBeGreaterThan(0)
+    for (const choice of legacyAliases) {
+      expect(choice.label).toContain('Legacy alias')
+      expect(choice.tagline).toContain('actual GPT')
+    }
+  })
+
   it('builds a chat redirect path with the selected model and provider', () => {
     const path = buildChatRedirectPath({
       label: 'Claude Opus 4.7',

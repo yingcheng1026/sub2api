@@ -626,8 +626,8 @@ export default {
     chatOpening: 'Opening',
     chatModels: {
       gpt55: 'Default pick, best overall experience',
-      claudeOpus47: 'For deep reasoning and long writing',
-      claudeSonnet46: 'Stable and balanced for daily work',
+      claudeOpus47: 'Compatibility alias; usage and billing show the actual GPT model',
+      claudeSonnet46: 'Compatibility alias; usage and billing show the actual GPT model',
       gemini31Pro: 'For long content and multimodal tasks',
       gpt54Mini: 'Fast and economical'
     },
