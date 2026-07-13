@@ -20,6 +20,3 @@ export const LIANDONG_CREDITS_TIERS: readonly LiandongCreditsTier[] = [
   { creditsUsd: 100, priceCny: 100, name: '$100 通用余额', url: 'https://pay.ldxp.cn/item/b4nrv0' },
   { creditsUsd: 500, priceCny: 500, name: '$500 通用余额', url: 'https://pay.ldxp.cn/item/o5isg4' }
 ] as const
-
-/** 自定义额度场景的引导联系微信 */
-export const LIANDONG_CUSTOM_WECHAT = 'climb102626'

@@ -1054,7 +1054,7 @@ const revokingSubscription = ref<UserSubscription | null>(null)
 
 const assignForm = reactive({
   user_id: null as number | null,
-  // 'plan' = 额度套餐；'wallet' = 手动钱包额度
+  // 'plan' = 额度档位；'wallet' = 手动钱包额度
   mode: 'plan' as 'plan' | 'wallet',
   plan_id: null as number | null,
   wallet_initial_usd: null as number | null

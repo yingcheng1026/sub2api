@@ -477,7 +477,11 @@ describe('PaymentView WeChat JSAPI flow', () => {
     expect(wrapper.text()).toContain('payment.currentBalance: $321.45')
     expect(wrapper.text()).toContain('链动小铺')
     expect(wrapper.text()).toContain('兑换码')
-    expect(wrapper.text()).toContain('管理员核对微信转账后在后台增加额度')
+    expect(wrapper.text()).toContain('联系管理员或客服')
+    expect(wrapper.text()).toContain('按客服确认的方式完成转账')
+    expect(wrapper.text()).not.toContain('微信号')
+    expect(wrapper.text()).not.toContain('微信转账')
+    expect(wrapper.text()).not.toContain('climb102626')
   })
 
   it('does not present a negative wallet balance as spendable credit', async () => {

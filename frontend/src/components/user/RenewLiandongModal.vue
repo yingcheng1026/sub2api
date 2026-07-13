@@ -64,14 +64,7 @@
       <div class="rounded-lg bg-amber-50 p-3 text-xs dark:bg-amber-900/20">
         <p class="text-amber-800 dark:text-amber-300">
           想要自定义额度(例如 $50、$1000)?这些档位以外
-          <button
-            type="button"
-            class="underline hover:text-amber-900 dark:hover:text-amber-200"
-            @click="copyCustomWechat"
-          >
-            联系管理员微信 <code class="font-mono font-semibold">{{ LIANDONG_CUSTOM_WECHAT }}</code>
-          </button>
-          人工自定义充值，管理员核对转账后在后台入账。
+          请联系管理员或客服人工自定义充值；按客服确认的方式完成转账，管理员核对后在后台入账。
         </p>
       </div>
     </div>
@@ -80,11 +73,7 @@
 
 <script setup lang="ts">
 import Icon from '@/components/icons/Icon.vue'
-import { useAppStore } from '@/stores/app'
-import {
-  LIANDONG_CREDITS_TIERS,
-  LIANDONG_CUSTOM_WECHAT
-} from '@/constants/liandongSku'
+import { LIANDONG_CREDITS_TIERS } from '@/constants/liandongSku'
 defineProps<{
   show: boolean
   /** 可选标题覆盖，默认“选择充值额度” */
@@ -95,15 +84,9 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-const appStore = useAppStore()
-
 function openLiandong(url: string) {
   window.open(url, '_blank', 'noopener')
   emit('close')
 }
 
-function copyCustomWechat() {
-  navigator.clipboard?.writeText(LIANDONG_CUSTOM_WECHAT).catch(() => {})
-  appStore.showSuccess?.(`已复制微信号 ${LIANDONG_CUSTOM_WECHAT}`)
-}
 </script>
