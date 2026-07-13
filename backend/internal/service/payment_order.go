@@ -130,6 +130,9 @@ func (s *PaymentService) validateSubOrder(ctx context.Context, req CreateOrderRe
 	if err != nil || !plan.ForSale {
 		return nil, infraerrors.NotFound("PLAN_NOT_AVAILABLE", "plan not found or not for sale")
 	}
+	if plan.PlanType != PlanTypeCredits {
+		return nil, ErrMonthlyPlansRetired
+	}
 	// v3 单 group 订阅:校验绑定的 group 仍可用
 	// v4 钱包模式 (plan.GroupID == nil):跳过单 group 校验, group 关联走 subscription_plan_groups 表
 	if plan.GroupID != nil {

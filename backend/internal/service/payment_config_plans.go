@@ -189,13 +189,19 @@ func (s *PaymentConfigService) ListPlans(ctx context.Context) ([]*dbent.Subscrip
 }
 
 func (s *PaymentConfigService) ListPlansForSale(ctx context.Context) ([]*dbent.SubscriptionPlan, error) {
-	return s.entClient.SubscriptionPlan.Query().Where(subscriptionplan.ForSaleEQ(true)).Order(subscriptionplan.BySortOrder()).All(ctx)
+	return s.entClient.SubscriptionPlan.Query().Where(
+		subscriptionplan.ForSaleEQ(true),
+		subscriptionplan.PlanTypeEQ(PlanTypeCredits),
+	).Order(subscriptionplan.BySortOrder()).All(ctx)
 }
 
 func (s *PaymentConfigService) CreatePlan(ctx context.Context, req CreatePlanRequest) (*dbent.SubscriptionPlan, error) {
 	planType, err := validatePlanType(req.PlanType)
 	if err != nil {
 		return nil, err
+	}
+	if planType != PlanTypeCredits {
+		return nil, ErrMonthlyPlansRetired
 	}
 	if err := validatePlanRequired(req.Name, req.GroupID, req.WalletQuotaUSD, planType, req.Price, req.ValidityDays, req.ValidityUnit, req.OriginalPrice); err != nil {
 		return nil, err
@@ -267,6 +273,24 @@ func (s *PaymentConfigService) UpdatePlan(ctx context.Context, id int64, req Upd
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	existing, err := tx.SubscriptionPlan.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	nextPlanType, err := validatePlanType(existing.PlanType)
+	if err != nil {
+		return nil, err
+	}
+	if req.PlanType != nil {
+		nextPlanType, err = validatePlanType(*req.PlanType)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if nextPlanType != PlanTypeCredits && req.ForSale != nil && *req.ForSale {
+		return nil, ErrMonthlyPlansRetired
+	}
 
 	u := tx.SubscriptionPlan.UpdateOneID(id)
 	if req.GroupID != nil {

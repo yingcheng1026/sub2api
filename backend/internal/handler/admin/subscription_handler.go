@@ -178,52 +178,32 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 	// Get admin user ID from context
 	adminID := getAdminIDFromContext(c)
 
-	subscription, err := h.subscriptionService.AssignSubscription(c.Request.Context(), assignSubscriptionInputFromRequest(req, adminID))
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
+	executeAdminStrictIdempotentJSON(c, "admin.subscriptions.assign", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		subscription, err := h.subscriptionService.AssignAdminCredits(ctx, assignSubscriptionInputFromRequest(req, adminID))
+		if err != nil {
+			return nil, err
+		}
 
-	// Trigger affiliate rebate for the invitee's first admin-assigned subscription.
-	// Non-blocking: a rebate failure must never roll back a successful assignment.
-	if h.affiliateService != nil {
-		if baseAmount := adminAssignBaseAmount(subscription); baseAmount > 0 {
-			// 差异化返利：余额卡 10% / 月卡及其它 0%（与兑换码口径一致，月卡不给佣金）。
-			override := service.AffiliateRebateOverrideForAdminAssign(req.PlanID)
-			if _, rebateErr := h.affiliateService.AccrueInviteRebateForOrderWithOverride(c.Request.Context(), subscription.UserID, baseAmount, override, nil); rebateErr != nil {
-				slog.Warn("admin assign: affiliate rebate failed", "userID", subscription.UserID, "subscriptionID", subscription.ID, "err", rebateErr)
+		// Keep affiliate accrual inside the same idempotency boundary so a
+		// successful replay cannot execute either financial side effect twice.
+		if h.affiliateService != nil {
+			if baseAmount := adminAssignBaseAmount(subscription); baseAmount > 0 {
+				// 差异化返利：余额卡 10% / 月卡及其它 0%（与兑换码口径一致，月卡不给佣金）。
+				override := service.AffiliateRebateOverrideForAdminAssign(req.PlanID)
+				if _, rebateErr := h.affiliateService.AccrueInviteRebateForOrderWithOverride(ctx, subscription.UserID, baseAmount, override, nil); rebateErr != nil {
+					slog.Warn("admin assign: affiliate rebate failed", "userID", subscription.UserID, "subscriptionID", subscription.ID, "err", rebateErr)
+				}
 			}
 		}
-	}
 
-	response.Success(c, dto.UserSubscriptionFromServiceAdmin(subscription))
+		return dto.UserSubscriptionFromServiceAdmin(subscription), nil
+	})
 }
 
 // BulkAssign handles bulk assigning subscriptions to multiple users
 // POST /api/v1/admin/subscriptions/bulk-assign
 func (h *SubscriptionHandler) BulkAssign(c *gin.Context) {
-	var req BulkAssignSubscriptionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
-	}
-
-	// Get admin user ID from context
-	adminID := getAdminIDFromContext(c)
-
-	result, err := h.subscriptionService.BulkAssignSubscription(c.Request.Context(), &service.BulkAssignSubscriptionInput{
-		UserIDs:      req.UserIDs,
-		GroupID:      req.GroupID,
-		ValidityDays: req.ValidityDays,
-		AssignedBy:   adminID,
-		Notes:        req.Notes,
-	})
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	response.Success(c, dto.BulkAssignResultFromService(result))
+	response.ErrorFrom(c, service.ErrMonthlyPlansRetired)
 }
 
 // Extend handles adjusting a subscription (extend or shorten)

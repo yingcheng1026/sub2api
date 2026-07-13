@@ -71,7 +71,7 @@ func TestPaymentConfigServiceCreateWalletPlanWithPlanGroupIDs(t *testing.T) {
 		ProductName:    "轻量正式版",
 		ForSale:        true,
 		SortOrder:      15,
-		PlanType:       PlanTypeSubscription,
+		PlanType:       PlanTypeCredits,
 		WalletQuotaUSD: &walletQuota,
 		PlanGroupIDs:   []int64{g3.ID, g1.ID, g1.ID},
 	})
@@ -97,7 +97,7 @@ func TestPaymentConfigServiceUpdatePlanGroupIDs(t *testing.T) {
 		ValidityDays:   30,
 		ValidityUnit:   "days",
 		ForSale:        true,
-		PlanType:       PlanTypeSubscription,
+		PlanType:       PlanTypeCredits,
 		WalletQuotaUSD: &walletQuota,
 		PlanGroupIDs:   []int64{g1.ID, g3.ID},
 	})
@@ -107,6 +107,63 @@ func TestPaymentConfigServiceUpdatePlanGroupIDs(t *testing.T) {
 	updated, err := svc.UpdatePlan(ctx, plan.ID, UpdatePlanRequest{PlanGroupIDs: &nextIDs})
 	require.NoError(t, err)
 	require.Equal(t, []int64{g1.ID, g24.ID}, NewSubscriptionPlanResponse(updated).PlanGroupIDs)
+}
+
+func TestPaymentConfigServiceRejectsNewMonthlyPlans(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	svc := &PaymentConfigService{entClient: client}
+
+	group := createPlanCoverageGroup(t, ctx, client, "retired-monthly")
+	_, err := svc.CreatePlan(ctx, CreatePlanRequest{
+		Name:         "retired monthly",
+		GroupID:      &group.ID,
+		Price:        20,
+		ValidityDays: 30,
+		ValidityUnit: "days",
+		ForSale:      true,
+		PlanType:     PlanTypeSubscription,
+	})
+	require.Error(t, err)
+	require.Equal(t, "MONTHLY_PLANS_RETIRED", infraerrors.Reason(err))
+}
+
+func TestPaymentConfigServiceListPlansForSaleReturnsCreditsOnly(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	svc := &PaymentConfigService{entClient: client}
+	group := createPlanCoverageGroup(t, ctx, client, "legacy-monthly-group")
+
+	legacy, err := client.SubscriptionPlan.Create().
+		SetName("legacy monthly sale plan").
+		SetGroupID(group.ID).
+		SetPlanType(PlanTypeSubscription).
+		SetPrice(20).
+		SetValidityDays(30).
+		SetForSale(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	walletQuota := 100.0
+	credits, err := client.SubscriptionPlan.Create().
+		SetName("credits sale plan").
+		SetPlanType(PlanTypeCredits).
+		SetWalletQuotaUsd(walletQuota).
+		SetPrice(100).
+		SetValidityDays(1).
+		SetForSale(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	plans, err := svc.ListPlansForSale(ctx)
+	require.NoError(t, err)
+	require.Len(t, plans, 1)
+	require.Equal(t, credits.ID, plans[0].ID)
+
+	paymentSvc := &PaymentService{configService: svc}
+	_, err = paymentSvc.validateSubOrder(ctx, CreateOrderRequest{PlanID: legacy.ID})
+	require.Error(t, err)
+	require.Equal(t, "MONTHLY_PLANS_RETIRED", infraerrors.Reason(err))
 }
 
 func createPlanCoverageGroup(t *testing.T, ctx context.Context, client *dbent.Client, name string) *Group {

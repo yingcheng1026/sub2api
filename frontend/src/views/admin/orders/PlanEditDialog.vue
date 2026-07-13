@@ -6,35 +6,10 @@
           <label class="input-label">{{ t('payment.admin.planName') }} <span class="text-red-500">*</span></label>
           <input v-model="planForm.name" type="text" class="input" required />
         </div>
-        <div v-if="!isWalletPlan">
-          <label class="input-label">{{ t('payment.admin.group') }} <span class="text-red-500">*</span></label>
-          <Select v-model="planForm.group_id" :options="groupOptions" :placeholder="t('payment.admin.selectGroup')" class="w-full">
-            <template #selected="{ option }">
-              <span v-if="option?.platform" :class="platformTextClass(String(option.platform))">{{ option.label }}</span>
-              <span v-else>{{ option?.label || t('payment.admin.selectGroup') }}</span>
-            </template>
-            <template #option="{ option, selected }">
-              <span class="flex-1 truncate text-left" :class="option.platform ? platformTextClass(String(option.platform)) : ''">{{ option.label }}</span>
-              <Icon v-if="selected" name="check" size="sm" class="text-primary-500" :stroke-width="2" />
-            </template>
-          </Select>
-        </div>
-        <div v-else>
+        <div>
           <label class="input-label">{{ t('payment.admin.walletQuotaUsd') }} <span class="text-red-500">*</span></label>
           <input v-model.number="planForm.wallet_quota_usd" type="number" step="0.01" min="0.01" class="input" />
           <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.walletQuotaHint') }}</p>
-        </div>
-      </div>
-
-      <!-- Group Info Preview -->
-      <div v-if="selectedGroupInfo" class="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-dark-600 dark:bg-dark-800">
-        <div class="mb-2 flex items-center gap-2">
-          <GroupBadge :name="selectedGroupInfo.name" :platform="selectedGroupInfo.platform" :rate-multiplier="selectedGroupInfo.rate_multiplier" />
-        </div>
-        <div class="grid grid-cols-2 gap-2 text-xs">
-          <div><span class="text-gray-500">{{ t('payment.admin.dailyLimit') }}:</span> <span class="ml-1 font-medium text-gray-700 dark:text-gray-300">{{ selectedGroupInfo.daily_limit_usd != null ? '$' + selectedGroupInfo.daily_limit_usd : t('payment.admin.unlimited') }}</span></div>
-          <div><span class="text-gray-500">{{ t('payment.admin.weeklyLimit') }}:</span> <span class="ml-1 font-medium text-gray-700 dark:text-gray-300">{{ selectedGroupInfo.weekly_limit_usd != null ? '$' + selectedGroupInfo.weekly_limit_usd : t('payment.admin.unlimited') }}</span></div>
-          <div><span class="text-gray-500">{{ t('payment.admin.monthlyLimit') }}:</span> <span class="ml-1 font-medium text-gray-700 dark:text-gray-300">{{ selectedGroupInfo.monthly_limit_usd != null ? '$' + selectedGroupInfo.monthly_limit_usd : t('payment.admin.unlimited') }}</span></div>
         </div>
       </div>
 
@@ -48,17 +23,8 @@
         <div><label class="input-label">{{ t('payment.admin.price') }} <span class="text-red-500">*</span></label><input v-model.number="planForm.price" type="number" step="0.01" min="0.01" class="input" required /></div>
       </div>
       <div class="grid grid-cols-2 gap-4">
-        <div v-if="!isWalletPlan">
-          <label class="input-label">{{ t('payment.admin.walletQuotaUsd') }}</label>
-          <input v-model.number="planForm.wallet_quota_usd" type="number" step="0.01" min="0" class="input" :placeholder="t('payment.admin.walletQuotaPlaceholder')" />
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.walletQuotaHint') }}</p>
-        </div>
         <div><label class="input-label">{{ t('payment.admin.originalPrice') }}</label><input v-model.number="planForm.original_price" type="number" step="0.01" min="0" class="input" /></div>
         <div><label class="input-label">{{ t('payment.admin.sortOrder') }}</label><input v-model.number="planForm.sort_order" type="number" min="0" class="input" /></div>
-      </div>
-      <div class="grid grid-cols-2 gap-4" v-if="planForm.plan_type !== 'credits'">
-        <div><label class="input-label">{{ t('payment.admin.validityDays') }} <span class="text-red-500">*</span></label><input v-model.number="planForm.validity_days" type="number" min="1" class="input" required /></div>
-        <div><label class="input-label">{{ t('payment.admin.validityUnit') }} <span class="text-red-500">*</span></label><Select v-model="planForm.validity_unit" :options="validityUnitOptions" /></div>
       </div>
       <div>
         <label class="input-label">{{ t('payment.admin.features') }}</label>
@@ -123,9 +89,7 @@ import type { SubscriptionPlan } from '@/types/payment'
 import type { AdminGroup } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
-import Icon from '@/components/icons/Icon.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
-import { platformTextClass } from '@/utils/platformColors'
 
 const props = defineProps<{
   show: boolean
@@ -144,46 +108,22 @@ const appStore = useAppStore()
 const saving = ref(false)
 const planForm = reactive({
   name: '',
-  group_id: null as number | null,
   description: '',
   price: 0,
   original_price: 0,
-  validity_days: 30,
-  validity_unit: 'days',
   sort_order: 0,
   for_sale: true,
-  plan_type: 'subscription' as 'subscription' | 'credits',
+  plan_type: 'credits' as 'subscription' | 'credits',
   wallet_quota_usd: null as number | null,
   plan_group_ids: [] as number[],
 })
 const planFeaturesText = ref('')
 
-const validityUnitOptions = computed(() => [
-  { value: 'days', label: t('payment.admin.days') },
-  { value: 'weeks', label: t('payment.admin.weeks') },
-  { value: 'months', label: t('payment.admin.months') },
-])
-
 const planTypeOptions = computed(() => [
-  { value: 'subscription', label: t('payment.admin.planTypeSubscription') },
   { value: 'credits', label: t('payment.admin.planTypeCredits') },
 ])
 
-const planTypeHint = computed(() =>
-  planForm.plan_type === 'credits'
-    ? t('payment.admin.planTypeCreditsHint')
-    : t('payment.admin.planTypeSubscriptionHint'),
-)
-
-const groupOptions = computed(() =>
-  props.groups
-    .filter(g => g.subscription_type === 'subscription')
-    .map(g => ({
-      value: g.id,
-      label: `${g.name} — ${g.platform} (${g.rate_multiplier}x)`,
-      platform: g.platform,
-    })),
-)
+const planTypeHint = computed(() => t('payment.admin.planTypeCreditsHint'))
 
 const coverageGroupOptions = computed(() =>
   props.groups
@@ -194,34 +134,24 @@ const coverageGroupOptions = computed(() =>
     })),
 )
 
-const isWalletPlan = computed(() => Number(planForm.wallet_quota_usd || 0) > 0)
-
-const selectedGroupInfo = computed(() => {
-  if (!planForm.group_id) return null
-  return props.groups.find(g => g.id === planForm.group_id) || null
-})
-
 // Reset form when dialog opens
 watch(() => props.show, (visible) => {
   if (!visible) return
   if (props.plan) {
     Object.assign(planForm, {
       name: props.plan.name,
-      group_id: props.plan.group_id,
       description: props.plan.description,
       price: props.plan.price,
       original_price: props.plan.original_price || 0,
-      validity_days: props.plan.validity_days,
-      validity_unit: props.plan.validity_unit || 'days',
       sort_order: props.plan.sort_order || 0,
       for_sale: props.plan.for_sale,
-      plan_type: props.plan.plan_type || 'subscription',
+      plan_type: props.plan.plan_type || 'credits',
       wallet_quota_usd: props.plan.wallet_quota_usd ?? null,
       plan_group_ids: [...(props.plan.plan_group_ids || [])],
     })
     planFeaturesText.value = (props.plan.features || []).join('\n')
   } else {
-    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true, plan_type: 'subscription', wallet_quota_usd: null, plan_group_ids: [] })
+    Object.assign(planForm, { name: '', description: '', price: 0, original_price: 0, sort_order: 0, for_sale: true, plan_type: 'credits', wallet_quota_usd: null, plan_group_ids: [] })
     planFeaturesText.value = ''
   }
 })
@@ -230,19 +160,18 @@ watch(() => props.show, (visible) => {
 function buildPlanPayload() {
   const features = planFeaturesText.value.split('\n').map(f => f.trim()).filter(Boolean).join('\n')
   // 额度卡永久有效，后端 expires_at = MaxExpiresAt（2099）；validity_days 字段仍写一个
-  // 远大于普通月卡的占位（36500 ≈ 100 年），让后端 NOT NULL CHECK 通过。
-  const isCredits = planForm.plan_type === 'credits'
+  // 使用 36500 天占位，让后端 NOT NULL CHECK 通过；实际到账按长期额度处理。
   const walletQuota = Number(planForm.wallet_quota_usd || 0)
   return {
     name: planForm.name,
-    group_id: walletQuota > 0 ? null : planForm.group_id,
+    group_id: null,
     wallet_quota_usd: walletQuota > 0 ? walletQuota : undefined,
     plan_group_ids: planForm.plan_group_ids,
     description: planForm.description,
     price: planForm.price,
     original_price: planForm.original_price || 0,
-    validity_days: isCredits ? 36500 : planForm.validity_days,
-    validity_unit: isCredits ? 'days' : planForm.validity_unit,
+    validity_days: 36500,
+    validity_unit: 'days',
     sort_order: planForm.sort_order,
     for_sale: planForm.for_sale,
     features,
@@ -251,24 +180,12 @@ function buildPlanPayload() {
 }
 
 async function handleSavePlan() {
-  if (!isWalletPlan.value && !planForm.group_id) {
-    appStore.showError(t('payment.admin.groupRequired'))
-    return
-  }
-  if (isWalletPlan.value && Number(planForm.wallet_quota_usd || 0) <= 0) {
+  if (planForm.plan_type === 'credits' && Number(planForm.wallet_quota_usd || 0) <= 0) {
     appStore.showError(t('payment.admin.walletQuotaRequired'))
-    return
-  }
-  if (isWalletPlan.value && planForm.plan_type === 'subscription' && !planForm.plan_group_ids.length) {
-    appStore.showError(t('payment.admin.coveredGroupsRequired'))
     return
   }
   if (!planForm.price || planForm.price <= 0) {
     appStore.showError(t('payment.admin.priceRequired'))
-    return
-  }
-  if (planForm.plan_type !== 'credits' && (!planForm.validity_days || planForm.validity_days < 1)) {
-    appStore.showError(t('payment.admin.validityDaysRequired'))
     return
   }
   saving.value = true

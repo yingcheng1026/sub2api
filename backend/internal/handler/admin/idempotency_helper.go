@@ -36,6 +36,18 @@ func executeAdminIdempotent(
 		}
 		return &service.IdempotencyExecuteResult{Data: data}, nil
 	}
+	return executeAdminIdempotentWithCoordinator(c, coordinator, scope, payload, ttl, c.GetHeader("Idempotency-Key"), execute)
+}
+
+func executeAdminIdempotentWithCoordinator(
+	c *gin.Context,
+	coordinator *service.IdempotencyCoordinator,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	idempotencyKey string,
+	execute func(context.Context) (any, error),
+) (*service.IdempotencyExecuteResult, error) {
 
 	actorScope := "admin:0"
 	if subject, ok := middleware2.GetAuthSubjectFromContext(c); ok {
@@ -47,7 +59,7 @@ func executeAdminIdempotent(
 		ActorScope:     actorScope,
 		Method:         c.Request.Method,
 		Route:          c.FullPath(),
-		IdempotencyKey: c.GetHeader("Idempotency-Key"),
+		IdempotencyKey: idempotencyKey,
 		Payload:        payload,
 		RequireKey:     true,
 		TTL:            ttl,
@@ -62,6 +74,36 @@ func executeAdminIdempotentJSON(
 	execute func(context.Context) (any, error),
 ) {
 	executeAdminIdempotentJSONWithMode(c, scope, payload, ttl, idempotencyStoreUnavailableFailClose, execute)
+}
+
+// executeAdminStrictIdempotentJSON protects financial writes. Unlike the
+// global observe-only path, it requires both a valid key and an available
+// coordinator before the business mutation can run.
+func executeAdminStrictIdempotentJSON(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	execute func(context.Context) (any, error),
+) {
+	key, err := service.NormalizeIdempotencyKey(c.GetHeader("Idempotency-Key"))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if key == "" {
+		response.ErrorFrom(c, service.ErrIdempotencyKeyRequired)
+		return
+	}
+	coordinator := service.DefaultIdempotencyCoordinator()
+	if coordinator == nil {
+		service.RecordIdempotencyStoreUnavailable(c.FullPath(), scope, "coordinator_nil")
+		response.ErrorFrom(c, service.ErrIdempotencyStoreUnavail)
+		return
+	}
+
+	result, err := executeAdminIdempotentWithCoordinator(c, coordinator, scope, payload, ttl, key, execute)
+	writeAdminIdempotentJSONResult(c, scope, idempotencyStoreUnavailableFailClose, execute, result, err)
 }
 
 func executeAdminIdempotentJSONFailOpenOnStoreUnavailable(
@@ -83,6 +125,17 @@ func executeAdminIdempotentJSONWithMode(
 	execute func(context.Context) (any, error),
 ) {
 	result, err := executeAdminIdempotent(c, scope, payload, ttl, execute)
+	writeAdminIdempotentJSONResult(c, scope, mode, execute, result, err)
+}
+
+func writeAdminIdempotentJSONResult(
+	c *gin.Context,
+	scope string,
+	mode idempotencyStoreUnavailableMode,
+	execute func(context.Context) (any, error),
+	result *service.IdempotencyExecuteResult,
+	err error,
+) {
 	if err != nil {
 		if infraerrors.Code(err) == infraerrors.Code(service.ErrIdempotencyStoreUnavail) {
 			strategy := "fail_close"

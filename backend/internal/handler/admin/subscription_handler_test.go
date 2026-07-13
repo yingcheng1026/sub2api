@@ -1,9 +1,13 @@
 package admin
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,4 +38,43 @@ func TestAssignSubscriptionInputFromRequestKeepsPlanModeForPlanIDOnly(t *testing
 	require.Same(t, &planID, input.PlanID)
 	require.Empty(t, input.PlanType)
 	require.Nil(t, input.WalletInitialUSD)
+}
+
+func TestAssignSubscriptionRejectsMissingIdempotencyKeyBeforeFinancialWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.SetDefaultIdempotencyCoordinator(nil)
+	handler := &SubscriptionHandler{}
+	router := gin.New()
+	router.POST("/admin/subscriptions/assign", handler.Assign)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/subscriptions/assign",
+		bytes.NewBufferString(`{"user_id":173,"wallet_initial_usd":50}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAssignSubscriptionFailsClosedWithoutIdempotencyCoordinator(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.SetDefaultIdempotencyCoordinator(nil)
+	handler := &SubscriptionHandler{}
+	router := gin.New()
+	router.POST("/admin/subscriptions/assign", handler.Assign)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/subscriptions/assign",
+		bytes.NewBufferString(`{"user_id":173,"wallet_initial_usd":50}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "admin-assign-handler-test")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }

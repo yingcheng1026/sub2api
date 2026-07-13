@@ -283,3 +283,121 @@ func TestExecuteAdminIdempotentJSONConcurrentRetryOnlyOneSideEffect(t *testing.T
 	require.Equal(t, "true", headers3.Get("X-Idempotency-Replayed"))
 	require.Equal(t, int32(1), executed.Load())
 }
+
+func TestExecuteAdminStrictIdempotentJSONRejectsMissingKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newMemoryIdempotencyRepoStub()
+	service.SetDefaultIdempotencyCoordinator(service.NewIdempotencyCoordinator(repo, service.DefaultIdempotencyConfig()))
+	t.Cleanup(func() {
+		service.SetDefaultIdempotencyCoordinator(nil)
+	})
+
+	var executed int
+	router := gin.New()
+	router.POST("/strict-idempotent", func(c *gin.Context) {
+		executeAdminStrictIdempotentJSON(c, "admin.test.strict", map[string]any{"a": 1}, time.Minute, func(ctx context.Context) (any, error) {
+			executed++
+			return gin.H{"ok": true}, nil
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/strict-idempotent", bytes.NewBufferString(`{"a":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, 0, executed)
+}
+
+func TestExecuteAdminStrictIdempotentJSONFailsClosedWithoutCoordinator(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.SetDefaultIdempotencyCoordinator(nil)
+
+	var executed int
+	router := gin.New()
+	router.POST("/strict-idempotent", func(c *gin.Context) {
+		executeAdminStrictIdempotentJSON(c, "admin.test.strict", map[string]any{"a": 1}, time.Minute, func(ctx context.Context) (any, error) {
+			executed++
+			return gin.H{"ok": true}, nil
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/strict-idempotent", bytes.NewBufferString(`{"a":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "strict-key-1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, 0, executed)
+}
+
+func TestExecuteAdminStrictIdempotentJSONReplaysSameKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newMemoryIdempotencyRepoStub()
+	service.SetDefaultIdempotencyCoordinator(service.NewIdempotencyCoordinator(repo, service.DefaultIdempotencyConfig()))
+	t.Cleanup(func() {
+		service.SetDefaultIdempotencyCoordinator(nil)
+	})
+
+	var executed int
+	router := gin.New()
+	router.POST("/strict-idempotent", func(c *gin.Context) {
+		executeAdminStrictIdempotentJSON(c, "admin.test.strict", map[string]any{"a": 1}, time.Minute, func(ctx context.Context) (any, error) {
+			executed++
+			return gin.H{"ok": true}, nil
+		})
+	})
+
+	call := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/strict-idempotent", bytes.NewBufferString(`{"a":1}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "strict-key-2")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := call()
+	second := call()
+
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, "true", second.Header().Get("X-Idempotency-Replayed"))
+	require.Equal(t, 1, executed)
+}
+
+func TestExecuteAdminStrictIdempotentJSONRejectsSameKeyWithDifferentPayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newMemoryIdempotencyRepoStub()
+	service.SetDefaultIdempotencyCoordinator(service.NewIdempotencyCoordinator(repo, service.DefaultIdempotencyConfig()))
+	t.Cleanup(func() {
+		service.SetDefaultIdempotencyCoordinator(nil)
+	})
+
+	var executed int
+	router := gin.New()
+	router.POST("/strict-idempotent", func(c *gin.Context) {
+		payload := map[string]string{"amount": c.Query("amount")}
+		executeAdminStrictIdempotentJSON(c, "admin.test.strict", payload, time.Minute, func(ctx context.Context) (any, error) {
+			executed++
+			return gin.H{"ok": true}, nil
+		})
+	})
+
+	call := func(amount string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/strict-idempotent?amount="+amount, nil)
+		req.Header.Set("Idempotency-Key", "strict-key-3")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := call("50")
+	second := call("500")
+
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
+	require.Equal(t, 1, executed)
+}

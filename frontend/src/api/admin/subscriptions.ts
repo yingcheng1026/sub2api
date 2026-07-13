@@ -13,6 +13,23 @@ import type {
   PaginatedResponse
 } from '@/types'
 
+const ASSIGN_IDEMPOTENCY_KEY_PREFIX = 'admin-subscription-assign-'
+let assignmentKeySequence = 0
+
+/** Create one key per logical admin assignment and reuse it for retries. */
+export function createSubscriptionAssignmentIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    return `${ASSIGN_IDEMPOTENCY_KEY_PREFIX}${cryptoApi.randomUUID()}`
+  }
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    const words = cryptoApi.getRandomValues(new Uint32Array(4))
+    return `${ASSIGN_IDEMPOTENCY_KEY_PREFIX}${Array.from(words, (word) => word.toString(16).padStart(8, '0')).join('')}`
+  }
+  assignmentKeySequence += 1
+  return `${ASSIGN_IDEMPOTENCY_KEY_PREFIX}${Date.now().toString(36)}-${assignmentKeySequence.toString(36)}`
+}
+
 /**
  * List all subscriptions with pagination
  * @param page - Page number (default: 1)
@@ -74,8 +91,17 @@ export async function getProgress(id: number): Promise<SubscriptionProgress> {
  * @param request - Assignment request
  * @returns Created subscription
  */
-export async function assign(request: AssignSubscriptionRequest): Promise<UserSubscription> {
-  const { data } = await apiClient.post<UserSubscription>('/admin/subscriptions/assign', request)
+export async function assign(
+  request: AssignSubscriptionRequest,
+  idempotencyKey: string
+): Promise<UserSubscription> {
+  const key = idempotencyKey.trim()
+  if (!key) {
+    throw new Error('Idempotency-Key is required for admin credit assignments')
+  }
+  const { data } = await apiClient.post<UserSubscription>('/admin/subscriptions/assign', request, {
+    headers: { 'Idempotency-Key': key }
+  })
   return data
 }
 
@@ -181,6 +207,7 @@ export async function listByUser(
 }
 
 export const subscriptionsAPI = {
+  createSubscriptionAssignmentIdempotencyKey,
   list,
   getById,
   getProgress,

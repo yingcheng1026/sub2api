@@ -1,5 +1,5 @@
 <template>
-  <!-- 续费 / 充值 SKU 选择 modal — 链动小铺直跳,绕开内置 ZPay -->
+  <!-- 额度充值 SKU 选择 modal — 链动小铺直跳 -->
   <div
     v-if="show"
     data-hfc-liandong-renew-modal="wallet"
@@ -13,10 +13,10 @@
       <div class="mb-4 flex items-start justify-between">
         <div>
           <h2 class="text-lg font-bold text-gray-900 dark:text-white">
-            {{ title || '选择续费 / 充值档位' }}
+            {{ title || '选择充值额度' }}
           </h2>
           <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
-            点击下方任一档位将跳转链动小铺下单,完成后余额自动到账；如订单发放兑换码,请在 30 天内兑换。
+            点击档位后跳转链动小铺下单；付款后获取兑换码，再回个人中心完成兑换。
           </p>
           <p class="mt-1 text-xs text-amber-600 dark:text-amber-300">
             兑换码从订单发放时开始 30 天有效,未发放库存码不计时。
@@ -31,54 +31,9 @@
         </button>
       </div>
 
-      <!-- 月卡 5 档 -->
       <div class="mb-5">
         <h3 class="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
-          月卡(固定 USD 配额,30 天有效)
-        </h3>
-        <div class="grid gap-2 sm:grid-cols-2">
-          <button
-            v-for="tier in LIANDONG_MONTHLY_TIERS"
-            :key="tier.url"
-            type="button"
-            class="flex items-center justify-between rounded-lg border p-3 text-left transition-all hover:border-primary-500 hover:bg-primary-50 dark:border-dark-600 dark:hover:bg-dark-700"
-            :class="recommendedTier?.url === tier.url
-              ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/20'
-              : 'border-gray-200 bg-white dark:bg-dark-800'"
-            @click="openLiandong(tier.url)"
-          >
-            <div>
-              <div class="flex items-center gap-2">
-                <span class="font-semibold text-gray-900 dark:text-white">{{ tier.name }}</span>
-                <span
-                  v-if="tier.purchaseBadge"
-                  class="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200 dark:bg-amber-400/10 dark:text-amber-200 dark:ring-amber-300/20"
-                >{{ tier.purchaseBadge }}</span>
-                <span
-                  v-if="recommendedTier?.url === tier.url"
-                  class="rounded bg-primary-500 px-1.5 py-0.5 text-[10px] font-medium text-white"
-                >同档推荐</span>
-              </div>
-              <div class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
-                ${{ tier.quotaUsd.toLocaleString() }} USD 月配额
-              </div>
-              <div class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
-                每日 cap {{ formatDailyCap(tier.dailyCapUsd) }}
-              </div>
-            </div>
-            <div class="text-right">
-              <div class="text-base font-bold text-primary-600 dark:text-primary-400">
-                ¥{{ tier.priceCny }}
-              </div>
-            </div>
-          </button>
-        </div>
-      </div>
-
-      <!-- 通用余额 3 档 -->
-      <div class="mb-5">
-        <h3 class="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
-          通用余额(永久有效,按渠道倍率消耗)
+          通用余额（按实际调用扣费）
         </h3>
         <div class="grid gap-2 sm:grid-cols-3">
           <button
@@ -98,6 +53,13 @@
         </div>
       </div>
 
+      <a
+        href="/redeem"
+        class="mb-5 block rounded-lg border border-primary-200 bg-primary-50 p-3 text-center text-sm font-semibold text-primary-700 hover:bg-primary-100 dark:border-primary-800 dark:bg-primary-900/20 dark:text-primary-300"
+      >
+        已拿到兑换码？去个人中心兑换
+      </a>
+
       <!-- 自定义额度兜底 -->
       <div class="rounded-lg bg-amber-50 p-3 text-xs dark:bg-amber-900/20">
         <p class="text-amber-800 dark:text-amber-300">
@@ -109,7 +71,7 @@
           >
             联系管理员微信 <code class="font-mono font-semibold">{{ LIANDONG_CUSTOM_WECHAT }}</code>
           </button>
-          手动开单。
+          人工自定义充值，管理员核对转账后在后台入账。
         </p>
       </div>
     </div>
@@ -117,21 +79,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores/app'
-import type { UserSubscription } from '@/types'
 import {
-  LIANDONG_MONTHLY_TIERS,
   LIANDONG_CREDITS_TIERS,
-  LIANDONG_CUSTOM_WECHAT,
-  matchMonthlyTier
+  LIANDONG_CUSTOM_WECHAT
 } from '@/constants/liandongSku'
-const props = defineProps<{
+defineProps<{
   show: boolean
-  /** 可选,用于按 group.monthly_limit_usd 高亮"同档推荐"月卡;Dashboard 充值场景可不传 */
-  subscription?: UserSubscription | null
-  /** 可选标题覆盖,默认"选择续费 / 充值档位" */
+  /** 可选标题覆盖，默认“选择充值额度” */
   title?: string
 }>()
 
@@ -141,19 +97,9 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 
-const recommendedTier = computed(() => {
-  const sub = props.subscription
-  if (!sub) return null
-  return matchMonthlyTier(sub.group?.monthly_limit_usd)
-})
-
 function openLiandong(url: string) {
   window.open(url, '_blank', 'noopener')
   emit('close')
-}
-
-function formatDailyCap(capUsd: number | null): string {
-  return capUsd == null ? '不限' : `$${capUsd.toLocaleString()}`
 }
 
 function copyCustomWechat() {

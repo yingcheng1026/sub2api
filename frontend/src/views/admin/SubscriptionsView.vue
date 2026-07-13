@@ -549,18 +549,6 @@
             </button>
             <button
               type="button"
-              @click="assignForm.mode = 'group'"
-              :class="[
-                'px-4 py-2 text-sm font-medium transition-colors border-l border-gray-300 dark:border-gray-600',
-                assignForm.mode === 'group'
-                  ? 'bg-primary-600 text-white'
-                  : 'bg-white text-gray-700 hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
-              ]"
-            >
-              {{ t('admin.subscriptions.form.modeGroup') }}
-            </button>
-            <button
-              type="button"
               @click="assignForm.mode = 'wallet'"
               :class="[
                 'px-4 py-2 text-sm font-medium transition-colors border-l border-gray-300 dark:border-gray-600',
@@ -621,36 +609,6 @@
           </Select>
           <p class="input-hint">{{ t('admin.subscriptions.planHint') }}</p>
         </div>
-        <div v-else-if="assignForm.mode === 'group'">
-          <label class="input-label">{{ t('admin.subscriptions.form.group') }}</label>
-          <Select
-            v-model="assignForm.group_id"
-            :options="subscriptionGroupOptions"
-            :placeholder="t('admin.subscriptions.selectGroup')"
-          >
-            <template #selected="{ option }">
-              <GroupBadge
-                v-if="option"
-                :name="(option as unknown as GroupOption).label"
-                :platform="(option as unknown as GroupOption).platform"
-                :subscription-type="(option as unknown as GroupOption).subscriptionType"
-                :rate-multiplier="(option as unknown as GroupOption).rate"
-              />
-              <span v-else class="text-gray-400">{{ t('admin.subscriptions.selectGroup') }}</span>
-            </template>
-            <template #option="{ option, selected }">
-              <GroupOptionItem
-                :name="(option as unknown as GroupOption).label"
-                :platform="(option as unknown as GroupOption).platform"
-                :subscription-type="(option as unknown as GroupOption).subscriptionType"
-                :rate-multiplier="(option as unknown as GroupOption).rate"
-                :description="(option as unknown as GroupOption).description"
-                :selected="selected"
-              />
-            </template>
-          </Select>
-          <p class="input-hint">{{ t('admin.subscriptions.groupHint') }}</p>
-        </div>
         <div v-else>
           <label class="input-label">{{ t('admin.subscriptions.form.walletInitialUSD') }}</label>
           <input
@@ -662,11 +620,6 @@
             placeholder="1500.00"
           />
           <p class="input-hint">{{ t('admin.subscriptions.form.walletInitialHint') }}</p>
-        </div>
-        <div v-if="assignForm.mode === 'group'">
-          <label class="input-label">{{ t('admin.subscriptions.form.validityDays') }}</label>
-          <input v-model.number="assignForm.validity_days" type="number" min="1" class="input" />
-          <p class="input-hint">{{ t('admin.subscriptions.validityHint') }}</p>
         </div>
       </form>
       <template #footer>
@@ -886,8 +839,6 @@ import { adminAPI } from '@/api/admin'
 import type {
   UserSubscription,
   Group,
-  GroupPlatform,
-  SubscriptionType,
   AssignSubscriptionRequest
 } from '@/types'
 import type { SimpleUser } from '@/api/admin/usage'
@@ -904,7 +855,6 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Select from '@/components/common/Select.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
-import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
 import Icon from '@/components/icons/Icon.vue'
 import {
   ANTI_OVERWRITE_WALLET_MARKER,
@@ -916,15 +866,6 @@ import {
 
 const { t } = useI18n()
 const appStore = useAppStore()
-
-interface GroupOption {
-  value: number
-  label: string
-  description: string | null
-  platform: GroupPlatform
-  subscriptionType: SubscriptionType
-  rate: number
-}
 
 interface PlanOption {
   value: number
@@ -1113,11 +1054,9 @@ const revokingSubscription = ref<UserSubscription | null>(null)
 
 const assignForm = reactive({
   user_id: null as number | null,
-  // 'plan' = 业务套餐档位；'group' = v3 单 group 订阅；'wallet' = 手动钱包额度
-  mode: 'plan' as 'plan' | 'group' | 'wallet',
+  // 'plan' = 额度套餐；'wallet' = 手动钱包额度
+  mode: 'plan' as 'plan' | 'wallet',
   plan_id: null as number | null,
-  group_id: null as number | null,
-  validity_days: 30,
   wallet_initial_usd: null as number | null
 })
 
@@ -1141,20 +1080,6 @@ const platformFilterOptions = computed(() => [
   { value: 'cursor', label: 'Cursor' }
 ])
 
-// Group options for assign (only subscription type groups)
-const subscriptionGroupOptions = computed(() =>
-  groups.value
-    .filter((g) => g.subscription_type === 'subscription' && g.status === 'active')
-    .map((g) => ({
-      value: g.id,
-      label: g.name,
-      description: g.description,
-      platform: g.platform,
-      subscriptionType: g.subscription_type,
-      rate: g.rate_multiplier
-    }))
-)
-
 const formatMoney = (value: number, currency: 'CNY' | 'USD') =>
   new Intl.NumberFormat(currency === 'CNY' ? 'zh-CN' : 'en-US', {
     style: 'currency',
@@ -1167,7 +1092,7 @@ const planDisplayName = (plan: SubscriptionPlan) =>
 
 const isAssignableSubscriptionPlan = (plan: SubscriptionPlan) =>
   plan.for_sale &&
-  plan.plan_type !== 'credits' &&
+  plan.plan_type === 'credits' &&
   Number(plan.wallet_quota_usd || 0) > 0 &&
   Number(plan.validity_days || 0) > 0
 
@@ -1244,7 +1169,7 @@ const loadSubscriptionPlans = async () => {
   subscriptionPlansLoading.value = true
   try {
     const response = await adminAPI.payment.getPlans()
-    subscriptionPlans.value = response.data || []
+    subscriptionPlans.value = (response.data || []).filter((plan) => plan.plan_type === 'credits')
   } catch (error) {
     console.error('Error loading subscription plans:', error)
     appStore.showError(t('admin.subscriptions.failedToLoadPlans'))
@@ -1374,14 +1299,26 @@ const closeAssignModal = () => {
   assignForm.user_id = null
   assignForm.mode = 'plan'
   assignForm.plan_id = null
-  assignForm.group_id = null
-  assignForm.validity_days = 30
   assignForm.wallet_initial_usd = null
   // Clear user search state
   selectedUser.value = null
   userSearchKeyword.value = ''
   userSearchResults.value = []
   showUserDropdown.value = false
+  pendingAssignFingerprint = ''
+  pendingAssignIdempotencyKey = ''
+}
+
+let pendingAssignFingerprint = ''
+let pendingAssignIdempotencyKey = ''
+
+const idempotencyKeyForAssignment = (payload: AssignSubscriptionRequest): string => {
+  const fingerprint = JSON.stringify(payload)
+  if (fingerprint !== pendingAssignFingerprint || !pendingAssignIdempotencyKey) {
+    pendingAssignFingerprint = fingerprint
+    pendingAssignIdempotencyKey = adminAPI.subscriptions.createSubscriptionAssignmentIdempotencyKey()
+  }
+  return pendingAssignIdempotencyKey
 }
 
 const handleAssignSubscription = async () => {
@@ -1394,22 +1331,12 @@ const handleAssignSubscription = async () => {
       appStore.showError(t('admin.subscriptions.pleaseSelectPlan'))
       return
     }
-  } else if (assignForm.mode === 'group') {
-    if (!assignForm.group_id) {
-      appStore.showError(t('admin.subscriptions.pleaseSelectGroup'))
-      return
-    }
   } else if (assignForm.mode === 'wallet') {
     if (!assignForm.wallet_initial_usd || assignForm.wallet_initial_usd <= 0) {
       appStore.showError(t('admin.subscriptions.walletInitialRequired'))
       return
     }
   }
-  if (assignForm.mode === 'group' && (!assignForm.validity_days || assignForm.validity_days < 1)) {
-    appStore.showError(t('admin.subscriptions.validityDaysRequired'))
-    return
-  }
-
   submitting.value = true
   try {
     const payload: AssignSubscriptionRequest = {
@@ -1419,11 +1346,8 @@ const handleAssignSubscription = async () => {
       payload.plan_id = assignForm.plan_id ?? undefined
     } else if (assignForm.mode === 'wallet') {
       payload.wallet_initial_usd = assignForm.wallet_initial_usd ?? undefined
-    } else {
-      payload.group_id = assignForm.group_id ?? undefined
-      payload.validity_days = assignForm.validity_days
     }
-    await adminAPI.subscriptions.assign(payload)
+    await adminAPI.subscriptions.assign(payload, idempotencyKeyForAssignment(payload))
     appStore.showSuccess(t('admin.subscriptions.subscriptionAssigned'))
     closeAssignModal()
     loadSubscriptions()

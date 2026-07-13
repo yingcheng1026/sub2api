@@ -162,6 +162,9 @@ func (s *RedeemService) GenerateCodes(ctx context.Context, req GenerateCodesRequ
 	if codeType == "" {
 		codeType = RedeemTypeBalance
 	}
+	if err := validateNewRedeemCodeType(codeType); err != nil {
+		return nil, err
+	}
 
 	// 邀请码类型的 value 设为 0
 	value := req.Value
@@ -205,6 +208,9 @@ func (s *RedeemService) CreateCode(ctx context.Context, code *RedeemCode) error 
 	}
 	if code.Type == "" {
 		code.Type = RedeemTypeBalance
+	}
+	if err := validateNewRedeemCodeType(code.Type); err != nil {
+		return err
 	}
 	if code.Type != RedeemTypeInvitation && code.Value == 0 {
 		return errors.New("value must not be zero")

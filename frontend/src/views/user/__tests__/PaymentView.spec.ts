@@ -19,6 +19,9 @@ const showInfo = vi.hoisted(() => vi.fn())
 const showWarning = vi.hoisted(() => vi.fn())
 const getCheckoutInfo = vi.hoisted(() => vi.fn())
 const bridgeInvoke = vi.hoisted(() => vi.fn())
+const subscriptionState = vi.hoisted(() => ({
+  activeSubscriptions: [] as Array<Record<string, unknown>>,
+}))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -61,7 +64,9 @@ vi.mock('@/stores/payment', () => ({
 
 vi.mock('@/stores/subscriptions', () => ({
   useSubscriptionStore: () => ({
-    activeSubscriptions: [],
+    get activeSubscriptions() {
+      return subscriptionState.activeSubscriptions
+    },
     fetchActiveSubscriptions,
   }),
 }))
@@ -198,6 +203,7 @@ describe('PaymentView WeChat JSAPI flow', () => {
     showWarning.mockReset()
     getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoFixture())
     bridgeInvoke.mockReset()
+    subscriptionState.activeSubscriptions = []
     window.localStorage.clear()
     ;(window as Window & { WeixinJSBridge?: { invoke: typeof bridgeInvoke } }).WeixinJSBridge = {
       invoke: bridgeInvoke,
@@ -412,7 +418,7 @@ describe('PaymentView WeChat JSAPI flow', () => {
     expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toContain('weixin://wxpay/bizpayurl?pr=fallback-native')
   })
 
-  it('opens the Liandong paid-lite SKU directly from the subscription tab', async () => {
+  it('ignores the retired subscription tab and only opens credit top-up SKUs', async () => {
     routeState.query = { tab: 'subscription' }
     getCheckoutInfo.mockResolvedValue(checkoutInfoFixture())
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
@@ -428,23 +434,118 @@ describe('PaymentView WeChat JSAPI flow', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('[data-hfc-purchase-liandong-subscription="monthly"]').exists()).toBe(true)
-    const trialCardText = wrapper.get('[data-hfc-liandong-tier="trial"]').text()
-    expect(trialCardText).toContain('限购一次')
-    expect(trialCardText).toContain('低门槛体验,先试再买')
-    expect(trialCardText).not.toContain('注册送 $15')
-    expect(wrapper.text()).toContain('轻量正式版')
-    expect(wrapper.text()).toContain('$400')
-    expect(wrapper.text()).toContain('$50')
-    expect(wrapper.text()).toContain('$4,500')
-    expect(wrapper.text()).not.toContain('×0')
-    expect(wrapper.text()).not.toContain('无限制')
+    expect(wrapper.find('[data-hfc-purchase-liandong-subscription]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('$30')
+    expect(wrapper.text()).toContain('$100')
+    expect(wrapper.text()).toContain('$500')
+    expect(wrapper.text()).toContain('兑换码')
+    expect(wrapper.text()).not.toContain('月卡')
+    expect(wrapper.text()).not.toContain('自动到账')
 
-    await wrapper.get('[data-hfc-liandong-tier="lite"] button').trigger('click')
+    await wrapper.get('[data-hfc-liandong-credit="100"]').trigger('click')
 
-    expect(openSpy).toHaveBeenCalledWith('https://pay.ldxp.cn/item/neu4dr', '_blank', 'noopener')
+    expect(openSpy).toHaveBeenCalledWith('https://pay.ldxp.cn/item/b4nrv0', '_blank', 'noopener')
     expect(createOrder).not.toHaveBeenCalled()
 
     openSpy.mockRestore()
+  })
+
+  it('shows the wallet balance and the redeem plus manual top-up flow', async () => {
+    routeState.query = {}
+    subscriptionState.activeSubscriptions = [
+      {
+        id: 17,
+        status: 'active',
+        group_id: null,
+        wallet_balance_usd: 321.45,
+        wallet_initial_usd: 500,
+        expires_at: '2099-12-31T23:59:59Z',
+      },
+    ]
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('payment.currentBalance: $321.45')
+    expect(wrapper.text()).toContain('链动小铺')
+    expect(wrapper.text()).toContain('兑换码')
+    expect(wrapper.text()).toContain('管理员核对微信转账后在后台增加额度')
+  })
+
+  it('does not present a negative wallet balance as spendable credit', async () => {
+    routeState.query = {}
+    subscriptionState.activeSubscriptions = [
+      {
+        id: 19,
+        status: 'active',
+        group_id: null,
+        wallet_balance_usd: -25.5,
+        wallet_initial_usd: 500,
+        expires_at: '2099-12-31T23:59:59Z',
+      },
+    ]
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('payment.currentBalance: $0.00')
+    expect(wrapper.text()).toContain('payment.walletDebt')
+    expect(wrapper.text()).not.toContain('$-25.50')
+  })
+
+  it('does not list legacy group-backed entitlements as purchasable plans', async () => {
+    routeState.query = { tab: 'subscription' }
+    subscriptionState.activeSubscriptions = [
+      {
+        id: 17,
+        status: 'active',
+        group_id: null,
+        wallet_balance_usd: 321.45,
+        expires_at: '2099-12-31T23:59:59Z',
+      },
+      {
+        id: 18,
+        status: 'active',
+        group_id: 3,
+        wallet_balance_usd: null,
+        expires_at: '2026-08-12T00:00:00Z',
+        group: {
+          id: 3,
+          name: 'openai-default monthly',
+          platform: 'openai',
+          monthly_limit_usd: 400,
+        },
+      },
+    ]
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-hfc-active-monthly-subscription]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('openai-default monthly')
   })
 })
