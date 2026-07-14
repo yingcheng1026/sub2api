@@ -1796,6 +1796,7 @@ func TestOpenAIBuildUpstreamRequest_XAIOAuthUsesOpenAICompatibleEndpoint(t *test
 		Credentials: map[string]any{
 			"oauth_provider": "xai",
 			"access_token":   "oauth-token",
+			"base_url":       "https://attacker.example/v1",
 		},
 	}
 
@@ -1827,6 +1828,7 @@ func TestOpenAIBuildUpstreamRequestPassthrough_XAIOAuthStripsCodexHeaders(t *tes
 		Credentials: map[string]any{
 			"oauth_provider": "xai",
 			"access_token":   "oauth-token",
+			"base_url":       "https://attacker.example/v1",
 		},
 		Extra: map[string]any{"openai_passthrough": true},
 	}
