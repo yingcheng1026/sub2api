@@ -206,7 +206,7 @@
     <!-- Generate Codes Dialog -->
     <Teleport to="body">
       <div v-if="showGenerateDialog" class="fixed inset-0 z-50 flex items-center justify-center">
-        <div class="fixed inset-0 bg-black/50" @click="showGenerateDialog = false"></div>
+        <div class="fixed inset-0 bg-black/50" @click="closeGenerateDialog"></div>
         <div
           class="relative z-10 w-full max-w-md rounded-xl bg-white p-6 shadow-xl dark:bg-dark-800"
         >
@@ -262,7 +262,7 @@
               />
             </div>
             <div class="flex justify-end gap-3 pt-2">
-              <button type="button" @click="showGenerateDialog = false" class="btn btn-secondary">
+              <button type="button" @click="closeGenerateDialog" class="btn btn-secondary">
                 {{ t('common.cancel') }}
               </button>
               <button type="submit" :disabled="generating" class="btn btn-primary">
@@ -510,6 +510,28 @@ const generateForm = reactive({
   plan_id: null as number | null
 })
 
+let pendingGenerateFingerprint = ''
+let pendingGenerateIdempotencyKey = ''
+
+const resetGenerateIdempotencyState = () => {
+  pendingGenerateFingerprint = ''
+  pendingGenerateIdempotencyKey = ''
+}
+
+const closeGenerateDialog = () => {
+  showGenerateDialog.value = false
+  resetGenerateIdempotencyState()
+}
+
+const idempotencyKeyForGeneration = (payload: Record<string, unknown>): string => {
+  const fingerprint = JSON.stringify(payload)
+  if (fingerprint !== pendingGenerateFingerprint || !pendingGenerateIdempotencyKey) {
+    pendingGenerateFingerprint = fingerprint
+    pendingGenerateIdempotencyKey = adminAPI.redeem.createRedeemGenerationIdempotencyKey()
+  }
+  return pendingGenerateIdempotencyKey
+}
+
 // 监听类型变化，邀请码类型时自动设置 value 为 0
 watch(
   () => generateForm.type,
@@ -608,6 +630,13 @@ const handleGenerateCodes = async () => {
     ? Number(selectedCreditsPlan?.wallet_quota_usd || 0)
     : generateForm.value
 
+  const logicalOperation = {
+    count: generateForm.count,
+    type: generateForm.type,
+    value,
+    plan_id: generateForm.type === 'wallet' ? generateForm.plan_id : null
+  }
+
   generating.value = true
   try {
     const result = await adminAPI.redeem.generate(
@@ -616,9 +645,10 @@ const handleGenerateCodes = async () => {
       value,
       undefined,
       undefined,
-      generateForm.type === 'wallet' ? generateForm.plan_id : undefined
+      generateForm.type === 'wallet' ? generateForm.plan_id : undefined,
+      idempotencyKeyForGeneration(logicalOperation)
     )
-    showGenerateDialog.value = false
+    closeGenerateDialog()
     generatedCodes.value = result
     showResultDialog.value = true
     // 重置表单

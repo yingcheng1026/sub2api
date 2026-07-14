@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -109,7 +110,8 @@ func (h *RedeemHandler) Generate(c *gin.Context) {
 		return
 	}
 
-	executeAdminIdempotentJSON(c, "admin.redeem_codes.generate", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+	const scope = "admin.redeem_codes.generate"
+	execute := func(ctx context.Context) (any, error) {
 		codes, execErr := h.adminService.GenerateRedeemCodes(ctx, &service.GenerateRedeemCodesInput{
 			Count:        req.Count,
 			Type:         req.Type,
@@ -127,7 +129,51 @@ func (h *RedeemHandler) Generate(c *gin.Context) {
 			out = append(out, *dto.RedeemCodeFromServiceAdmin(&codes[i]))
 		}
 		return out, nil
-	})
+	}
+
+	result, err := executeAdminStrictIdempotent(c, scope, req, service.DefaultWriteIdempotencyTTL(), execute)
+	if err == nil && result != nil && result.Replayed {
+		result.Data, err = h.rehydrateGeneratedRedeemCodes(c.Request.Context(), result.Data)
+	}
+	writeAdminIdempotentJSONResult(c, scope, idempotencyStoreUnavailableFailClose, execute, result, err)
+}
+
+// rehydrateGeneratedRedeemCodes loads the authoritative code values by ID on
+// idempotent replay. The generic idempotency store deliberately redacts every
+// JSON field named "code", so replaying its stored body directly would return
+// "***" instead of the purchased redemption code.
+func (h *RedeemHandler) rehydrateGeneratedRedeemCodes(ctx context.Context, stored any) (any, error) {
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		return nil, fmt.Errorf("marshal stored generated redeem codes: %w", err)
+	}
+	var refs []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		return nil, fmt.Errorf("decode stored generated redeem code references: %w", err)
+	}
+	if len(refs) == 0 || len(refs) > 100 {
+		return nil, fmt.Errorf("stored generated redeem code reference count is invalid: %d", len(refs))
+	}
+
+	out := make([]dto.AdminRedeemCode, 0, len(refs))
+	seen := make(map[int64]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref.ID <= 0 {
+			return nil, fmt.Errorf("stored generated redeem code reference has invalid id: %d", ref.ID)
+		}
+		if _, duplicate := seen[ref.ID]; duplicate {
+			return nil, fmt.Errorf("stored generated redeem code reference is duplicated: %d", ref.ID)
+		}
+		seen[ref.ID] = struct{}{}
+		code, getErr := h.adminService.GetRedeemCode(ctx, ref.ID)
+		if getErr != nil {
+			return nil, fmt.Errorf("reload generated redeem code %d: %w", ref.ID, getErr)
+		}
+		out = append(out, *dto.RedeemCodeFromServiceAdmin(code))
+	}
+	return out, nil
 }
 
 // CreateAndRedeem creates a fixed redeem code and redeems it for a target user in one step.

@@ -79,14 +79,7 @@
             <div class="card rounded-lg bg-amber-50 p-4 text-sm dark:bg-amber-900/20">
               <p class="text-amber-800 dark:text-amber-300">
                 想要自定义额度(例如 $50、$1000)?这三档以外
-                <button
-                  type="button"
-                  class="underline hover:text-amber-900 dark:hover:text-amber-200"
-                  @click="copyCustomWechat"
-                >
-                  联系管理员微信 <code class="font-mono font-semibold">{{ LIANDONG_CUSTOM_WECHAT }}</code>
-                </button>
-                人工自定义充值；管理员核对微信转账后在后台增加额度。
+                请联系管理员或客服人工自定义充值；按客服确认的方式完成转账，管理员核对后在后台增加额度。
               </p>
             </div>
           </div>
@@ -124,10 +117,7 @@ import { paymentAPI } from '@/api/payment'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
 import { isMobileDevice } from '@/utils/device'
 import type { SubscriptionPlan, CheckoutInfoResponse, CreateOrderResult, OrderType } from '@/types/payment'
-import {
-  LIANDONG_CREDITS_TIERS,
-  LIANDONG_CUSTOM_WECHAT
-} from '@/constants/liandongSku'
+import { LIANDONG_CREDITS_TIERS } from '@/constants/liandongSku'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { METHOD_ORDER, getPaymentPopupFeatures } from '@/components/payment/providerConfig'
 import {
@@ -163,11 +153,6 @@ const creditsWalletDebtUSD = computed(() => Math.max(0, -creditsWalletRawBalance
 // recharge tab — 直跳链动小铺,不走内置 ZPay
 function openLiandongCredits(url: string) {
   window.open(url, '_blank', 'noopener')
-}
-
-function copyCustomWechat() {
-  navigator.clipboard?.writeText(LIANDONG_CUSTOM_WECHAT).catch(() => {})
-  appStore.showSuccess?.(`已复制微信号 ${LIANDONG_CUSTOM_WECHAT}`)
 }
 
 const loading = ref(true)
