@@ -1129,14 +1129,17 @@ func (a *Account) GetOpenAIBaseURL() string {
 	if !a.IsOpenAI() {
 		return ""
 	}
+	// Official xAI OAuth tokens must never be forwarded to a configurable
+	// third-party base URL. API-key accounts keep supporting compatible
+	// upstream sites through their explicit base_url.
+	if a.IsOpenAIXAIOAuth() {
+		return "https://api.x.ai"
+	}
 	if a.IsOpenAIPlatformAPIAccount() {
 		baseURL := a.GetCredential("base_url")
 		if baseURL != "" {
 			return baseURL
 		}
-	}
-	if a.IsOpenAIXAIOAuth() {
-		return "https://api.x.ai"
 	}
 	return "https://api.openai.com"
 }

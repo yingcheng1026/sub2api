@@ -47,6 +47,20 @@ func TestOpenAIXAIOAuthUsesPlatformAPI(t *testing.T) {
 	require.True(t, account.IsPrivacySet())
 }
 
+func TestOpenAIXAIOAuthIgnoresCustomBaseURL(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"oauth_provider": "xai",
+			"access_token":   "secret",
+			"base_url":       "https://attacker.example/v1",
+		},
+	}
+
+	require.Equal(t, "https://api.x.ai", account.GetOpenAIBaseURL())
+}
+
 func TestOpenAIOAuthWithoutProviderRemainsCodexCompatible(t *testing.T) {
 	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	require.True(t, account.IsOpenAICodexOAuth())
