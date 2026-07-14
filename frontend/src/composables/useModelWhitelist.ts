@@ -141,10 +141,25 @@ const metaModels = [
 
 // xAI Grok
 const xaiModels = [
-  'grok-4', 'grok-4-0709',
-  'grok-3-beta', 'grok-3-mini-beta', 'grok-3-fast-beta',
-  'grok-2', 'grok-2-vision', 'grok-2-image',
-  'grok-beta', 'grok-vision-beta'
+  'grok-3-mini',
+  'grok-3-mini-fast',
+  'grok-4.20-0309-non-reasoning',
+  'grok-4.20-0309-reasoning',
+  'grok-4.20-multi-agent-0309',
+  'grok-4.3',
+  'grok-4.5',
+  'grok-4.5_c',
+  'grok-build-0.1',
+  'grok-composer-2.5-fast'
+]
+
+const xaiOAuthModels = [
+  'grok-4.20-0309-non-reasoning',
+  'grok-4.20-0309-reasoning',
+  'grok-4.20-multi-agent-0309',
+  'grok-4.3',
+  'grok-4.5',
+  'grok-build-0.1'
 ]
 
 // Cohere
@@ -380,6 +395,7 @@ export function getModelsByPlatform(platform: string): string[] {
     case 'mistral': return mistralModels
     case 'meta': return metaModels
     case 'xai': return xaiModels
+    case 'xai_oauth': return xaiOAuthModels
     case 'cohere': return cohereModels
     case 'yi': return yiModels
     case 'moonshot': return moonshotModels
@@ -391,6 +407,14 @@ export function getModelsByPlatform(platform: string): string[] {
     case 'perplexity': return perplexityModels
     default: return claudeModels
   }
+}
+
+export function getOpenAIModelWhitelistPlatform(
+  provider: string,
+  accountCategory: string
+): string {
+  if (provider !== 'xai') return 'openai'
+  return accountCategory === 'oauth-based' ? 'xai_oauth' : 'xai'
 }
 
 // 按平台获取预设映射

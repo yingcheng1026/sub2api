@@ -184,16 +184,50 @@ func (s *OpenAIOAuthServiceSuite) TestRefreshToken_UseProvidedClientID() {
 	require.Equal(s.T(), []string{customClientID}, seenClientIDs)
 }
 
-func (s *OpenAIOAuthServiceSuite) TestNonSuccessStatus_IncludesBody() {
+func (s *OpenAIOAuthServiceSuite) TestRefreshToken_XAIOmitsOpenAIScope() {
+	errCh := make(chan string, 1)
+	s.setupServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			errCh <- "ParseForm failed"
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if r.PostForm.Get("client_id") != openai.XAIClientID {
+			errCh <- "xAI client_id mismatch"
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if r.PostForm.Get("scope") != "" {
+			errCh <- "xAI refresh must omit OpenAI scope"
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"xai-at","refresh_token":"xai-rt","token_type":"bearer","expires_in":3600}`)
+	}))
+
+	resp, err := s.svc.RefreshTokenWithClientID(s.ctx, "xai-rt", "", openai.XAIClientID)
+	require.NoError(s.T(), err)
+	select {
+	case msg := <-errCh:
+		require.Fail(s.T(), msg)
+	default:
+	}
+	require.Equal(s.T(), "xai-at", resp.AccessToken)
+}
+
+func (s *OpenAIOAuthServiceSuite) TestNonSuccessStatus_DoesNotExposeRawBody() {
 	s.setupServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, "bad")
+		_, _ = io.WriteString(w, `{"error":"invalid_grant","access_token":"secret-at","refresh_token":"secret-rt"}`)
 	}))
 
 	_, err := s.svc.ExchangeCode(s.ctx, "code", "ver", openai.DefaultRedirectURI, "", "")
 	require.Error(s.T(), err)
 	require.ErrorContains(s.T(), err, "status 400")
-	require.ErrorContains(s.T(), err, "bad")
+	require.ErrorContains(s.T(), err, "invalid_grant")
+	require.NotContains(s.T(), err.Error(), "secret-at")
+	require.NotContains(s.T(), err.Error(), "secret-rt")
 }
 
 func (s *OpenAIOAuthServiceSuite) TestRequestError_ClosedServer() {

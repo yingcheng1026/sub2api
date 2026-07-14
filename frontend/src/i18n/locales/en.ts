@@ -3234,8 +3234,15 @@ export default {
       apiKeyHint: 'Your Claude Console API Key',
       // OpenAI specific hints
       openai: {
+        providerLabel: 'OpenAI-compatible provider',
+        providerOpenAIDesc: 'OpenAI API or ChatGPT OAuth',
+        providerXAIDesc: 'Grok API upstream or official xAI OAuth',
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
+        xaiBaseUrlHint: 'Use https://api.x.ai for official xAI, or enter an OpenAI-compatible upstream URL',
+        xaiApiKeyHint: 'Your xAI API key or the API key issued by the compatible upstream',
+        xaiOAuthTitle: 'Grok (xAI) Account Authorization',
+        xaiOAuthDesc: 'Official xAI OAuth account; requests continue through the OpenAI-compatible gateway',
         oauthPassthrough: 'Auto passthrough (auth only)',
         oauthPassthroughDesc:
           'When enabled, this OpenAI account uses automatic passthrough: the gateway forwards request/response as-is and only swaps auth, while keeping billing/concurrency/audit and necessary safety filtering.',
@@ -3597,6 +3604,32 @@ export default {
           validateAndCreate: 'Validate & Create Account',
           pleaseEnterRefreshToken: 'Please enter Refresh Token',
           pleaseEnterSessionToken: 'Please enter Session Token'
+        },
+        // xAI / Grok specific
+        xai: {
+          title: 'Grok (xAI) Account Authorization',
+          followSteps: 'Follow these steps to authorize your official xAI account:',
+          step1GenerateUrl: 'Click the button below to generate the xAI authorization URL',
+          generateAuthUrl: 'Generate xAI Auth URL',
+          step2OpenUrl: 'Open the URL in your browser and complete xAI authorization',
+          openUrlDesc: 'Open the authorization URL in a new tab, sign in to xAI, and approve access.',
+          importantNotice:
+            'After authorization, the browser redirects to http://127.0.0.1:56121/callback. The local page may not load; copy the complete URL from the address bar and paste it here.',
+          step3EnterCode: 'Enter Callback URL or Code',
+          authCodeDesc: 'After xAI authorization, copy the complete callback URL (recommended) or only its code value:',
+          authCode: 'Callback URL or Code',
+          authCodePlaceholder:
+            'Option 1: Paste the complete http://127.0.0.1:56121/callback?code=... URL\nOption 2: Paste only the code value',
+          authCodeHint: 'The system automatically extracts code and state from the complete callback URL.',
+          failedToGenerateUrl: 'Failed to generate xAI auth URL',
+          failedToExchangeCode: 'Failed to exchange xAI auth code',
+          failedToValidateRT: 'Failed to validate xAI refresh token',
+          errors: {},
+          refreshTokenAuth: 'Manual xAI RT Input',
+          refreshTokenDesc: 'Enter an existing xAI Refresh Token. The system validates it and creates the OAuth account.',
+          refreshTokenPlaceholder: 'Paste your xAI Refresh Token...',
+          validating: 'Validating...',
+          validateAndCreate: 'Validate & Create Account'
         },
         // Gemini specific
 	        gemini: {

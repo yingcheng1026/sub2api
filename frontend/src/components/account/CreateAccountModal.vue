@@ -107,7 +107,7 @@
                 d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"
               />
             </svg>
-            OpenAI
+            OpenAI / Grok
           </button>
           <button
             type="button"
@@ -308,6 +308,39 @@
 
       <!-- Account Type Selection (OpenAI) -->
       <div v-if="form.platform === 'openai'">
+        <label class="input-label">{{ t('admin.accounts.openai.providerLabel') }}</label>
+        <div class="mb-4 mt-2 grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            @click="openAIProvider = 'openai'"
+            :class="[
+              'rounded-lg border-2 p-3 text-left transition-all',
+              openAIProvider === 'openai'
+                ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
+                : 'border-gray-200 hover:border-green-300 dark:border-dark-600'
+            ]"
+          >
+            <span class="block text-sm font-medium text-gray-900 dark:text-white">OpenAI</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">{{
+              t('admin.accounts.openai.providerOpenAIDesc')
+            }}</span>
+          </button>
+          <button
+            type="button"
+            @click="openAIProvider = 'xai'"
+            :class="[
+              'rounded-lg border-2 p-3 text-left transition-all',
+              openAIProvider === 'xai'
+                ? 'border-sky-500 bg-sky-50 dark:bg-sky-900/20'
+                : 'border-gray-200 hover:border-sky-300 dark:border-dark-600'
+            ]"
+          >
+            <span class="block text-sm font-medium text-gray-900 dark:text-white">Grok (xAI)</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">{{
+              t('admin.accounts.openai.providerXAIDesc')
+            }}</span>
+          </button>
+        </div>
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
         <div class="mt-2 grid grid-cols-2 gap-3" data-tour="account-form-type">
           <button
@@ -332,7 +365,11 @@
             </div>
             <div>
               <span class="block text-sm font-medium text-gray-900 dark:text-white">OAuth</span>
-              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.types.chatgptOauth') }}</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{
+                openAIProvider === 'xai'
+                  ? t('admin.accounts.openai.xaiOAuthDesc')
+                  : t('admin.accounts.types.chatgptOauth')
+              }}</span>
             </div>
           </button>
 
@@ -1364,7 +1401,7 @@
 
             <!-- Whitelist Mode -->
             <div v-if="modelRestrictionMode === 'whitelist'">
-              <ModelWhitelistSelector v-model="allowedModels" :platform="form.platform" />
+              <ModelWhitelistSelector v-model="allowedModels" :platform="modelWhitelistPlatform" />
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
                 <span v-if="allowedModels.length === 0">{{
@@ -2029,7 +2066,7 @@
 
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
-            <ModelWhitelistSelector v-model="allowedModels" :platform="form.platform" />
+            <ModelWhitelistSelector v-model="allowedModels" :platform="modelWhitelistPlatform" />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
               <span v-if="allowedModels.length === 0">{{
@@ -2751,7 +2788,7 @@
 
       <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough） -->
       <div
-        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
+        v-if="form.platform === 'openai' && openAIProvider === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2822,7 +2859,7 @@
 
       <!-- OpenAI OAuth Codex 官方客户端限制开关 -->
       <div
-        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
+        v-if="form.platform === 'openai' && openAIProvider === 'openai' && accountCategory === 'oauth-based'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -3002,10 +3039,11 @@
         :allow-multiple="form.platform === 'anthropic'"
         :show-cookie-option="form.platform === 'anthropic'"
         :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity'"
-        :show-mobile-refresh-token-option="form.platform === 'openai'"
+        :show-mobile-refresh-token-option="form.platform === 'openai' && openAIProvider === 'openai'"
         :show-session-token-option="false"
         :show-access-token-option="false"
         :platform="form.platform"
+        :oauth-provider="form.platform === 'openai' ? openAIProvider : 'openai'"
         :show-project-id="geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
@@ -3339,7 +3377,8 @@ import {
   commonErrorCodes,
   buildModelMappingObject,
   fetchAntigravityDefaultMappings,
-  isValidWildcardPattern
+  isValidWildcardPattern,
+  getOpenAIModelWhitelistPlatform
 } from '@/composables/useModelWhitelist'
 import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
@@ -3399,9 +3438,14 @@ interface OAuthFlowExposed {
 
 const { t } = useI18n()
 const authStore = useAuthStore()
+const openAIProvider = ref<'openai' | 'xai'>('openai')
 
 const oauthStepTitle = computed(() => {
-  if (form.platform === 'openai') return t('admin.accounts.oauth.openai.title')
+  if (form.platform === 'openai') {
+    return openAIProvider.value === 'xai'
+      ? t('admin.accounts.openai.xaiOAuthTitle')
+      : t('admin.accounts.oauth.openai.title')
+  }
   if (form.platform === 'gemini') return t('admin.accounts.oauth.gemini.title')
   if (form.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.title')
   return t('admin.accounts.oauth.title')
@@ -3409,6 +3453,9 @@ const oauthStepTitle = computed(() => {
 
 // Platform-specific hints for API Key type
 const baseUrlHint = computed(() => {
+  if (form.platform === 'openai' && openAIProvider.value === 'xai') {
+    return t('admin.accounts.openai.xaiBaseUrlHint')
+  }
   if (form.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
   if (form.platform === 'kiro') return '生产转发使用后端 kiro.sidecar_url；这里保持默认本地 sidecar 地址即可。'
@@ -3417,6 +3464,9 @@ const baseUrlHint = computed(() => {
 })
 
 const apiKeyHint = computed(() => {
+  if (form.platform === 'openai' && openAIProvider.value === 'xai') {
+    return t('admin.accounts.openai.xaiApiKeyHint')
+  }
   if (form.platform === 'openai') return t('admin.accounts.openai.apiKeyHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.apiKeyHint')
   if (form.platform === 'kiro') return '粘贴通过下方终端命令复制到剪贴板的 json:{...} Kiro 上游凭据。'
@@ -3444,7 +3494,7 @@ const appStore = useAppStore()
 
 // OAuth composables
 const oauth = useAccountOAuth() // For Anthropic OAuth
-const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
+const openaiOAuth = useOpenAIOAuth(() => openAIProvider.value)
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 
@@ -3680,6 +3730,12 @@ const isOpenAIModelRestrictionDisabled = computed(() =>
   form.platform === 'openai' && openaiPassthroughEnabled.value
 )
 
+const modelWhitelistPlatform = computed(() =>
+  form.platform === 'openai'
+    ? getOpenAIModelWhitelistPlatform(openAIProvider.value, accountCategory.value)
+    : form.platform
+)
+
 const mixedChannelWarningMessageText = computed(() => {
   if (mixedChannelWarningDetails.value) {
     return t('admin.accounts.mixedChannelWarning', mixedChannelWarningDetails.value)
@@ -3806,7 +3862,7 @@ watch(
         .catch(() => { webSearchGlobalEnabled.value = false })
       loadQuotaNotifyGlobal()
       // Modal opened - fill related models
-      allowedModels.value = [...getModelsByPlatform(form.platform)]
+      allowedModels.value = [...getModelsByPlatform(modelWhitelistPlatform.value)]
       // Antigravity: 默认使用映射模式并填充默认映射
       if (form.platform === 'antigravity') {
         antigravityModelRestrictionMode.value = 'mapping'
@@ -3865,7 +3921,7 @@ watch(
     // Reset base URL based on platform
     apiKeyBaseUrl.value =
       newPlatform === 'openai'
-        ? 'https://api.openai.com'
+        ? (openAIProvider.value === 'xai' ? 'https://api.x.ai' : 'https://api.openai.com')
         : newPlatform === 'gemini'
           ? 'https://generativelanguage.googleapis.com'
           : newPlatform === 'kiro'
@@ -3940,6 +3996,19 @@ watch(
   }
 )
 
+watch(openAIProvider, (provider) => {
+  if (form.platform !== 'openai') return
+  apiKeyBaseUrl.value = provider === 'xai' ? 'https://api.x.ai' : 'https://api.openai.com'
+  openaiPassthroughEnabled.value = false
+  modelRestrictionMode.value = 'whitelist'
+  allowedModels.value = [...getModelsByPlatform(modelWhitelistPlatform.value)]
+  openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+  openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+  codexCLIOnlyEnabled.value = false
+  openaiOAuth.resetState()
+  oauthFlowRef.value?.reset()
+})
+
 // Gemini AI Studio OAuth availability (requires operator-configured OAuth client)
 watch(
   [accountCategory, () => form.platform],
@@ -3980,10 +4049,10 @@ const handleSelectGeminiOAuthType = (oauthType: 'code_assist' | 'google_one' | '
 
 // Auto-fill related models when switching to whitelist mode or changing platform
 watch(
-  [modelRestrictionMode, () => form.platform],
+  [modelRestrictionMode, () => form.platform, openAIProvider, accountCategory],
   ([newMode]) => {
     if (newMode === 'whitelist') {
-      allowedModels.value = [...getModelsByPlatform(form.platform)]
+      allowedModels.value = [...getModelsByPlatform(modelWhitelistPlatform.value)]
     }
   }
 )
@@ -4304,6 +4373,7 @@ const resetForm = () => {
   form.expires_at = null
   accountCategory.value = 'oauth-based'
   addMethod.value = 'oauth'
+  openAIProvider.value = 'openai'
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
   editQuotaLimit.value = null
@@ -4733,7 +4803,7 @@ const handleSubmit = async () => {
   // Determine default base URL based on platform
   const defaultBaseUrl =
     form.platform === 'openai'
-      ? 'https://api.openai.com'
+      ? (openAIProvider.value === 'xai' ? 'https://api.x.ai' : 'https://api.openai.com')
       : form.platform === 'gemini'
         ? 'https://generativelanguage.googleapis.com'
         : form.platform === 'kiro'
@@ -4744,6 +4814,9 @@ const handleSubmit = async () => {
   const credentials: Record<string, unknown> = {
     base_url: apiKeyBaseUrl.value.trim() || defaultBaseUrl,
     api_key: apiKeyValue.value.trim()
+  }
+  if (form.platform === 'openai' && openAIProvider.value === 'xai') {
+    credentials.openai_compatible_provider = 'xai'
   }
   if (form.platform === 'gemini') {
     credentials.tier_id = geminiTierAIStudio.value
@@ -5042,7 +5115,8 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
         }
 
         // Generate account name; fallback to email if name is empty (ent schema requires NotEmpty)
-        const baseName = form.name || tokenInfo.email || 'OpenAI OAuth Account'
+        const fallbackName = openAIProvider.value === 'xai' ? 'Grok xAI OAuth Account' : 'OpenAI OAuth Account'
+        const baseName = form.name || tokenInfo.email || fallbackName
         const accountName = refreshTokens.length > 1 ? `${baseName} #${i + 1}` : baseName
 
         if (shouldCreateOpenAI) {

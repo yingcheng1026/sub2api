@@ -23,7 +23,7 @@ type OpenAIQuotaGuardDecision struct {
 }
 
 func (a *Account) OpenAIQuotaGuardDecision(now time.Time) *OpenAIQuotaGuardDecision {
-	if a == nil || a.Platform != PlatformOpenAI || a.Type != AccountTypeOAuth {
+	if a == nil || !a.IsOpenAICodexOAuth() {
 		return nil
 	}
 	return openAIQuotaGuardDecisionFromExtra(a.Extra, now)

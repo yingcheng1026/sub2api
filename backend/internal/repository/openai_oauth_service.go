@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -16,11 +17,15 @@ import (
 
 // NewOpenAIOAuthClient creates a new OpenAI OAuth client
 func NewOpenAIOAuthClient() service.OpenAIOAuthClient {
-	return &openaiOAuthService{tokenURL: openai.TokenURL}
+	return &openaiOAuthService{
+		tokenURL:      openai.TokenURL,
+		providerAware: true,
+	}
 }
 
 type openaiOAuthService struct {
-	tokenURL string
+	tokenURL      string
+	providerAware bool
 }
 
 func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
@@ -36,6 +41,7 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 	if clientID == "" {
 		clientID = openai.ClientID
 	}
+	providerCfg := openai.OAuthProviderConfigByClientID(clientID)
 
 	formData := url.Values{}
 	formData.Set("grant_type", "authorization_code")
@@ -51,7 +57,7 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 		SetHeader("User-Agent", "codex-cli/0.91.0").
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(s.resolveTokenURL(providerCfg.TokenURL))
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {
@@ -61,7 +67,10 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 	}
 
 	if !resp.IsSuccessState() {
-		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_EXCHANGE_FAILED", "token exchange failed: status %d, body: %s", resp.StatusCode, resp.String())
+		if code := safeOAuthErrorCode(resp.String()); code != "" {
+			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_EXCHANGE_FAILED", "token exchange failed: status %d, error: %s", resp.StatusCode, code)
+		}
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_EXCHANGE_FAILED", "token exchange failed: status %d", resp.StatusCode)
 	}
 
 	return &tokenResp, nil
@@ -90,7 +99,10 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 	formData.Set("grant_type", "refresh_token")
 	formData.Set("refresh_token", refreshToken)
 	formData.Set("client_id", clientID)
-	formData.Set("scope", openai.RefreshScopes)
+	providerCfg := openai.OAuthProviderConfigByClientID(clientID)
+	if providerCfg.RefreshScopes != "" {
+		formData.Set("scope", providerCfg.RefreshScopes)
+	}
 
 	var tokenResp openai.TokenResponse
 
@@ -99,7 +111,7 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 		SetHeader("User-Agent", "codex-cli/0.91.0").
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(s.resolveTokenURL(providerCfg.TokenURL))
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {
@@ -109,10 +121,43 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 	}
 
 	if !resp.IsSuccessState() {
-		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_REFRESH_FAILED", "token refresh failed: status %d, body: %s", resp.StatusCode, resp.String())
+		if code := safeOAuthErrorCode(resp.String()); code != "" {
+			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_REFRESH_FAILED", "token refresh failed: status %d, error: %s", resp.StatusCode, code)
+		}
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_REFRESH_FAILED", "token refresh failed: status %d", resp.StatusCode)
 	}
 
 	return &tokenResp, nil
+}
+
+func safeOAuthErrorCode(rawBody string) string {
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(rawBody), &payload); err != nil {
+		return ""
+	}
+	code := strings.TrimSpace(payload.Error)
+	if code == "" || len(code) > 64 {
+		return ""
+	}
+	for _, r := range code {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return ""
+	}
+	return code
+}
+
+func (s *openaiOAuthService) resolveTokenURL(providerDefault string) string {
+	if s.providerAware {
+		return providerDefault
+	}
+	if override := strings.TrimSpace(s.tokenURL); override != "" {
+		return override
+	}
+	return providerDefault
 }
 
 func createOpenAIReqClient(proxyURL string) (*req.Client, error) {
