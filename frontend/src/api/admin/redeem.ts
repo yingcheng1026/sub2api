@@ -11,6 +11,23 @@ import type {
   PaginatedResponse
 } from '@/types'
 
+const GENERATE_IDEMPOTENCY_KEY_PREFIX = 'admin-redeem-generate-'
+let generationKeySequence = 0
+
+/** Create one key per logical code-generation operation and reuse it for retries. */
+export function createRedeemGenerationIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    return `${GENERATE_IDEMPOTENCY_KEY_PREFIX}${cryptoApi.randomUUID()}`
+  }
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    const words = cryptoApi.getRandomValues(new Uint32Array(4))
+    return `${GENERATE_IDEMPOTENCY_KEY_PREFIX}${Array.from(words, (word) => word.toString(16).padStart(8, '0')).join('')}`
+  }
+  generationKeySequence += 1
+  return `${GENERATE_IDEMPOTENCY_KEY_PREFIX}${Date.now().toString(36)}-${generationKeySequence.toString(36)}`
+}
+
 /**
  * List all redeem codes with pagination
  * @param page - Page number (default: 1)
@@ -69,8 +86,13 @@ export async function generate(
   value: number,
   groupId?: number | null,
   validityDays?: number,
-  planId?: number | null
+  planId?: number | null,
+  idempotencyKey?: string
 ): Promise<RedeemCode[]> {
+  const key = idempotencyKey?.trim() ?? ''
+  if (!key) {
+    throw new Error('Idempotency-Key is required for redeem code generation')
+  }
   const payload: GenerateRedeemCodesRequest = {
     count,
     type,
@@ -89,7 +111,9 @@ export async function generate(
     payload.plan_id = planId
   }
 
-  const { data } = await apiClient.post<RedeemCode[]>('/admin/redeem-codes/generate', payload)
+  const { data } = await apiClient.post<RedeemCode[]>('/admin/redeem-codes/generate', payload, {
+    headers: { 'Idempotency-Key': key }
+  })
   return data
 }
 
@@ -175,6 +199,7 @@ export const redeemAPI = {
   list,
   getById,
   generate,
+  createRedeemGenerationIdempotencyKey,
   delete: deleteCode,
   batchDelete,
   expire,
