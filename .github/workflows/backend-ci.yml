@@ -80,6 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
@@ -89,7 +91,17 @@ jobs:
       - name: Verify Go version
         run: |
           go version | grep -q 'go1.26.5'
-      - name: golangci-lint
+      # PRs lint the exact diff so production-baseline debt cannot hide new issues.
+      # Main still receives a full-tree lint on every push.
+      - name: golangci-lint (pull request changes)
+        if: github.event_name == 'pull_request'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.9
+          args: --timeout=30m --new-from-rev=${{ github.event.pull_request.base.sha }}
+          working-directory: backend
+      - name: golangci-lint (main branch full tree)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.9
