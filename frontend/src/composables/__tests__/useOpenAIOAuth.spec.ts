@@ -59,6 +59,34 @@ describe('useOpenAIOAuth.buildCredentials', () => {
     expect(creds.access_token).toBe('at')
     expect(creds.refresh_token).toBe('rt')
   })
+
+  it('keeps the xAI OAuth provider marker', () => {
+    const oauth = useOpenAIOAuth(() => 'xai')
+    const creds = oauth.buildCredentials({
+      access_token: 'xai-at',
+      refresh_token: 'xai-rt',
+      oauth_provider: 'xai',
+      expires_at: 1700000000
+    })
+
+    expect(creds.oauth_provider).toBe('xai')
+  })
+})
+
+describe('useOpenAIOAuth xAI routing', () => {
+  it('sends xai when generating an authorization URL', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({
+      auth_url: 'https://auth.x.ai/oauth2/authorize?state=test-state',
+      session_id: 'xai-session'
+    })
+    const oauth = useOpenAIOAuth(() => 'xai')
+
+    await expect(oauth.generateAuthUrl()).resolves.toBe(true)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenCalledWith(
+      '/admin/openai/generate-auth-url',
+      { oauth_provider: 'xai' }
+    )
+  })
 })
 
 describe('useOpenAIOAuth.exchangeAuthCode', () => {

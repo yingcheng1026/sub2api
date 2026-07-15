@@ -55,6 +55,10 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	}
 
 	codeChallenge := openai.GenerateCodeChallenge(codeVerifier)
+	nonce, err := openai.GenerateState()
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_OAUTH_NONCE_FAILED", "failed to generate nonce: %v", err)
+	}
 
 	// Generate session ID
 	sessionID, err := openai.GenerateSessionID()
@@ -75,10 +79,11 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	}
 
 	// Use default redirect URI if not specified
-	if redirectURI == "" {
-		redirectURI = openai.DefaultRedirectURI
-	}
 	normalizedPlatform := normalizeOpenAIOAuthPlatform(platform)
+	providerCfg := openai.OAuthProviderConfigByPlatform(normalizedPlatform)
+	if normalizedPlatform == openai.OAuthPlatformXAI || strings.TrimSpace(redirectURI) == "" {
+		redirectURI = providerCfg.DefaultRedirectURI
+	}
 	clientID, _ := openai.OAuthClientConfigByPlatform(normalizedPlatform)
 
 	// Store session
@@ -86,6 +91,7 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 		State:        state,
 		CodeVerifier: codeVerifier,
 		ClientID:     clientID,
+		Provider:     normalizedPlatform,
 		RedirectURI:  redirectURI,
 		ProxyURL:     proxyURL,
 		CreatedAt:    time.Now(),
@@ -93,7 +99,7 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	s.sessionStore.Set(sessionID, session)
 
 	// Build authorization URL
-	authURL := openai.BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, normalizedPlatform)
+	authURL := openai.BuildAuthorizationURLForPlatformWithNonce(state, codeChallenge, redirectURI, normalizedPlatform, nonce)
 
 	return &OpenAIAuthURLResult{
 		AuthURL:   authURL,
@@ -118,6 +124,7 @@ type OpenAITokenInfo struct {
 	ExpiresIn             int64  `json:"expires_in"`
 	ExpiresAt             int64  `json:"expires_at"`
 	ClientID              string `json:"client_id,omitempty"`
+	OAuthProvider         string `json:"oauth_provider,omitempty"`
 	Email                 string `json:"email,omitempty"`
 	ChatGPTAccountID      string `json:"chatgpt_account_id,omitempty"`
 	ChatGPTUserID         string `json:"chatgpt_user_id,omitempty"`
@@ -125,6 +132,13 @@ type OpenAITokenInfo struct {
 	PlanType              string `json:"plan_type,omitempty"`
 	SubscriptionExpiresAt string `json:"subscription_expires_at,omitempty"`
 	PrivacyMode           string `json:"privacy_mode,omitempty"`
+}
+
+func normalizedOAuthExpiresIn(expiresIn int64) int64 {
+	if expiresIn > 0 {
+		return expiresIn
+	}
+	return 3600
 }
 
 // ExchangeCode exchanges authorization code for tokens
@@ -155,7 +169,7 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 
 	// Use redirect URI from session or input
 	redirectURI := session.RedirectURI
-	if input.RedirectURI != "" {
+	if session.Provider != openai.OAuthPlatformXAI && input.RedirectURI != "" {
 		redirectURI = input.RedirectURI
 	}
 	clientID := strings.TrimSpace(session.ClientID)
@@ -183,13 +197,15 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	// Delete session after successful exchange
 	s.sessionStore.Delete(input.SessionID)
 
+	expiresIn := normalizedOAuthExpiresIn(tokenResp.ExpiresIn)
 	tokenInfo := &OpenAITokenInfo{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		IDToken:      tokenResp.IDToken,
-		ExpiresIn:    int64(tokenResp.ExpiresIn),
-		ExpiresAt:    time.Now().Unix() + int64(tokenResp.ExpiresIn),
-		ClientID:     clientID,
+		AccessToken:   tokenResp.AccessToken,
+		RefreshToken:  tokenResp.RefreshToken,
+		IDToken:       tokenResp.IDToken,
+		ExpiresIn:     expiresIn,
+		ExpiresAt:     time.Now().Unix() + expiresIn,
+		ClientID:      clientID,
+		OAuthProvider: openai.NormalizeOAuthPlatform(session.Provider),
 	}
 
 	if userInfo != nil {
@@ -200,7 +216,9 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 		tokenInfo.PlanType = userInfo.PlanType
 	}
 
-	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+	if tokenInfo.OAuthProvider == openai.OAuthPlatformOpenAI {
+		s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+	}
 
 	return tokenInfo, nil
 }
@@ -212,6 +230,28 @@ func (s *OpenAIOAuthService) RefreshToken(ctx context.Context, refreshToken stri
 
 // RefreshTokenWithClientID refreshes an OpenAI OAuth token with optional client_id.
 func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refreshToken string, proxyURL string, clientID string) (*OpenAITokenInfo, error) {
+	return s.RefreshTokenWithProvider(ctx, refreshToken, proxyURL, clientID, "")
+}
+
+func (s *OpenAIOAuthService) RefreshTokenWithProvider(ctx context.Context, refreshToken string, proxyURL string, clientID string, provider string) (*OpenAITokenInfo, error) {
+	normalizedProvider := normalizeOpenAIOAuthPlatform(provider)
+	if strings.TrimSpace(provider) != "" &&
+		normalizedProvider == openai.OAuthPlatformOpenAI &&
+		strings.TrimSpace(clientID) == openai.XAIClientID {
+		return nil, infraerrors.New(
+			http.StatusBadRequest,
+			"OPENAI_OAUTH_PROVIDER_CLIENT_MISMATCH",
+			"oauth provider and client_id do not match",
+		)
+	}
+	if strings.TrimSpace(provider) == "" && strings.TrimSpace(clientID) != "" {
+		normalizedProvider = openai.OAuthProviderConfigByClientID(clientID).Platform
+	}
+	if normalizedProvider == openai.OAuthPlatformXAI {
+		clientID = openai.XAIClientID
+	} else if strings.TrimSpace(clientID) == "" {
+		clientID, _ = openai.OAuthClientConfigByPlatform(normalizedProvider)
+	}
 	tokenResp, err := s.oauthClient.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
 	if err != nil {
 		return nil, err
@@ -228,12 +268,14 @@ func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 		}
 	}
 
+	expiresIn := normalizedOAuthExpiresIn(tokenResp.ExpiresIn)
 	tokenInfo := &OpenAITokenInfo{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		IDToken:      tokenResp.IDToken,
-		ExpiresIn:    int64(tokenResp.ExpiresIn),
-		ExpiresAt:    time.Now().Unix() + int64(tokenResp.ExpiresIn),
+		AccessToken:   tokenResp.AccessToken,
+		RefreshToken:  tokenResp.RefreshToken,
+		IDToken:       tokenResp.IDToken,
+		ExpiresIn:     expiresIn,
+		ExpiresAt:     time.Now().Unix() + expiresIn,
+		OAuthProvider: normalizedProvider,
 	}
 	if trimmed := strings.TrimSpace(clientID); trimmed != "" {
 		tokenInfo.ClientID = trimmed
@@ -247,7 +289,9 @@ func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 		tokenInfo.PlanType = userInfo.PlanType
 	}
 
-	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+	if tokenInfo.OAuthProvider == openai.OAuthPlatformOpenAI {
+		s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+	}
 
 	return tokenInfo, nil
 }
@@ -306,6 +350,7 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 				ChatGPTUserID:    account.GetCredential("chatgpt_user_id"),
 				OrganizationID:   account.GetCredential("organization_id"),
 				PlanType:         account.GetCredential("plan_type"),
+				OAuthProvider:    openai.NormalizeOAuthPlatform(account.GetCredential("oauth_provider")),
 			}
 			if expiresAt := account.GetCredentialAsTime("expires_at"); expiresAt != nil {
 				tokenInfo.ExpiresAt = expiresAt.Unix()
@@ -325,7 +370,7 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 	}
 
 	clientID := account.GetCredential("client_id")
-	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
+	return s.RefreshTokenWithProvider(ctx, refreshToken, proxyURL, clientID, account.GetCredential("oauth_provider"))
 }
 
 // BuildAccountCredentials builds credentials map from token info
@@ -365,6 +410,9 @@ func (s *OpenAIOAuthService) BuildAccountCredentials(tokenInfo *OpenAITokenInfo)
 	if strings.TrimSpace(tokenInfo.ClientID) != "" {
 		creds["client_id"] = strings.TrimSpace(tokenInfo.ClientID)
 	}
+	if strings.TrimSpace(tokenInfo.OAuthProvider) != "" {
+		creds["oauth_provider"] = openai.NormalizeOAuthPlatform(tokenInfo.OAuthProvider)
+	}
 
 	return creds
 }
@@ -375,5 +423,5 @@ func (s *OpenAIOAuthService) Stop() {
 }
 
 func normalizeOpenAIOAuthPlatform(platform string) string {
-	return openai.OAuthPlatformOpenAI
+	return openai.NormalizeOAuthPlatform(platform)
 }

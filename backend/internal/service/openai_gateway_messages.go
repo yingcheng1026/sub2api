@@ -98,7 +98,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 	// OAuth/Plus relies on session_id + x-codex-turn-state; trimming to a
 	// sliding 12-message window makes the cached prefix stall at system/tools.
 	// Keep full replay there so upstream prompt caching can grow turn by turn.
-	if compatReplayGuardEnabled && account.Type != AccountTypeOAuth && previousResponseID == "" && !compatContinuationDisabled {
+	if compatReplayGuardEnabled && !account.IsOpenAICodexOAuth() && previousResponseID == "" && !compatContinuationDisabled {
 		compatReplayTrimmed = applyAnthropicCompatFullReplayGuard(&anthropicReq)
 	}
 
@@ -123,7 +123,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 		responsesReq.PreviousResponseID = previousResponseID
 		trimAnthropicCompatResponsesInputToLatestTurn(responsesReq)
 	}
-	if compatReplayGuardEnabled && account.Type != AccountTypeOAuth {
+	if compatReplayGuardEnabled && !account.IsOpenAICodexOAuth() {
 		appendOpenAICompatClaudeCodeTodoGuard(responsesReq)
 	}
 
@@ -164,7 +164,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 		return nil, fmt.Errorf("marshal responses request: %w", err)
 	}
 
-	if account.Type == AccountTypeOAuth {
+	if account.IsOpenAICodexOAuth() {
 		var reqBody map[string]any
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
@@ -228,7 +228,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 	// upstreams using the Responses API can derive a stable session identifier
 	// from prompt_cache_key. This makes our Anthropic /v1/messages compatibility
 	// path behave more like a native Responses client.
-	if account.Type == AccountTypeAPIKey {
+	if account.IsOpenAIPlatformAPIAccount() {
 		if trimmedKey := strings.TrimSpace(promptCacheKey); trimmedKey != "" {
 			var reqBody map[string]any
 			if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
@@ -279,14 +279,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 
 	// Override session_id with a deterministic UUID derived from the isolated
 	// session key, ensuring different API keys produce different upstream sessions.
-	if promptCacheKey != "" {
+	if promptCacheKey != "" && !account.IsOpenAIXAIProvider() {
 		isolatedSessionID := generateSessionUUID(isolateOpenAISessionID(apiKeyID, promptCacheKey))
 		upstreamReq.Header.Set("session_id", isolatedSessionID)
 		if upstreamReq.Header.Get("conversation_id") != "" {
 			upstreamReq.Header.Set("conversation_id", isolatedSessionID)
 		}
 	}
-	if account.Type == AccountTypeOAuth {
+	if account.IsOpenAICodexOAuth() {
 		// Anthropic Messages compatibility uses the ChatGPT Codex SSE endpoint.
 		// Match airgate-openai's request shape: the SSE endpoint does not need
 		// the Responses experimental beta header, and forcing originator can make
@@ -294,10 +294,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 		upstreamReq.Header.Del("OpenAI-Beta")
 		upstreamReq.Header.Del("originator")
 	}
-	if account.Type == AccountTypeOAuth && promptCacheKey != "" && strings.TrimSpace(c.GetHeader("conversation_id")) == "" {
+	if account.IsOpenAICodexOAuth() && promptCacheKey != "" && strings.TrimSpace(c.GetHeader("conversation_id")) == "" {
 		upstreamReq.Header.Del("conversation_id")
 	}
-	if compatTurnState != "" && upstreamReq.Header.Get("x-codex-turn-state") == "" {
+	if !account.IsOpenAIXAIProvider() && compatTurnState != "" && upstreamReq.Header.Get("x-codex-turn-state") == "" {
 		upstreamReq.Header.Set("x-codex-turn-state", compatTurnState)
 	}
 
@@ -374,7 +374,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 		return s.handleAnthropicErrorResponse(resp, c, account, upstreamModel)
 	}
 
-	if account.Type == AccountTypeOAuth && promptCacheKey != "" {
+	if account.IsOpenAICodexOAuth() && promptCacheKey != "" {
 		if turnState := strings.TrimSpace(resp.Header.Get("x-codex-turn-state")); turnState != "" {
 			s.bindOpenAICompatSessionTurnState(ctx, c, account, promptCacheKey, turnState)
 		}
@@ -411,7 +411,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 	}
 
 	// Extract and save Codex usage snapshot from response headers (for OAuth accounts)
-	if handleErr == nil && account.Type == AccountTypeOAuth {
+	if handleErr == nil && account.IsOpenAICodexOAuth() {
 		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
 			s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
 		}

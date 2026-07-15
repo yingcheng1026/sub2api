@@ -3634,7 +3634,7 @@ func (s *adminServiceImpl) ResetAccountQuota(ctx context.Context, id int64) erro
 // EnsureOpenAIPrivacy 检查 OpenAI OAuth 账号是否已设置 privacy_mode，
 // 未设置则调用 disableOpenAITraining 并持久化到 Extra，返回设置的 mode 值。
 func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Account) string {
-	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
+	if !account.IsOpenAICodexOAuth() {
 		return ""
 	}
 	if s.privacyClientFactory == nil {
@@ -3667,7 +3667,7 @@ func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Acc
 
 // ForceOpenAIPrivacy 强制重新设置 OpenAI OAuth 账号隐私，无论当前状态。
 func (s *adminServiceImpl) ForceOpenAIPrivacy(ctx context.Context, account *Account) string {
-	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
+	if !account.IsOpenAICodexOAuth() {
 		return ""
 	}
 	if s.privacyClientFactory == nil {

@@ -3382,8 +3382,15 @@ export default {
       apiKeyHint: '您的 Claude Console API Key',
       // OpenAI specific hints
       openai: {
+        providerLabel: 'OpenAI 兼容上游',
+        providerOpenAIDesc: 'OpenAI API 或 ChatGPT OAuth',
+        providerXAIDesc: 'Grok API 上游或 xAI 官方 OAuth',
         baseUrlHint: '留空使用官方 OpenAI API',
         apiKeyHint: '您的 OpenAI API Key',
+        xaiBaseUrlHint: '官方 xAI 使用 https://api.x.ai；兼容站点请填写其 OpenAI 协议 Base URL',
+        xaiApiKeyHint: '您的 xAI API Key，或兼容上游站点签发的 API Key',
+        xaiOAuthTitle: 'Grok（xAI）账号授权',
+        xaiOAuthDesc: 'xAI 官方 OAuth 账号，请求仍统一走 OpenAI 兼容网关',
         oauthPassthrough: '自动透传（仅替换认证）',
         oauthPassthroughDesc:
           '开启后，该 OpenAI 账号将自动透传请求与响应，仅替换认证并保留计费/并发/审计及必要安全过滤；如遇兼容性问题可随时关闭回滚。',
@@ -3732,6 +3739,32 @@ export default {
           validateAndCreate: '验证并创建账号',
           pleaseEnterRefreshToken: '请输入 Refresh Token',
           pleaseEnterSessionToken: '请输入 Session Token'
+        },
+        // xAI / Grok specific
+        xai: {
+          title: 'Grok（xAI）账号授权',
+          followSteps: '请按照以下步骤完成 xAI 官方账号授权：',
+          step1GenerateUrl: '点击下方按钮生成 xAI 授权链接',
+          generateAuthUrl: '生成 xAI 授权链接',
+          step2OpenUrl: '在浏览器中打开链接并完成 xAI 授权',
+          openUrlDesc: '请在新标签页中打开授权链接，登录 xAI 账号并批准访问。',
+          importantNotice:
+            '授权后浏览器会跳转到 http://127.0.0.1:56121/callback。若本地页面无法打开属于正常现象，请复制地址栏中的完整回调链接并粘贴到这里。',
+          step3EnterCode: '输入回调链接或 Code',
+          authCodeDesc: '完成 xAI 授权后，请复制完整回调链接（推荐），或只复制 code 参数值：',
+          authCode: '回调链接或 Code',
+          authCodePlaceholder:
+            '方式1：粘贴完整的 http://127.0.0.1:56121/callback?code=... 链接\n方式2：仅粘贴 code 参数值',
+          authCodeHint: '系统会自动从完整回调链接中提取 code 和 state。',
+          failedToGenerateUrl: '生成 xAI 授权链接失败',
+          failedToExchangeCode: 'xAI 授权码兑换失败',
+          failedToValidateRT: '验证 xAI Refresh Token 失败',
+          errors: {},
+          refreshTokenAuth: '手动输入 xAI RT',
+          refreshTokenDesc: '输入已有的 xAI Refresh Token，系统将验证并创建 OAuth 账号。',
+          refreshTokenPlaceholder: '粘贴您的 xAI Refresh Token...',
+          validating: '验证中...',
+          validateAndCreate: '验证并创建账号'
         },
         // Gemini specific
         gemini: {

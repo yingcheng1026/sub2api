@@ -52,3 +52,20 @@ func TestOpenAIOAuthService_RefreshAccountToken_NoRefreshTokenUsesExistingAccess
 	require.Equal(t, "client-id-1", info.ClientID)
 	require.Zero(t, atomic.LoadInt32(&client.refreshCalls), "existing access token should be reused without calling refresh")
 }
+
+func TestOpenAIOAuthService_RefreshTokenWithProviderRejectsXAIClientOpenAIMismatch(t *testing.T) {
+	client := &openaiOAuthClientRefreshStub{}
+	svc := NewOpenAIOAuthService(nil, client)
+
+	_, err := svc.RefreshTokenWithProvider(
+		context.Background(),
+		"refresh-token",
+		"",
+		openai.XAIClientID,
+		openai.OAuthPlatformOpenAI,
+	)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "oauth provider and client_id do not match")
+	require.Zero(t, atomic.LoadInt32(&client.refreshCalls), "mismatched provider/client_id must fail before calling upstream")
+}

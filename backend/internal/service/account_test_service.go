@@ -500,10 +500,14 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	_ = prompt
 	mode = normalizeAccountTestMode(mode)
 
-	// Default to openai.DefaultTestModel for OpenAI testing
+	// Use a provider-compatible default when the caller does not select a model.
 	testModelID := modelID
 	if testModelID == "" {
-		testModelID = openai.DefaultTestModel
+		if account.IsOpenAIXAIProvider() {
+			testModelID = openai.XAIDefaultTestModel
+		} else {
+			testModelID = openai.DefaultTestModel
+		}
 	}
 
 	// Align test routing with gateway behavior: OpenAI accounts apply normal
@@ -533,20 +537,25 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	// Determine authentication method and API URL
 	var authToken string
 	var apiURL string
-	var isOAuth bool
+	var isCodexOAuth bool
 	var chatgptAccountID string
 
 	if account.IsOAuth() {
-		isOAuth = true
-		// OAuth - use Bearer token with ChatGPT internal API
 		authToken = account.GetOpenAIAccessToken()
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No access token available")
 		}
-
-		// OAuth uses ChatGPT internal API
-		apiURL = chatgptCodexAPIURL
-		chatgptAccountID = account.GetChatGPTAccountID()
+		isCodexOAuth = account.IsOpenAICodexOAuth()
+		if isCodexOAuth {
+			apiURL = chatgptCodexAPIURL
+			chatgptAccountID = account.GetChatGPTAccountID()
+		} else {
+			normalizedBaseURL, err := s.validateUpstreamBaseURL(account.GetOpenAIBaseURL())
+			if err != nil {
+				return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+			}
+			apiURL = buildOpenAIResponsesURL(normalizedBaseURL)
+		}
 	} else if account.Type == "apikey" {
 		// API Key - use Platform API
 		authToken = account.GetOpenAIApiKey()
@@ -584,7 +593,10 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	c.Writer.Flush()
 
 	// Create OpenAI Responses API payload
-	payload := createOpenAITestPayload(testModelID, isOAuth)
+	payload := createOpenAITestPayload(testModelID, isCodexOAuth)
+	if account.IsOpenAIXAIProvider() {
+		delete(payload, "instructions")
+	}
 	payloadBytes, _ := json.Marshal(payload)
 
 	// Send test_start event
@@ -600,7 +612,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	req.Header.Set("Authorization", "Bearer "+authToken)
 
 	// Set OAuth-specific headers for ChatGPT internal API
-	if isOAuth {
+	if isCodexOAuth {
 		req.Host = "chatgpt.com"
 		req.Header.Set("accept", "text/event-stream")
 		if chatgptAccountID != "" {
@@ -620,7 +632,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if isOAuth && s.accountRepo != nil {
+	if isCodexOAuth && s.accountRepo != nil {
 		if updates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(updates) > 0 {
 			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
 			mergeAccountExtra(account, updates)
@@ -655,7 +667,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	chatgptAccountID := ""
 
 	switch {
-	case account.IsOAuth():
+	case account.IsOpenAICodexOAuth():
 		isOAuth = true
 		authToken = account.GetOpenAIAccessToken()
 		if authToken == "" {
@@ -663,6 +675,16 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 		}
 		apiURL = chatgptCodexAPIURL + "/compact"
 		chatgptAccountID = account.GetChatGPTAccountID()
+	case account.IsOpenAIXAIOAuth():
+		authToken = account.GetOpenAIAccessToken()
+		if authToken == "" {
+			return s.sendErrorAndEnd(c, "No access token available")
+		}
+		normalizedBaseURL, err := s.validateUpstreamBaseURL(account.GetOpenAIBaseURL())
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+		}
+		apiURL = appendOpenAIResponsesRequestPathSuffix(buildOpenAIResponsesURL(normalizedBaseURL), "/compact")
 	case account.Type == AccountTypeAPIKey:
 		authToken = account.GetOpenAIApiKey()
 		if authToken == "" {
@@ -1790,7 +1812,11 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	c.Writer.Flush()
 
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
-	s.sendEvent(c, TestEvent{Type: "content", Text: "Calling Codex /responses image tool...\n"})
+	imageTestMessage := "Calling /responses image tool...\n"
+	if account.IsOpenAICodexOAuth() {
+		imageTestMessage = "Calling Codex /responses image tool...\n"
+	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: imageTestMessage})
 
 	parsed := &OpenAIImagesRequest{
 		Endpoint: openAIImagesGenerationsEndpoint,
@@ -1804,23 +1830,33 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to build image request: %s", err.Error()))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatgptCodexAPIURL, bytes.NewReader(responsesBody))
+	targetURL := chatgptCodexAPIURL
+	if account.IsOpenAIXAIOAuth() {
+		normalizedBaseURL, validateErr := s.validateUpstreamBaseURL(account.GetOpenAIBaseURL())
+		if validateErr != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", validateErr.Error()))
+		}
+		targetURL = buildOpenAIResponsesURL(normalizedBaseURL)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(responsesBody))
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create request")
 	}
-	req.Host = "chatgpt.com"
 	req.Header.Set("Authorization", "Bearer "+authToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("OpenAI-Beta", "responses=experimental")
-	req.Header.Set("originator", "opencode")
-	if customUA := strings.TrimSpace(account.GetOpenAIUserAgent()); customUA != "" {
-		req.Header.Set("User-Agent", customUA)
-	} else {
-		req.Header.Set("User-Agent", codexCLIUserAgent)
-	}
-	if chatgptAccountID := strings.TrimSpace(account.GetChatGPTAccountID()); chatgptAccountID != "" {
-		req.Header.Set("chatgpt-account-id", chatgptAccountID)
+	if account.IsOpenAICodexOAuth() {
+		req.Host = "chatgpt.com"
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("originator", "opencode")
+		if customUA := strings.TrimSpace(account.GetOpenAIUserAgent()); customUA != "" {
+			req.Header.Set("User-Agent", customUA)
+		} else {
+			req.Header.Set("User-Agent", codexCLIUserAgent)
+		}
+		if chatgptAccountID := strings.TrimSpace(account.GetChatGPTAccountID()); chatgptAccountID != "" {
+			req.Header.Set("chatgpt-account-id", chatgptAccountID)
+		}
 	}
 
 	proxyURL := ""

@@ -4,7 +4,11 @@ vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
-import { buildModelMappingObject, getModelsByPlatform } from '../useModelWhitelist'
+import {
+  buildModelMappingObject,
+  getModelsByPlatform,
+  getOpenAIModelWhitelistPlatform
+} from '../useModelWhitelist'
 
 describe('useModelWhitelist', () => {
   it('openai 模型列表包含 GPT-5.4 官方快照', () => {
@@ -77,6 +81,39 @@ describe('useModelWhitelist', () => {
 
     expect(models.indexOf('gemini-3.1-flash-image')).toBeLessThan(models.indexOf('gemini-2.5-flash'))
     expect(models.indexOf('gemini-2.5-flash-image')).toBeLessThan(models.indexOf('gemini-2.5-flash-lite'))
+  })
+
+  it('returns the verified Grok API text models without media models', () => {
+    const models = getModelsByPlatform('xai')
+
+    expect(models).toEqual(expect.arrayContaining([
+      'grok-3-mini',
+      'grok-4.20-0309-reasoning',
+      'grok-4.5',
+      'grok-composer-2.5-fast'
+    ]))
+    expect(models.some(model => model.startsWith('grok-imagine-'))).toBe(false)
+    expect(models).not.toContain('grok-3-beta')
+  })
+
+  it('keeps xAI OAuth on the api.x.ai text-only subset', () => {
+    const models = getModelsByPlatform('xai_oauth')
+
+    expect(models).toEqual([
+      'grok-4.20-0309-non-reasoning',
+      'grok-4.20-0309-reasoning',
+      'grok-4.20-multi-agent-0309',
+      'grok-4.3',
+      'grok-4.5',
+      'grok-build-0.1'
+    ])
+    expect(models).not.toContain('grok-composer-2.5-fast')
+  })
+
+  it('selects the xAI OAuth model catalog only for OAuth accounts', () => {
+    expect(getOpenAIModelWhitelistPlatform('xai', 'oauth-based')).toBe('xai_oauth')
+    expect(getOpenAIModelWhitelistPlatform('xai', 'apikey')).toBe('xai')
+    expect(getOpenAIModelWhitelistPlatform('openai', 'oauth-based')).toBe('openai')
   })
 
   it('whitelist 模式会忽略通配符条目', () => {

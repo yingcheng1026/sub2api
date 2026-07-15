@@ -32,8 +32,9 @@ func NewOpenAIOAuthHandler(openaiOAuthService *service.OpenAIOAuthService, admin
 
 // OpenAIGenerateAuthURLRequest represents the request for generating OpenAI auth URL
 type OpenAIGenerateAuthURLRequest struct {
-	ProxyID     *int64 `json:"proxy_id"`
-	RedirectURI string `json:"redirect_uri"`
+	ProxyID       *int64 `json:"proxy_id"`
+	RedirectURI   string `json:"redirect_uri"`
+	OAuthProvider string `json:"oauth_provider"`
 }
 
 // GenerateAuthURL generates OpenAI OAuth authorization URL
@@ -49,7 +50,7 @@ func (h *OpenAIOAuthHandler) GenerateAuthURL(c *gin.Context) {
 		c.Request.Context(),
 		req.ProxyID,
 		req.RedirectURI,
-		oauthPlatformFromPath(c),
+		req.OAuthProvider,
 	)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -94,10 +95,11 @@ func (h *OpenAIOAuthHandler) ExchangeCode(c *gin.Context) {
 
 // OpenAIRefreshTokenRequest represents the request for refreshing OpenAI token
 type OpenAIRefreshTokenRequest struct {
-	RefreshToken string `json:"refresh_token"`
-	RT           string `json:"rt"`
-	ClientID     string `json:"client_id"`
-	ProxyID      *int64 `json:"proxy_id"`
+	RefreshToken  string `json:"refresh_token"`
+	RT            string `json:"rt"`
+	ClientID      string `json:"client_id"`
+	ProxyID       *int64 `json:"proxy_id"`
+	OAuthProvider string `json:"oauth_provider"`
 }
 
 // RefreshToken refreshes an OpenAI OAuth token
@@ -125,14 +127,14 @@ func (h *OpenAIOAuthHandler) RefreshToken(c *gin.Context) {
 		}
 	}
 
-	// 未指定 client_id 时，根据请求路径平台自动设置默认值，避免 repository 层盲猜
+	// 未指定 client_id 时，根据 OAuth provider 选择固定的公共客户端。
 	clientID := strings.TrimSpace(req.ClientID)
 	if clientID == "" {
-		platform := oauthPlatformFromPath(c)
+		platform := req.OAuthProvider
 		clientID, _ = openai.OAuthClientConfigByPlatform(platform)
 	}
 
-	tokenInfo, err := h.openaiOAuthService.RefreshTokenWithClientID(c.Request.Context(), refreshToken, proxyURL, clientID)
+	tokenInfo, err := h.openaiOAuthService.RefreshTokenWithProvider(c.Request.Context(), refreshToken, proxyURL, clientID, req.OAuthProvider)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

@@ -1781,6 +1781,68 @@ func TestOpenAIBuildUpstreamRequestOpenAIPassthroughPreservesCompactPath(t *test
 	require.NotEmpty(t, req.Header.Get("Session_Id"))
 }
 
+func TestOpenAIBuildUpstreamRequest_XAIOAuthUsesOpenAICompatibleEndpoint(t *testing.T) {
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: true}}}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "customer-client/1.0")
+	c.Request.Header.Set("originator", "codex_cli_rs")
+	c.Request.Header.Set("session_id", "client-session")
+	c.Request.Header.Set("conversation_id", "client-conversation")
+	c.Request.Header.Set("x-codex-turn-state", "client-turn")
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"oauth_provider": "xai",
+			"access_token":   "oauth-token",
+			"base_url":       "https://attacker.example/v1",
+		},
+	}
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, []byte(`{"model":"grok-4"}`), "oauth-token", false, "", false)
+	require.NoError(t, err)
+	require.Equal(t, "https://api.x.ai/v1/responses", req.URL.String())
+	require.Equal(t, "Bearer oauth-token", req.Header.Get("Authorization"))
+	require.NotEqual(t, "chatgpt.com", req.Host)
+	require.Empty(t, req.Header.Get("chatgpt-account-id"))
+	require.Empty(t, req.Header.Get("originator"))
+	require.Empty(t, req.Header.Get("session_id"))
+	require.Empty(t, req.Header.Get("conversation_id"))
+	require.Empty(t, req.Header.Get("x-codex-turn-state"))
+	require.Equal(t, "customer-client/1.0", req.Header.Get("User-Agent"))
+}
+
+func TestOpenAIBuildUpstreamRequestPassthrough_XAIOAuthStripsCodexHeaders(t *testing.T) {
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: true}}}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "customer-client/1.0")
+	c.Request.Header.Set("originator", "codex_cli_rs")
+	c.Request.Header.Set("session_id", "client-session")
+	c.Request.Header.Set("conversation_id", "client-conversation")
+	c.Request.Header.Set("x-codex-turn-state", "client-turn")
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"oauth_provider": "xai",
+			"access_token":   "oauth-token",
+			"base_url":       "https://attacker.example/v1",
+		},
+		Extra: map[string]any{"openai_passthrough": true},
+	}
+
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(c.Request.Context(), c, account, []byte(`{"model":"grok-4.5"}`), "oauth-token")
+	require.NoError(t, err)
+	require.Equal(t, "https://api.x.ai/v1/responses", req.URL.String())
+	require.Empty(t, req.Header.Get("originator"))
+	require.Empty(t, req.Header.Get("session_id"))
+	require.Empty(t, req.Header.Get("conversation_id"))
+	require.Empty(t, req.Header.Get("x-codex-turn-state"))
+	require.Equal(t, "customer-client/1.0", req.Header.Get("User-Agent"))
+}
+
 func TestOpenAIBuildUpstreamRequestCompactForcesJSONAcceptForOAuth(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)

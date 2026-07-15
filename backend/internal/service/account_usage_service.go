@@ -301,7 +301,7 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64) (*U
 		return nil, fmt.Errorf("get account failed: %w", err)
 	}
 
-	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+	if account.IsOpenAICodexOAuth() {
 		usage, err := s.getOpenAIUsage(ctx, account, true)
 		if err == nil {
 			s.tryClearRecoverableAccountError(ctx, account)
@@ -425,7 +425,7 @@ func (s *AccountUsageService) GetPassiveUsage(ctx context.Context, accountID int
 		return nil, fmt.Errorf("get account failed: %w", err)
 	}
 
-	if account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+	if account.IsOpenAICodexOAuth() {
 		info, err := s.getOpenAIUsage(ctx, account, false)
 		if err != nil {
 			return nil, err

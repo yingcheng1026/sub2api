@@ -30,6 +30,14 @@ const (
 	// RefreshScopes - scope for token refresh (without offline_access, aligned with CRS project)
 	RefreshScopes = "openid profile email"
 
+	// xAI Grok OAuth uses the public client published by the official OpenCode
+	// integration. The loopback redirect is fixed by that client registration.
+	XAIClientID           = "b1a00492-073a-47ea-816f-4c329264a828"
+	XAIAuthorizeURL       = "https://auth.x.ai/oauth2/authorize"
+	XAITokenURL           = "https://auth.x.ai/oauth2/token"
+	XAIDefaultRedirectURI = "http://127.0.0.1:56121/callback"
+	XAIScopes             = "openid profile email offline_access grok-cli:access api:access"
+
 	// Session TTL
 	SessionTTL = 30 * time.Minute
 )
@@ -37,13 +45,66 @@ const (
 const (
 	// OAuthPlatformOpenAI uses OpenAI Codex-compatible OAuth client.
 	OAuthPlatformOpenAI = "openai"
+	// OAuthPlatformXAI uses xAI's public Grok CLI OAuth client.
+	OAuthPlatformXAI = "xai"
 )
+
+type OAuthProviderConfig struct {
+	Platform           string
+	ClientID           string
+	AuthorizeURL       string
+	TokenURL           string
+	DefaultRedirectURI string
+	Scopes             string
+	RefreshScopes      string
+	CodexFlow          bool
+}
+
+func NormalizeOAuthPlatform(platform string) string {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case OAuthPlatformXAI, "grok":
+		return OAuthPlatformXAI
+	default:
+		return OAuthPlatformOpenAI
+	}
+}
+
+func OAuthProviderConfigByPlatform(platform string) OAuthProviderConfig {
+	if NormalizeOAuthPlatform(platform) == OAuthPlatformXAI {
+		return OAuthProviderConfig{
+			Platform:           OAuthPlatformXAI,
+			ClientID:           XAIClientID,
+			AuthorizeURL:       XAIAuthorizeURL,
+			TokenURL:           XAITokenURL,
+			DefaultRedirectURI: XAIDefaultRedirectURI,
+			Scopes:             XAIScopes,
+		}
+	}
+	return OAuthProviderConfig{
+		Platform:           OAuthPlatformOpenAI,
+		ClientID:           ClientID,
+		AuthorizeURL:       AuthorizeURL,
+		TokenURL:           TokenURL,
+		DefaultRedirectURI: DefaultRedirectURI,
+		Scopes:             DefaultScopes,
+		RefreshScopes:      RefreshScopes,
+		CodexFlow:          true,
+	}
+}
+
+func OAuthProviderConfigByClientID(clientID string) OAuthProviderConfig {
+	if strings.TrimSpace(clientID) == XAIClientID {
+		return OAuthProviderConfigByPlatform(OAuthPlatformXAI)
+	}
+	return OAuthProviderConfigByPlatform(OAuthPlatformOpenAI)
+}
 
 // OAuthSession stores OAuth flow state for OpenAI
 type OAuthSession struct {
 	State        string    `json:"state"`
 	CodeVerifier string    `json:"code_verifier"`
 	ClientID     string    `json:"client_id,omitempty"`
+	Provider     string    `json:"provider,omitempty"`
 	ProxyURL     string    `json:"proxy_url,omitempty"`
 	RedirectURI  string    `json:"redirect_uri"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -183,32 +244,41 @@ func BuildAuthorizationURL(state, codeChallenge, redirectURI string) string {
 
 // BuildAuthorizationURLForPlatform builds authorization URL by platform.
 func BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, platform string) string {
-	if redirectURI == "" {
-		redirectURI = DefaultRedirectURI
-	}
+	return BuildAuthorizationURLForPlatformWithNonce(state, codeChallenge, redirectURI, platform, state)
+}
 
-	clientID, codexFlow := OAuthClientConfigByPlatform(platform)
+func BuildAuthorizationURLForPlatformWithNonce(state, codeChallenge, redirectURI, platform, nonce string) string {
+	cfg := OAuthProviderConfigByPlatform(platform)
+	if redirectURI == "" {
+		redirectURI = cfg.DefaultRedirectURI
+	}
 
 	params := url.Values{}
 	params.Set("response_type", "code")
-	params.Set("client_id", clientID)
+	params.Set("client_id", cfg.ClientID)
 	params.Set("redirect_uri", redirectURI)
-	params.Set("scope", DefaultScopes)
+	params.Set("scope", cfg.Scopes)
 	params.Set("state", state)
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
-	// OpenAI specific parameters
-	params.Set("id_token_add_organizations", "true")
-	if codexFlow {
+	if cfg.Platform == OAuthPlatformXAI {
+		params.Set("nonce", strings.TrimSpace(nonce))
+		params.Set("plan", "generic")
+		params.Set("referrer", "opencode")
+	} else {
+		params.Set("id_token_add_organizations", "true")
+	}
+	if cfg.CodexFlow {
 		params.Set("codex_cli_simplified_flow", "true")
 	}
 
-	return fmt.Sprintf("%s?%s", AuthorizeURL, params.Encode())
+	return fmt.Sprintf("%s?%s", cfg.AuthorizeURL, params.Encode())
 }
 
 // OAuthClientConfigByPlatform returns oauth client_id and whether codex simplified flow should be enabled.
 func OAuthClientConfigByPlatform(platform string) (clientID string, codexFlow bool) {
-	return ClientID, true
+	cfg := OAuthProviderConfigByPlatform(platform)
+	return cfg.ClientID, cfg.CodexFlow
 }
 
 // TokenRequest represents the token exchange request body

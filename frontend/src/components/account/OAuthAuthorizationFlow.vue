@@ -562,6 +562,7 @@ interface Props {
   showSessionTokenOption?: boolean
   showAccessTokenOption?: boolean
   platform?: AccountPlatform // Platform type for different UI/text
+  oauthProvider?: 'openai' | 'xai' // OpenAI-compatible OAuth provider
   showProjectId?: boolean // New prop to control project ID visibility
 }
 
@@ -580,6 +581,7 @@ const props = withDefaults(defineProps<Props>(), {
   showSessionTokenOption: false,
   showAccessTokenOption: false,
   platform: 'anthropic',
+  oauthProvider: 'openai',
   showProjectId: true
 })
 
@@ -597,9 +599,11 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const isOpenAI = computed(() => props.platform === 'openai')
+const isXAI = computed(() => isOpenAI.value && props.oauthProvider === 'xai')
 
 // Get translation key based on platform
 const getOAuthKey = (key: string) => {
+  if (isXAI.value) return `admin.accounts.oauth.xai.${key}`
   if (props.platform === 'openai') return `admin.accounts.oauth.openai.${key}`
   if (props.platform === 'gemini') return `admin.accounts.oauth.gemini.${key}`
   if (props.platform === 'antigravity') return `admin.accounts.oauth.antigravity.${key}`
@@ -619,6 +623,7 @@ const oauthAuthCode = computed(() => t(getOAuthKey('authCode')))
 const oauthAuthCodePlaceholder = computed(() => t(getOAuthKey('authCodePlaceholder')))
 const oauthAuthCodeHint = computed(() => t(getOAuthKey('authCodeHint')))
 const oauthImportantNotice = computed(() => {
+  if (isXAI.value) return t('admin.accounts.oauth.xai.importantNotice')
   if (props.platform === 'openai') return t('admin.accounts.oauth.openai.importantNotice')
   if (props.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.importantNotice')
   return ''

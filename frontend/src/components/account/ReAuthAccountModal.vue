@@ -32,7 +32,9 @@
             <span class="text-sm text-gray-500 dark:text-gray-400">
               {{
                 isOpenAI
-                  ? t('admin.accounts.openaiAccount')
+                  ? isXAIOAuth
+                    ? 'Grok (xAI) OAuth'
+                    : t('admin.accounts.openaiAccount')
                   : isGemini
                     ? t('admin.accounts.geminiAccount')
                     : isAntigravity
@@ -129,6 +131,7 @@
         :allow-multiple="false"
         :method-label="t('admin.accounts.inputMethod')"
         :platform="isOpenAI ? 'openai' : isGemini ? 'gemini' : isAntigravity ? 'antigravity' : 'anthropic'"
+        :oauth-provider="isXAIOAuth ? 'xai' : 'openai'"
         :show-project-id="isGemini && geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
@@ -224,7 +227,12 @@ const { t } = useI18n()
 
 // OAuth composables
 const claudeOAuth = useAccountOAuth()
-const openaiOAuth = useOpenAIOAuth()
+const openaiOAuth = useOpenAIOAuth(() => {
+  const credentials = (props.account?.credentials || {}) as Record<string, unknown>
+  return props.account?.platform === 'openai' && credentials.oauth_provider === 'xai'
+    ? 'xai'
+    : 'openai'
+})
 const geminiOAuth = useGeminiOAuth()
 const antigravityOAuth = useAntigravityOAuth()
 
@@ -237,6 +245,11 @@ const geminiOAuthType = ref<'code_assist' | 'google_one' | 'ai_studio'>('code_as
 
 // Computed - check platform
 const isOpenAI = computed(() => props.account?.platform === 'openai')
+const isXAIOAuth = computed(() => {
+  if (!isOpenAI.value) return false
+  const credentials = (props.account?.credentials || {}) as Record<string, unknown>
+  return credentials.oauth_provider === 'xai'
+})
 const isOpenAILike = computed(() => isOpenAI.value)
 const isGemini = computed(() => props.account?.platform === 'gemini')
 const isAnthropic = computed(() => props.account?.platform === 'anthropic')

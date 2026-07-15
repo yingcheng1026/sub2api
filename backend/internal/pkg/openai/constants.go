@@ -44,6 +44,33 @@ func DefaultModelIDs() []string {
 // DefaultTestModel default model for testing OpenAI accounts
 const DefaultTestModel = "gpt-5.4"
 
+// XAIDefaultTestModel is the conservative default for xAI-compatible accounts.
+const XAIDefaultTestModel = "grok-4.5"
+
+var xaiOAuthTextModels = []string{
+	"grok-4.20-0309-non-reasoning",
+	"grok-4.20-0309-reasoning",
+	"grok-4.20-multi-agent-0309",
+	"grok-4.3",
+	"grok-4.5",
+	"grok-build-0.1",
+}
+
+// XAIOAuthTextModelIDs returns the text models verified on api.x.ai with xAI OAuth.
+func XAIOAuthTextModelIDs() []string {
+	return append([]string(nil), xaiOAuthTextModels...)
+}
+
+// IsXAIOAuthTextModel reports whether model is in the verified api.x.ai OAuth text set.
+func IsXAIOAuthTextModel(model string) bool {
+	for _, candidate := range xaiOAuthTextModels {
+		if model == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultInstructions default instructions for non-Codex CLI requests
 // Content loaded from instructions.txt at compile time
 //

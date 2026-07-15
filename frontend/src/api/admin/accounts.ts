@@ -312,7 +312,7 @@ export async function resetTempUnschedulable(id: number): Promise<{ message: str
  */
 export async function generateAuthUrl(
   endpoint: string,
-  config: { proxy_id?: number }
+  config: { proxy_id?: number; redirect_uri?: string; oauth_provider?: string }
 ): Promise<{ auth_url: string; session_id: string }> {
   const { data } = await apiClient.post<{ auth_url: string; session_id: string }>(endpoint, config)
   return data
@@ -326,7 +326,7 @@ export async function generateAuthUrl(
  */
 export async function exchangeCode(
   endpoint: string,
-  exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number }
+  exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number; oauth_provider?: string }
 ): Promise<Record<string, unknown>> {
   const { data } = await apiClient.post<Record<string, unknown>>(endpoint, exchangeData)
   return data
@@ -577,9 +577,10 @@ export async function refreshOpenAIToken(
   refreshToken: string,
   proxyId?: number | null,
   endpoint: string = '/admin/openai/refresh-token',
-  clientId?: string
+  clientId?: string,
+  oauthProvider?: string
 ): Promise<Record<string, unknown>> {
-  const payload: { refresh_token: string; proxy_id?: number; client_id?: string } = {
+  const payload: { refresh_token: string; proxy_id?: number; client_id?: string; oauth_provider?: string } = {
     refresh_token: refreshToken
   }
   if (proxyId) {
@@ -587,6 +588,9 @@ export async function refreshOpenAIToken(
   }
   if (clientId) {
     payload.client_id = clientId
+  }
+  if (oauthProvider) {
+    payload.oauth_provider = oauthProvider
   }
   const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload)
   return data

@@ -8,6 +8,7 @@ export interface OpenAITokenInfo {
   access_token?: string
   refresh_token?: string
   client_id?: string
+  oauth_provider?: string
   id_token?: string
   token_type?: string
   expires_in?: number
@@ -24,9 +25,9 @@ export interface OpenAITokenInfo {
   [key: string]: unknown
 }
 
-export type OpenAIOAuthPlatform = 'openai'
+export type OpenAIOAuthPlatform = 'openai' | 'xai'
 
-export function useOpenAIOAuth() {
+export function useOpenAIOAuth(provider: () => OpenAIOAuthPlatform = () => 'openai') {
   const appStore = useAppStore()
   const { t } = useI18n()
   const endpointPrefix = '/admin/openai'
@@ -66,6 +67,7 @@ export function useOpenAIOAuth() {
       if (redirectUri) {
         payload.redirect_uri = redirectUri
       }
+      payload.oauth_provider = provider()
 
       const response = await adminAPI.accounts.generateAuthUrl(
         `${endpointPrefix}/generate-auth-url`,
@@ -105,10 +107,11 @@ export function useOpenAIOAuth() {
     error.value = ''
 
     try {
-      const payload: { session_id: string; code: string; state: string; proxy_id?: number } = {
+      const payload: { session_id: string; code: string; state: string; proxy_id?: number; oauth_provider?: string } = {
         session_id: currentSessionId,
         code: code.trim(),
-        state: state.trim()
+        state: state.trim(),
+        oauth_provider: provider()
       }
       if (proxyId) {
         payload.proxy_id = proxyId
@@ -151,7 +154,8 @@ export function useOpenAIOAuth() {
         refreshToken.trim(),
         proxyId,
         `${endpointPrefix}/refresh-token`,
-        clientId
+        clientId,
+        provider()
       )
       return tokenInfo as OpenAITokenInfo
     } catch (err: any) {
@@ -199,6 +203,9 @@ export function useOpenAIOAuth() {
     }
     if (tokenInfo.client_id) {
       creds.client_id = tokenInfo.client_id
+    }
+    if (tokenInfo.oauth_provider) {
+      creds.oauth_provider = tokenInfo.oauth_provider
     }
 
     return creds

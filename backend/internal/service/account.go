@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"log/slog"
+	"net/url"
 	"reflect"
 	"sort"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
 type Account struct {
@@ -155,6 +157,9 @@ func (a *Account) IsOAuth() bool {
 func (a *Account) IsPrivacySet() bool {
 	switch a.Platform {
 	case PlatformOpenAI:
+		if a.IsOpenAIXAIOAuth() {
+			return true
+		}
 		return a.getExtraString("privacy_mode") == PrivacyModeTrainingOff
 	case PlatformAntigravity:
 		return a.getExtraString("privacy_mode") == AntigravityPrivacySet
@@ -613,7 +618,7 @@ func openAIGPT56MappingTargetEntitled(mapping map[string]string, requestedModel,
 }
 
 // IsModelSupported 检查模型是否在 model_mapping 中（支持通配符）
-// 如果未配置 mapping，返回 true（允许所有模型）
+// 如果未配置 mapping，默认允许所有模型；xAI OAuth 账号例外，仅允许已验证的官方文本模型。
 func (a *Account) IsModelSupported(requestedModel string) bool {
 	mapping := a.GetModelMapping()
 	if a.Platform == PlatformOpenAI {
@@ -631,6 +636,9 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 		}
 	}
 	if len(mapping) == 0 {
+		if a.IsOpenAIXAIOAuth() {
+			return openai.IsXAIOAuthTextModel(requestedModel)
+		}
 		return true // 无映射 = 允许所有
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
@@ -1023,6 +1031,96 @@ func (a *Account) IsOpenAIOAuth() bool {
 	return a.IsOpenAI() && a.Type == AccountTypeOAuth
 }
 
+func (a *Account) OpenAIOAuthProvider() string {
+	if !a.IsOpenAIOAuth() {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(a.GetCredential("oauth_provider"))) {
+	case "xai", "grok":
+		return "xai"
+	default:
+		return "openai"
+	}
+}
+
+func (a *Account) IsOpenAIXAIOAuth() bool {
+	return a.OpenAIOAuthProvider() == "xai"
+}
+
+// IsOpenAIXAIProvider reports whether the account uses xAI or a Grok-only
+// OpenAI-compatible upstream. Explicit provider metadata is authoritative;
+// the base URL and Grok-only mapping checks preserve safe behavior for legacy
+// API-key accounts created before provider metadata existed.
+func (a *Account) IsOpenAIXAIProvider() bool {
+	if a == nil || !a.IsOpenAI() {
+		return false
+	}
+	if a.IsOpenAIXAIOAuth() {
+		return true
+	}
+	if !a.IsOpenAIApiKey() {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(a.GetCredential("openai_compatible_provider")), "xai") {
+		return true
+	}
+	if isXAIOpenAICompatibleBaseURL(a.GetCredential("base_url")) {
+		return true
+	}
+	return isGrokOnlyModelMapping(a.GetModelMapping())
+}
+
+func isXAIOpenAICompatibleBaseURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "api.x.ai", "cli-chat-proxy.grok.com":
+		return true
+	default:
+		return false
+	}
+}
+
+func isGrokOnlyModelMapping(mapping map[string]string) bool {
+	if len(mapping) == 0 {
+		return false
+	}
+	for requestedModel, upstreamModel := range mapping {
+		requestedIsGrok := strings.HasPrefix(strings.ToLower(strings.TrimSpace(requestedModel)), "grok-")
+		upstreamIsGrok := strings.HasPrefix(strings.ToLower(strings.TrimSpace(upstreamModel)), "grok-")
+		if !requestedIsGrok && !upstreamIsGrok {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *Account) IsOpenAICodexOAuth() bool {
+	if a == nil || a.Type != AccountTypeOAuth {
+		return false
+	}
+	// Some internal compatibility paths construct a lightweight OpenAI account
+	// without filling Platform. Preserve that legacy behavior, while never
+	// classifying another explicit platform as OpenAI Codex OAuth.
+	if a.Platform != "" && a.Platform != PlatformOpenAI {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(a.GetCredential("oauth_provider"))) {
+	case "xai", "grok":
+		return false
+	default:
+		return true
+	}
+}
+
+// IsOpenAIPlatformAPIAccount reports whether the account uses the public
+// OpenAI-compatible REST transport instead of ChatGPT's internal Codex API.
+func (a *Account) IsOpenAIPlatformAPIAccount() bool {
+	return a.IsOpenAIApiKey() || a.IsOpenAIXAIOAuth()
+}
+
 func (a *Account) IsOpenAIApiKey() bool {
 	return a.IsOpenAI() && a.Type == AccountTypeAPIKey
 }
@@ -1031,7 +1129,13 @@ func (a *Account) GetOpenAIBaseURL() string {
 	if !a.IsOpenAI() {
 		return ""
 	}
-	if a.Type == AccountTypeAPIKey {
+	// Official xAI OAuth tokens must never be forwarded to a configurable
+	// third-party base URL. API-key accounts keep supporting compatible
+	// upstream sites through their explicit base_url.
+	if a.IsOpenAIXAIOAuth() {
+		return "https://api.x.ai"
+	}
+	if a.IsOpenAIPlatformAPIAccount() {
 		baseURL := a.GetCredential("base_url")
 		if baseURL != "" {
 			return baseURL
