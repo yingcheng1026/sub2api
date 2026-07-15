@@ -78,6 +78,15 @@ func TestSettingService_GetPublicSettings_ExposesTablePreferences(t *testing.T) 
 	require.Equal(t, []int{20, 50, 100}, settings.TablePageSizeOptions)
 }
 
+func TestSettingService_GetPublicSettings_DefaultsToCreditsOnlySiteSubtitle(t *testing.T) {
+	svc := NewSettingService(&settingPublicRepoStub{values: map[string]string{}}, &config.Config{})
+
+	settings, err := svc.GetPublicSettings(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "按需充值的 AI API 中转服务", settings.SiteSubtitle)
+	require.NotContains(t, settings.SiteSubtitle, "Subscription")
+}
+
 func TestPublicSiteLogoReference_RewritesDataImageToAssetURL(t *testing.T) {
 	require.Equal(t, PublicSiteLogoAssetPath, PublicSiteLogoReference(" data:image/png;base64,aGVsbG8= "))
 	require.Equal(t, "/logo.png", PublicSiteLogoReference(" /logo.png "))

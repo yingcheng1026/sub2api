@@ -937,7 +937,7 @@ func TestAPIContracts(t *testing.T) {
 					"google_oauth_frontend_redirect_url": "/auth/oauth/callback",
 					"site_name": "Sub2API",
 					"site_logo": "",
-					"site_subtitle": "Subscription to API Conversion Platform",
+					"site_subtitle": "按需充值的 AI API 中转服务",
 					"api_base_url": "",
 					"contact_info": "",
 					"doc_url": "",

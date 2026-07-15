@@ -40,7 +40,7 @@ Centered: Both horizontally and vertically
 ┌─────────────────────────────────────────────┐
 │                                             │
 │         🔷 Sub2API                          │
-│    Subscription to API Conversion Platform  │
+│           按需充值的 AI API 中转服务          │
 │                                             │
 │  ┌─────────────────────────────────────┐   │
 │  │                                     │   │
@@ -134,7 +134,7 @@ Centered: Both horizontally and vertically
 ┌─────────────────────────────────────────────┐
 │                                             │
 │         🔷 Sub2API                          │
-│    Subscription to API Conversion Platform  │
+│           按需充值的 AI API 中转服务          │
 │                                             │
 │  ┌─────────────────────────────────────┐   │
 │  │                                     │   │
