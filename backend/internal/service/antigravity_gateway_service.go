@@ -3050,10 +3050,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 
 	// 使用 Scanner 并限制单行大小，避免 ReadString 无上限导致 OOM
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.settingService.cfg)
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 	usage := &ClaudeUsage{}
@@ -3236,10 +3233,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 // Gemini 流式响应是增量的，需要累积所有 chunk 的内容
 func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time) (*antigravityStreamResult, error) {
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.settingService.cfg)
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 
@@ -3701,10 +3695,7 @@ func (s *AntigravityGatewayService) writeGoogleError(c *gin.Context, status int,
 // 用于处理客户端非流式请求但上游只支持流式的情况
 func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.settingService.cfg)
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 
@@ -3853,7 +3844,7 @@ returnResponse:
 	// 转换 Gemini 响应为 Claude 格式
 	claudeResp, agUsage, err := antigravity.TransformGeminiToClaude(geminiBody, originalModel)
 	if err != nil {
-		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] transform_error error=%v body=%s", err, string(geminiBody))
+		logAntigravityTransformError(err, geminiBody)
 		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
 	}
 
@@ -3868,6 +3859,15 @@ returnResponse:
 	}
 
 	return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, nil
+}
+
+func logAntigravityTransformError(err error, geminiBody []byte) {
+	logger.LegacyPrintf(
+		"service.antigravity_gateway",
+		"[antigravity-Forward] transform_error error_type=%T body_bytes=%d",
+		err,
+		len(geminiBody),
+	)
 }
 
 // handleClaudeStreamingResponse 处理 Claude 流式响应（Gemini SSE → Claude SSE 转换）
@@ -3887,10 +3887,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	var firstTokenMs *int
 	// 使用 Scanner 并限制单行大小，避免 ReadString 无上限导致 OOM
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.settingService.cfg)
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 
@@ -4339,10 +4336,7 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 	var firstTokenMs *int
 
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.settingService.cfg)
 	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
 
 	type scanEvent struct {

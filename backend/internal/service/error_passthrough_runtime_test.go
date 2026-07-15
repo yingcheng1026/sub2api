@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/model"
@@ -33,6 +34,48 @@ func TestApplyErrorPassthroughRule_NoBoundService(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, status)
 	assert.Equal(t, "upstream_error", errType)
 	assert.Equal(t, "Upstream request failed", errMsg)
+}
+
+func TestApplyErrorPassthroughRule_LegacyRawBodyRuleNeverReflectsUpstreamDetails(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	ruleSvc := &ErrorPassthroughService{}
+	ruleSvc.setLocalCache([]*model.ErrorPassthroughRule{{
+		ID:              1,
+		Name:            "legacy-raw-body-rule",
+		Enabled:         true,
+		Priority:        1,
+		ErrorCodes:      []int{http.StatusInternalServerError},
+		MatchMode:       model.MatchModeAny,
+		PassthroughCode: true,
+		PassthroughBody: true,
+	}})
+	BindErrorPassthroughService(c, ruleSvc)
+
+	secretBody := []byte(`{"error":{"message":"database dial tcp 10.0.0.5:5432 password=hunter2 sk-proj-secret"}}`)
+	status, errType, errMsg, matched := applyErrorPassthroughRule(
+		c,
+		PlatformAnthropic,
+		http.StatusInternalServerError,
+		secretBody,
+		http.StatusBadGateway,
+		"upstream_error",
+		"Upstream request failed",
+	)
+
+	require.True(t, matched)
+	assert.Equal(t, http.StatusInternalServerError, status)
+	assert.Equal(t, "upstream_error", errType)
+	assert.Equal(t, "Upstream request failed", errMsg)
+	for _, fragment := range []string{"10.0.0.5", "hunter2", "sk-proj-secret"} {
+		assert.False(t, strings.Contains(errMsg, fragment), "client message leaked %q", fragment)
+	}
+}
+
+func TestErrorPassthroughClientMessage_EmptyDefaultUsesSafeFallback(t *testing.T) {
+	rule := &model.ErrorPassthroughRule{PassthroughBody: true}
+	assert.Equal(t, DefaultErrorPassthroughClientMessage, ErrorPassthroughClientMessage(rule, ""))
 }
 
 func TestGatewayHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {

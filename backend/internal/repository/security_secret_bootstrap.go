@@ -2,18 +2,17 @@ package repository
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 const (
@@ -22,107 +21,114 @@ const (
 	securitySecretReadRetryWait = 10 * time.Millisecond
 )
 
-var readRandomBytes = rand.Read
-
-func ensureBootstrapSecrets(ctx context.Context, client *ent.Client, cfg *config.Config) error {
+func ensureBootstrapSecrets(ctx context.Context, client *ent.Client, cfg *config.Config, encryptor service.SecretEncryptor) error {
 	if client == nil {
 		return fmt.Errorf("nil ent client")
 	}
 	if cfg == nil {
 		return fmt.Errorf("nil config")
 	}
+	if encryptor == nil {
+		return fmt.Errorf("jwt secret encryptor is required")
+	}
 
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
-	if cfg.JWT.Secret != "" {
-		storedSecret, err := createSecuritySecretIfAbsent(ctx, client, securitySecretKeyJWT, cfg.JWT.Secret)
+	configuredSecret := cfg.JWT.Secret
+	if configuredSecret != "" {
+		if err := validateBootstrapSecret(securitySecretKeyJWT, configuredSecret); err != nil {
+			return err
+		}
+	}
+
+	stored, err := client.SecuritySecret.Query().Where(securitysecret.KeyEQ(securitySecretKeyJWT)).Only(ctx)
+	if ent.IsNotFound(err) {
+		if configuredSecret == "" {
+			return fmt.Errorf("JWT_SECRET is required when no persisted jwt secret exists")
+		}
+		ciphertext, encryptErr := service.EncryptForSecretDomain(encryptor, service.SecretDomainJWTHMAC, configuredSecret)
+		if encryptErr != nil {
+			return fmt.Errorf("encrypt jwt secret: %w", encryptErr)
+		}
+		if createErr := client.SecuritySecret.Create().
+			SetKey(securitySecretKeyJWT).
+			SetValue(ciphertext).
+			OnConflictColumns(securitysecret.FieldKey).
+			DoNothing().
+			Exec(ctx); createErr != nil && !isSQLNoRowsError(createErr) {
+			return fmt.Errorf("persist encrypted jwt secret: %w", createErr)
+		}
+		stored, err = querySecuritySecretWithRetry(ctx, client, securitySecretKeyJWT)
 		if err != nil {
-			return fmt.Errorf("persist jwt secret: %w", err)
+			return fmt.Errorf("read persisted jwt secret: %w", err)
 		}
-		if storedSecret != cfg.JWT.Secret {
-			log.Println("Warning: configured JWT secret mismatches persisted value; using persisted secret for cross-instance consistency.")
-		}
-		cfg.JWT.Secret = storedSecret
-		return nil
+	} else if err != nil {
+		return fmt.Errorf("read jwt secret: %w", err)
 	}
 
-	secret, created, err := getOrCreateGeneratedSecuritySecret(ctx, client, securitySecretKeyJWT, 32)
+	plaintext, err := openOrMigrateBootstrapSecret(ctx, client, encryptor, stored)
 	if err != nil {
-		return fmt.Errorf("ensure jwt secret: %w", err)
+		return fmt.Errorf("load encrypted jwt secret: %w", err)
 	}
-	cfg.JWT.Secret = secret
-
-	if created {
-		log.Println("Warning: JWT secret auto-generated and persisted to database. Consider rotating to a managed secret for production.")
+	if subtle.ConstantTimeCompare(
+		[]byte(plaintext),
+		[]byte(strings.TrimSpace(cfg.SecretEncryption.JWTHMACKey)),
+	) == 1 {
+		return fmt.Errorf("persisted JWT secret must be distinct from SECRET_ENCRYPTION_JWT_HMAC_KEY")
 	}
+	if configuredSecret != "" && configuredSecret != plaintext {
+		return fmt.Errorf("configured JWT secret mismatches persisted secret")
+	}
+	cfg.JWT.Secret = plaintext
 	return nil
 }
 
-func getOrCreateGeneratedSecuritySecret(ctx context.Context, client *ent.Client, key string, byteLength int) (string, bool, error) {
-	existing, err := client.SecuritySecret.Query().Where(securitysecret.KeyEQ(key)).Only(ctx)
-	if err == nil {
-		value := strings.TrimSpace(existing.Value)
-		if len([]byte(value)) < 32 {
-			return "", false, fmt.Errorf("stored secret %q must be at least 32 bytes", key)
+func openOrMigrateBootstrapSecret(ctx context.Context, client *ent.Client, encryptor service.SecretEncryptor, stored *ent.SecuritySecret) (string, error) {
+	if stored == nil {
+		return "", fmt.Errorf("nil persisted secret")
+	}
+	rawValue := strings.TrimSpace(stored.Value)
+	if strings.HasPrefix(rawValue, secretDomainCiphertextPrefix) ||
+		strings.HasPrefix(rawValue, legacySecretDomainCiphertextPrefixV2) {
+		plaintext, err := service.DecryptForSecretDomain(encryptor, service.SecretDomainJWTHMAC, rawValue)
+		if err != nil {
+			return "", fmt.Errorf("decrypt %q: %w", stored.Key, err)
 		}
-		return value, false, nil
-	}
-	if !ent.IsNotFound(err) {
-		return "", false, err
-	}
-
-	generated, err := generateHexSecret(byteLength)
-	if err != nil {
-		return "", false, err
-	}
-
-	if err := client.SecuritySecret.Create().
-		SetKey(key).
-		SetValue(generated).
-		OnConflictColumns(securitysecret.FieldKey).
-		DoNothing().
-		Exec(ctx); err != nil {
-		if !isSQLNoRowsError(err) {
-			return "", false, err
-		}
-	}
-
-	stored, err := querySecuritySecretWithRetry(ctx, client, key)
-	if err != nil {
-		return "", false, err
-	}
-	value := strings.TrimSpace(stored.Value)
-	if len([]byte(value)) < 32 {
-		return "", false, fmt.Errorf("stored secret %q must be at least 32 bytes", key)
-	}
-	return value, value == generated, nil
-}
-
-func createSecuritySecretIfAbsent(ctx context.Context, client *ent.Client, key, value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if len([]byte(value)) < 32 {
-		return "", fmt.Errorf("secret %q must be at least 32 bytes", key)
-	}
-
-	if err := client.SecuritySecret.Create().
-		SetKey(key).
-		SetValue(value).
-		OnConflictColumns(securitysecret.FieldKey).
-		DoNothing().
-		Exec(ctx); err != nil {
-		if !isSQLNoRowsError(err) {
+		if err := validateBootstrapSecret(stored.Key, plaintext); err != nil {
 			return "", err
 		}
+		return plaintext, nil
 	}
 
-	stored, err := querySecuritySecretWithRetry(ctx, client, key)
-	if err != nil {
+	if err := validateBootstrapSecret(stored.Key, rawValue); err != nil {
 		return "", err
 	}
-	storedValue := strings.TrimSpace(stored.Value)
-	if len([]byte(storedValue)) < 32 {
-		return "", fmt.Errorf("stored secret %q must be at least 32 bytes", key)
+	ciphertext, err := service.EncryptForSecretDomain(encryptor, service.SecretDomainJWTHMAC, rawValue)
+	if err != nil {
+		return "", fmt.Errorf("encrypt legacy plaintext %q: %w", stored.Key, err)
 	}
-	return storedValue, nil
+	affected, err := client.SecuritySecret.Update().
+		Where(securitysecret.IDEQ(stored.ID), securitysecret.ValueEQ(stored.Value)).
+		SetValue(ciphertext).
+		Save(ctx)
+	if err != nil {
+		return "", fmt.Errorf("migrate plaintext %q: %w", stored.Key, err)
+	}
+	if affected == 0 {
+		latest, err := querySecuritySecretWithRetry(ctx, client, stored.Key)
+		if err != nil {
+			return "", err
+		}
+		return openOrMigrateBootstrapSecret(ctx, client, encryptor, latest)
+	}
+	return rawValue, nil
+}
+
+func validateBootstrapSecret(key, value string) error {
+	value = strings.TrimSpace(value)
+	if len([]byte(value)) < 32 {
+		return fmt.Errorf("secret %q must be at least 32 bytes", key)
+	}
+	return nil
 }
 
 func querySecuritySecretWithRetry(ctx context.Context, client *ent.Client, key string) (*ent.SecuritySecret, error) {
@@ -163,15 +169,4 @@ func isSQLNoRowsError(err error) bool {
 		return false
 	}
 	return errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no rows in result set")
-}
-
-func generateHexSecret(byteLength int) (string, error) {
-	if byteLength <= 0 {
-		byteLength = 32
-	}
-	buf := make([]byte, byteLength)
-	if _, err := readRandomBytes(buf); err != nil {
-		return "", fmt.Errorf("generate random secret: %w", err)
-	}
-	return hex.EncodeToString(buf), nil
 }

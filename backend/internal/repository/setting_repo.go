@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -10,11 +11,26 @@ import (
 )
 
 type settingRepository struct {
-	client *ent.Client
+	client    *ent.Client
+	encryptor service.SecretEncryptor
 }
 
-func NewSettingRepository(client *ent.Client) service.SettingRepository {
-	return &settingRepository{client: client}
+var sensitiveSettingKeys = map[string]struct{}{
+	service.SettingKeyAdminAPIKey:                  {},
+	service.SettingKeySMTPPassword:                 {},
+	service.SettingKeyTurnstileSecretKey:           {},
+	service.SettingKeyLinuxDoConnectClientSecret:   {},
+	service.SettingKeyWeChatConnectAppSecret:       {},
+	service.SettingKeyWeChatConnectOpenAppSecret:   {},
+	service.SettingKeyWeChatConnectMPAppSecret:     {},
+	service.SettingKeyWeChatConnectMobileAppSecret: {},
+	service.SettingKeyOIDCConnectClientSecret:      {},
+	service.SettingKeyGitHubOAuthClientSecret:      {},
+	service.SettingKeyGoogleOAuthClientSecret:      {},
+}
+
+func NewSettingRepository(client *ent.Client, encryptor service.SecretEncryptor) service.SettingRepository {
+	return &settingRepository{client: client, encryptor: encryptor}
 }
 
 func (r *settingRepository) Get(ctx context.Context, key string) (*service.Setting, error) {
@@ -25,10 +41,14 @@ func (r *settingRepository) Get(ctx context.Context, key string) (*service.Setti
 		}
 		return nil, err
 	}
+	value, err := r.openValue(m.Key, m.Value)
+	if err != nil {
+		return nil, err
+	}
 	return &service.Setting{
 		ID:        m.ID,
 		Key:       m.Key,
-		Value:     m.Value,
+		Value:     value,
 		UpdatedAt: m.UpdatedAt,
 	}, nil
 }
@@ -42,11 +62,15 @@ func (r *settingRepository) GetValue(ctx context.Context, key string) (string, e
 }
 
 func (r *settingRepository) Set(ctx context.Context, key, value string) error {
+	sealed, err := r.sealValue(key, value)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	return r.client.Setting.
 		Create().
 		SetKey(key).
-		SetValue(value).
+		SetValue(sealed).
 		SetUpdatedAt(now).
 		OnConflictColumns(setting.FieldKey).
 		UpdateNewValues().
@@ -64,7 +88,11 @@ func (r *settingRepository) GetMultiple(ctx context.Context, keys []string) (map
 
 	result := make(map[string]string)
 	for _, s := range settings {
-		result[s.Key] = s.Value
+		value, err := r.openValue(s.Key, s.Value)
+		if err != nil {
+			return nil, err
+		}
+		result[s.Key] = value
 	}
 	return result, nil
 }
@@ -77,7 +105,11 @@ func (r *settingRepository) SetMultiple(ctx context.Context, settings map[string
 	now := time.Now()
 	builders := make([]*ent.SettingCreate, 0, len(settings))
 	for key, value := range settings {
-		builders = append(builders, r.client.Setting.Create().SetKey(key).SetValue(value).SetUpdatedAt(now))
+		sealed, err := r.sealValue(key, value)
+		if err != nil {
+			return err
+		}
+		builders = append(builders, r.client.Setting.Create().SetKey(key).SetValue(sealed).SetUpdatedAt(now))
 	}
 	return r.client.Setting.
 		CreateBulk(builders...).
@@ -94,7 +126,11 @@ func (r *settingRepository) GetAll(ctx context.Context) (map[string]string, erro
 
 	result := make(map[string]string)
 	for _, s := range settings {
-		result[s.Key] = s.Value
+		value, err := r.openValue(s.Key, s.Value)
+		if err != nil {
+			return nil, err
+		}
+		result[s.Key] = value
 	}
 	return result, nil
 }
@@ -102,4 +138,31 @@ func (r *settingRepository) GetAll(ctx context.Context) (map[string]string, erro
 func (r *settingRepository) Delete(ctx context.Context, key string) error {
 	_, err := r.client.Setting.Delete().Where(setting.KeyEQ(key)).Exec(ctx)
 	return err
+}
+
+func isSensitiveSettingKey(key string) bool {
+	_, ok := sensitiveSettingKeys[key]
+	return ok
+}
+
+func (r *settingRepository) sealValue(key, value string) (string, error) {
+	if !isSensitiveSettingKey(key) || value == "" {
+		return value, nil
+	}
+	sealed, err := service.EncryptForSecretDomain(r.encryptor, service.SecretDomainSettingSecret, value)
+	if err != nil {
+		return "", fmt.Errorf("encrypt setting %q: %w", key, err)
+	}
+	return sealed, nil
+}
+
+func (r *settingRepository) openValue(key, value string) (string, error) {
+	if !isSensitiveSettingKey(key) || value == "" {
+		return value, nil
+	}
+	plaintext, err := service.DecryptForSecretDomain(r.encryptor, service.SecretDomainSettingSecret, value)
+	if err != nil {
+		return "", fmt.Errorf("decrypt setting %q: %w", key, err)
+	}
+	return plaintext, nil
 }

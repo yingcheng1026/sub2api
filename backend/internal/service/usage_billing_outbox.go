@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	UsageBillingEnvelopeVersion  int16 = 1
+	UsageBillingEnvelopeVersion  int16 = UsageBillingFencedEnvelopeVersion
 	UsageBillingEnvelopeMaxBytes       = 16 * 1024
 )
 
@@ -29,6 +29,8 @@ var (
 // in this type and therefore cannot be serialized into the durable outbox.
 type UsageBillingEnvelopeInput struct {
 	RequestID               string
+	RequestPayloadHash      string
+	AdmissionAttemptID      string
 	APIKeyID                int64
 	AuthCacheLocator        string
 	UserID                  int64
@@ -103,6 +105,8 @@ type UsageBillingEnvelope struct {
 type usageBillingEnvelopePayload struct {
 	Version                 int16  `json:"version"`
 	RequestID               string `json:"request_id"`
+	RequestPayloadHash      string `json:"request_payload_hash,omitempty"`
+	AdmissionAttemptID      string `json:"admission_attempt_id,omitempty"`
 	APIKeyID                int64  `json:"api_key_id"`
 	AuthCacheLocator        string `json:"auth_cache_locator,omitempty"`
 	RequestFingerprint      string `json:"request_fingerprint"`
@@ -177,6 +181,8 @@ func NewUsageBillingEnvelope(input UsageBillingEnvelopeInput) (UsageBillingEnvel
 	payload := usageBillingEnvelopePayload{
 		Version:                 UsageBillingEnvelopeVersion,
 		RequestID:               strings.TrimSpace(input.RequestID),
+		RequestPayloadHash:      strings.ToLower(strings.TrimSpace(input.RequestPayloadHash)),
+		AdmissionAttemptID:      strings.ToLower(strings.TrimSpace(input.AdmissionAttemptID)),
 		APIKeyID:                input.APIKeyID,
 		AuthCacheLocator:        strings.ToLower(strings.TrimSpace(input.AuthCacheLocator)),
 		UserID:                  input.UserID,
@@ -216,7 +222,7 @@ func NewUsageBillingEnvelope(input UsageBillingEnvelopeInput) (UsageBillingEnvel
 		PricingSource:           strings.TrimSpace(input.PricingSource),
 		PricingRevision:         strings.TrimSpace(input.PricingRevision),
 		PricingHash:             strings.ToLower(strings.TrimSpace(input.PricingHash)),
-		RateMultiplier:          input.RateMultiplier,
+		RateMultiplier:          canonicalUsageBillingRate(input.RateMultiplier),
 		AccountRateMultiplier:   input.AccountRateMultiplier,
 		BalanceCost:             input.BalanceCost,
 		SubscriptionCost:        input.SubscriptionCost,
@@ -279,6 +285,8 @@ func NewUsageBillingEnvelopeFromUsageLog(log *UsageLog, cmd *UsageBillingCommand
 
 	return NewUsageBillingEnvelope(UsageBillingEnvelopeInput{
 		RequestID:               log.RequestID,
+		RequestPayloadHash:      cmd.RequestPayloadHash,
+		AdmissionAttemptID:      log.UsageBillingAttemptID,
 		APIKeyID:                log.APIKeyID,
 		AuthCacheLocator:        cmd.AuthCacheLocator,
 		UserID:                  log.UserID,
@@ -350,7 +358,7 @@ func DecodeUsageBillingEnvelope(data []byte) (UsageBillingEnvelope, error) {
 	if err := ensureUsageBillingEnvelopeEOF(decoder); err != nil {
 		return UsageBillingEnvelope{}, err
 	}
-	if payload.Version != UsageBillingEnvelopeVersion {
+	if payload.Version != UsageBillingLegacyEnvelopeVersion && payload.Version != UsageBillingFencedEnvelopeVersion {
 		return UsageBillingEnvelope{}, fmt.Errorf("%w: %d", ErrUsageBillingEnvelopeVersion, payload.Version)
 	}
 	if err := validateUsageBillingEnvelopePayload(payload, true); err != nil {
@@ -364,6 +372,7 @@ func DecodeUsageBillingEnvelope(data []byte) (UsageBillingEnvelope, error) {
 		return UsageBillingEnvelope{}, ErrUsageBillingEnvelopeFingerprintMismatch
 	}
 	payload.RequestID = strings.TrimSpace(payload.RequestID)
+	payload.RequestPayloadHash = strings.ToLower(strings.TrimSpace(payload.RequestPayloadHash))
 	payload.RequestFingerprint = strings.ToLower(strings.TrimSpace(payload.RequestFingerprint))
 	payload.SubscriptionID = copyInt64(payload.SubscriptionID)
 	payload.GroupID = copyInt64(payload.GroupID)
@@ -381,6 +390,8 @@ func (e UsageBillingEnvelope) MarshalJSON() ([]byte, error) {
 
 func (e UsageBillingEnvelope) Version() int16             { return e.payload.Version }
 func (e UsageBillingEnvelope) RequestID() string          { return e.payload.RequestID }
+func (e UsageBillingEnvelope) RequestPayloadHash() string { return e.payload.RequestPayloadHash }
+func (e UsageBillingEnvelope) AdmissionAttemptID() string { return e.payload.AdmissionAttemptID }
 func (e UsageBillingEnvelope) APIKeyID() int64            { return e.payload.APIKeyID }
 func (e UsageBillingEnvelope) AuthCacheLocator() string   { return e.payload.AuthCacheLocator }
 func (e UsageBillingEnvelope) UserID() int64              { return e.payload.UserID }
@@ -391,9 +402,21 @@ func (e UsageBillingEnvelope) GroupID() *int64            { return copyInt64(e.p
 func (e UsageBillingEnvelope) EffectiveBillingGroupID() *int64 {
 	return copyInt64(e.payload.EffectiveBillingGroupID)
 }
-func (e UsageBillingEnvelope) AccountType() string       { return e.payload.AccountType }
-func (e UsageBillingEnvelope) BillingModel() string      { return e.payload.BillingModel }
-func (e UsageBillingEnvelope) BillingType() int8         { return e.payload.BillingType }
+func (e UsageBillingEnvelope) AccountType() string     { return e.payload.AccountType }
+func (e UsageBillingEnvelope) BillingModel() string    { return e.payload.BillingModel }
+func (e UsageBillingEnvelope) BillingType() int8       { return e.payload.BillingType }
+func (e UsageBillingEnvelope) PricingSource() string   { return e.payload.PricingSource }
+func (e UsageBillingEnvelope) PricingRevision() string { return e.payload.PricingRevision }
+func (e UsageBillingEnvelope) PricingHash() string     { return e.payload.PricingHash }
+func (e UsageBillingEnvelope) RateMultiplier() float64 { return e.payload.RateMultiplier }
+func (e UsageBillingEnvelope) AccountRateMultiplier() float64 {
+	return e.payload.AccountRateMultiplier
+}
+func (e UsageBillingEnvelope) ActualCost() float64 { return e.payload.ActualCost }
+func (e UsageBillingEnvelope) TotalCost() float64  { return e.payload.TotalCost }
+func (e UsageBillingEnvelope) PrimaryBillingCost() float64 {
+	return e.payload.BalanceCost + e.payload.SubscriptionCost + e.payload.WalletCost
+}
 func (e UsageBillingEnvelope) BalanceCost() float64      { return e.payload.BalanceCost }
 func (e UsageBillingEnvelope) SubscriptionCost() float64 { return e.payload.SubscriptionCost }
 func (e UsageBillingEnvelope) WalletCost() float64       { return e.payload.WalletCost }
@@ -401,6 +424,7 @@ func (e UsageBillingEnvelope) APIKeyQuotaCost() float64  { return e.payload.APIK
 func (e UsageBillingEnvelope) APIKeyRateLimitCost() float64 {
 	return e.payload.APIKeyRateLimitCost
 }
+func (e UsageBillingEnvelope) AccountQuotaCost() float64 { return e.payload.AccountQuotaCost }
 
 func (e UsageBillingEnvelope) UsageLog() *UsageLog {
 	model := strings.TrimSpace(e.payload.ExecutionModel)
@@ -421,6 +445,7 @@ func (e UsageBillingEnvelope) UsageLog() *UsageLog {
 		APIKeyID:              e.payload.APIKeyID,
 		AccountID:             e.payload.AccountID,
 		RequestID:             e.payload.RequestID,
+		UsageBillingAttemptID: e.payload.AdmissionAttemptID,
 		Model:                 model,
 		RequestedModel:        requestedModel,
 		UpstreamModel:         optionalTrimmedStringPtr(e.payload.UpstreamModel),
@@ -493,6 +518,7 @@ func (e UsageBillingEnvelope) Validate() error {
 func (e UsageBillingEnvelope) Command() *UsageBillingCommand {
 	return &UsageBillingCommand{
 		RequestID:               e.payload.RequestID,
+		RequestPayloadHash:      e.payload.RequestPayloadHash,
 		APIKeyID:                e.payload.APIKeyID,
 		AuthCacheLocator:        e.payload.AuthCacheLocator,
 		RequestFingerprint:      e.payload.RequestFingerprint,
@@ -522,15 +548,25 @@ func (e UsageBillingEnvelope) Command() *UsageBillingCommand {
 }
 
 func validateUsageBillingEnvelopePayload(payload usageBillingEnvelopePayload, requireFingerprint bool) error {
-	if payload.Version != UsageBillingEnvelopeVersion {
+	if payload.Version != UsageBillingLegacyEnvelopeVersion && payload.Version != UsageBillingFencedEnvelopeVersion {
 		return fmt.Errorf("%w: version=%d", ErrUsageBillingEnvelopeVersion, payload.Version)
 	}
 	if strings.TrimSpace(payload.RequestID) == "" || len(strings.TrimSpace(payload.RequestID)) > 255 ||
 		payload.APIKeyID <= 0 || payload.UserID <= 0 || payload.AccountID <= 0 {
 		return fmt.Errorf("%w: invalid identity", ErrUsageBillingEnvelopeInvalid)
 	}
+	if payload.Version == UsageBillingFencedEnvelopeVersion {
+		if !validSHA256(payload.RequestPayloadHash) {
+			return fmt.Errorf("%w: request_payload_hash is required", ErrUsageBillingEnvelopeInvalid)
+		}
+	} else if payload.RequestPayloadHash != "" && !validSHA256(payload.RequestPayloadHash) {
+		return fmt.Errorf("%w: invalid request_payload_hash", ErrUsageBillingEnvelopeInvalid)
+	}
 	if payload.AuthCacheLocator != "" && !validSHA256(payload.AuthCacheLocator) {
 		return fmt.Errorf("%w: invalid auth_cache_locator", ErrUsageBillingEnvelopeInvalid)
+	}
+	if payload.AdmissionAttemptID != "" && !validFenceToken(payload.AdmissionAttemptID) {
+		return fmt.Errorf("%w: invalid admission_attempt_id", ErrUsageBillingEnvelopeInvalid)
 	}
 	if payload.APIKeyQuotaCost > 0 && !validSHA256(payload.AuthCacheLocator) {
 		return fmt.Errorf("%w: auth_cache_locator is required for quota billing", ErrUsageBillingEnvelopeInvalid)

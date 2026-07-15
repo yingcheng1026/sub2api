@@ -3,7 +3,9 @@ package handler
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
@@ -40,6 +42,35 @@ func NewAuthHandler(cfg *config.Config, authService *service.AuthService, userSe
 		redeemService: redeemService,
 		totpService:   totpService,
 	}
+}
+
+// IssueAdminOpsWSTicket returns a short-lived credential scoped exclusively to
+// the realtime admin Ops WebSocket handshake.
+func (h *AuthHandler) IssueAdminOpsWSTicket(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok || subject.UserID <= 0 {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	user, err := h.userService.GetByID(c.Request.Context(), subject.UserID)
+	if err != nil || user == nil || !user.IsActive() || !user.IsAdmin() {
+		response.Error(c, http.StatusForbidden, "Admin access required")
+		return
+	}
+
+	ticket, expiresAt, err := h.authService.GenerateAdminOpsWSTicket(user)
+	if err != nil {
+		slog.Error("failed to issue admin ops websocket ticket", "error", err, "user_id", subject.UserID)
+		response.InternalError(c, "Failed to issue WebSocket ticket")
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	response.Success(c, gin.H{
+		"ticket":     ticket,
+		"expires_at": expiresAt.Format(time.RFC3339),
+		"expires_in": int(service.AdminOpsWSTicketTTL.Seconds()),
+	})
 }
 
 // RegisterRequest represents the registration request payload
@@ -116,13 +147,14 @@ func (h *AuthHandler) respondWithTokenPair(c *gin.Context, user *service.User) {
 		})
 		return
 	}
-	response.Success(c, AuthResponse{
-		AccessToken:  tokenPair.AccessToken,
-		RefreshToken: tokenPair.RefreshToken,
-		ExpiresIn:    tokenPair.ExpiresIn,
-		TokenType:    "Bearer",
-		User:         dto.UserFromService(user),
-	})
+	payload, err := h.browserSessionTokenPairPayload(c, tokenPair)
+	if err != nil {
+		slog.Error("failed to establish browser session", "error", err, "user_id", user.ID)
+		response.InternalError(c, "Failed to establish browser session")
+		return
+	}
+	payload["user"] = dto.UserFromService(user)
+	response.Success(c, payload)
 }
 
 func (h *AuthHandler) ensureBackendModeAllowsUser(ctx context.Context, user *service.User) error {
@@ -318,8 +350,19 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	consumedSession, err := h.totpService.ConsumeLoginSession(c.Request.Context(), req.TempToken)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if consumedSession == nil || consumedSession.UserID != session.UserID {
+		response.BadRequest(c, "Invalid or expired 2FA session")
+		return
+	}
+	session = consumedSession
 
-	// Get the user (before session deletion so we can check backend mode)
+	// The one-time session is consumed before any token issuance or OAuth bind
+	// side effect. A later transient failure requires a fresh primary login.
 	user, err := h.userService.GetByID(c.Request.Context(), session.UserID)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -391,9 +434,6 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 			return
 		}
 	}
-
-	// Delete the login session (only after all checks pass)
-	_ = h.totpService.DeleteLoginSession(c.Request.Context(), req.TempToken)
 
 	if session.PendingOAuthBind == nil {
 		h.authService.RecordSuccessfulLogin(c.Request.Context(), user.ID)
@@ -650,13 +690,13 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 
 // RefreshTokenRequest 刷新Token请求
 type RefreshTokenRequest struct {
-	RefreshToken string `json:"refresh_token" binding:"required"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 // RefreshTokenResponse 刷新Token响应
 type RefreshTokenResponse struct {
 	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpiresIn    int    `json:"expires_in"` // Access Token有效期（秒）
 	TokenType    string `json:"token_type"`
 }
@@ -664,13 +704,30 @@ type RefreshTokenResponse struct {
 // RefreshToken 刷新Token
 // POST /api/v1/auth/refresh
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
-	var req RefreshTokenRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
+	var refreshToken string
+	if isBrowserSessionRequest(c) {
+		if err := validateBrowserSessionCSRF(c); err != nil {
+			clearBrowserSessionCookies(c)
+			response.ErrorFrom(c, err)
+			return
+		}
+		var err error
+		refreshToken, err = readBrowserRefreshToken(c)
+		if err != nil {
+			clearBrowserSessionCookies(c)
+			response.Unauthorized(c, "Browser session is missing or invalid")
+			return
+		}
+	} else {
+		var req RefreshTokenRequest
+		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.RefreshToken) == "" {
+			response.BadRequest(c, "Invalid request: refresh_token is required")
+			return
+		}
+		refreshToken = req.RefreshToken
 	}
 
-	result, err := h.authService.RefreshTokenPair(c.Request.Context(), req.RefreshToken)
+	result, err := h.authService.RefreshTokenPair(c.Request.Context(), refreshToken)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -682,12 +739,17 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, RefreshTokenResponse{
+	payload, err := h.browserSessionTokenPairPayload(c, &service.TokenPair{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		ExpiresIn:    result.ExpiresIn,
-		TokenType:    "Bearer",
 	})
+	if err != nil {
+		slog.Error("failed to rotate browser session", "error", err)
+		response.InternalError(c, "Failed to rotate browser session")
+		return
+	}
+	response.Success(c, payload)
 }
 
 // LogoutRequest 登出请求
@@ -703,13 +765,27 @@ type LogoutResponse struct {
 // Logout 用户登出
 // POST /api/v1/auth/logout
 func (h *AuthHandler) Logout(c *gin.Context) {
-	var req LogoutRequest
-	// 允许空请求体（向后兼容）
-	_ = c.ShouldBindJSON(&req)
+	var refreshToken string
+	if isBrowserSessionRequest(c) {
+		if cookieToken, err := readBrowserRefreshToken(c); err == nil {
+			if err := validateBrowserSessionCSRF(c); err != nil {
+				clearBrowserSessionCookies(c)
+				response.ErrorFrom(c, err)
+				return
+			}
+			refreshToken = cookieToken
+		}
+		clearBrowserSessionCookies(c)
+	} else {
+		var req LogoutRequest
+		// 允许空请求体（向后兼容）
+		_ = c.ShouldBindJSON(&req)
+		refreshToken = req.RefreshToken
+	}
 
 	// 如果提供了Refresh Token，撤销它
-	if req.RefreshToken != "" {
-		if err := h.authService.RevokeRefreshToken(c.Request.Context(), req.RefreshToken); err != nil {
+	if refreshToken != "" {
+		if err := h.authService.RevokeRefreshToken(c.Request.Context(), refreshToken); err != nil {
 			slog.Debug("failed to revoke refresh token", "error", err)
 			// 不影响登出流程
 		}

@@ -15,25 +15,26 @@ import (
 
 const defaultClaudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
 
-// 默认 User-Agent，与用户抓包的请求一致
-const defaultUsageUserAgent = "claude-code/2.1.7"
+// Use a truthful service identity for the account-management usage endpoint.
+// A caller-supplied Claude Code fingerprint must never influence this request.
+const defaultUsageUserAgent = "sub2api-usage/1"
 
 type claudeUsageService struct {
 	usageURL          string
 	allowPrivateHosts bool
-	httpUpstream      service.HTTPUpstream
 }
 
 // NewClaudeUsageFetcher 创建 Claude 用量获取服务
-// httpUpstream: 可选，如果提供则支持 TLS 指纹伪装
-func NewClaudeUsageFetcher(httpUpstream service.HTTPUpstream) service.ClaudeUsageFetcher {
+// The HTTPUpstream argument is retained for dependency-injection compatibility.
+// Usage lookups deliberately use the normal validated HTTP client and never a
+// client-fingerprint transport.
+func NewClaudeUsageFetcher(_ service.HTTPUpstream) service.ClaudeUsageFetcher {
 	return &claudeUsageService{
-		usageURL:     defaultClaudeUsageURL,
-		httpUpstream: httpUpstream,
+		usageURL: defaultClaudeUsageURL,
 	}
 }
 
-// FetchUsage 简单版本，不支持 TLS 指纹（向后兼容）
+// FetchUsage 获取 Anthropic OAuth 用量数据。
 func (s *claudeUsageService) FetchUsage(ctx context.Context, accessToken, proxyURL string) (*service.ClaudeUsageResponse, error) {
 	return s.FetchUsageWithOptions(ctx, &service.ClaudeUsageFetchOptions{
 		AccessToken: accessToken,
@@ -41,7 +42,8 @@ func (s *claudeUsageService) FetchUsage(ctx context.Context, accessToken, proxyU
 	})
 }
 
-// FetchUsageWithOptions 完整版本，支持 TLS 指纹和自定义 User-Agent
+// FetchUsageWithOptions uses only the explicit access token and proxy. It does
+// not claim that sub2api is an official Claude Code client.
 func (s *claudeUsageService) FetchUsageWithOptions(ctx context.Context, opts *service.ClaudeUsageFetchOptions) (*service.ClaudeUsageResponse, error) {
 	if opts == nil {
 		return nil, fmt.Errorf("options is nil")
@@ -59,37 +61,21 @@ func (s *claudeUsageService) FetchUsageWithOptions(ctx context.Context, opts *se
 	req.Header.Set("Authorization", "Bearer "+opts.AccessToken)
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 
-	// 设置 User-Agent（优先使用缓存的 Fingerprint，否则使用默认值）
-	userAgent := defaultUsageUserAgent
-	if opts.Fingerprint != nil && opts.Fingerprint.UserAgent != "" {
-		userAgent = opts.Fingerprint.UserAgent
+	req.Header.Set("User-Agent", defaultUsageUserAgent)
+
+	client, err := httpclient.GetClient(httpclient.Options{
+		ProxyURL:           opts.ProxyURL,
+		Timeout:            30 * time.Second,
+		ValidateResolvedIP: true,
+		AllowPrivateHosts:  s.allowPrivateHosts,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create http client failed: %w", err)
 	}
-	req.Header.Set("User-Agent", userAgent)
 
-	var resp *http.Response
-
-	// 如果有 TLS Profile 且有 HTTPUpstream，使用 DoWithTLS
-	if opts.TLSProfile != nil && s.httpUpstream != nil {
-		resp, err = s.httpUpstream.DoWithTLS(req, opts.ProxyURL, opts.AccountID, 0, opts.TLSProfile)
-		if err != nil {
-			return nil, fmt.Errorf("request with TLS fingerprint failed: %w", err)
-		}
-	} else {
-		// 不启用 TLS 指纹，使用普通 HTTP 客户端
-		client, err := httpclient.GetClient(httpclient.Options{
-			ProxyURL:           opts.ProxyURL,
-			Timeout:            30 * time.Second,
-			ValidateResolvedIP: true,
-			AllowPrivateHosts:  s.allowPrivateHosts,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("create http client failed: %w", err)
-		}
-
-		resp, err = client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("request failed: %w", err)
-		}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

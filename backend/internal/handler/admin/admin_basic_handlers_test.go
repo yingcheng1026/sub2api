@@ -2,14 +2,45 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type dataManagementPageSizeStub struct {
+	dataManagementService
+	listCalled bool
+}
+
+func (s *dataManagementPageSizeStub) EnsureAgentEnabled(context.Context) error {
+	return nil
+}
+
+func (s *dataManagementPageSizeStub) ListBackupJobs(context.Context, service.DataManagementListBackupJobsInput) (service.DataManagementListBackupJobsResult, error) {
+	s.listCalled = true
+	return service.DataManagementListBackupJobsResult{}, nil
+}
+
+func TestDataManagementListBackupJobsRejectsInt32OverflowPageSize(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stub := &dataManagementPageSizeStub{}
+	handler := &DataManagementHandler{dataManagementService: stub}
+	router := gin.New()
+	router.GET("/", handler.ListBackupJobs)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/?page_size=2147483648", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.False(t, stub.listCalled, "overflow input must be rejected before the service call")
+}
 
 func setupAdminRouter() (*gin.Engine, *stubAdminService) {
 	gin.SetMode(gin.TestMode)
@@ -64,6 +95,8 @@ func setupAdminRouter() (*gin.Engine, *stubAdminService) {
 }
 
 func TestUserHandlerEndpoints(t *testing.T) {
+	service.SetDefaultIdempotencyCoordinator(service.NewIdempotencyCoordinator(newMemoryIdempotencyRepoStub(), service.DefaultIdempotencyConfig()))
+	t.Cleanup(func() { service.SetDefaultIdempotencyCoordinator(nil) })
 	router, _ := setupAdminRouter()
 
 	rec := httptest.NewRecorder()
@@ -118,6 +151,7 @@ func TestUserHandlerEndpoints(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/1/balance", bytes.NewBufferString(`{"balance":1,"operation":"add"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "admin-basic-balance-1")
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -272,6 +306,8 @@ func TestProxyHandlerEndpoints(t *testing.T) {
 }
 
 func TestRedeemHandlerEndpoints(t *testing.T) {
+	service.SetDefaultIdempotencyCoordinator(service.NewIdempotencyCoordinator(newMemoryIdempotencyRepoStub(), service.DefaultIdempotencyConfig()))
+	t.Cleanup(func() { service.SetDefaultIdempotencyCoordinator(nil) })
 	router, _ := setupAdminRouter()
 
 	rec := httptest.NewRecorder()
@@ -288,6 +324,7 @@ func TestRedeemHandlerEndpoints(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/admin/redeem-codes", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "admin-basic-redeem-generate-1")
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 

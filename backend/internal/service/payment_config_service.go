@@ -286,52 +286,80 @@ func (s *PaymentConfigService) getStripePublishableKey(ctx context.Context) stri
 // nil-check before serialisation — this is inherent to patch-style update patterns
 // and cannot be meaningfully decomposed without introducing unnecessary abstraction.
 func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req UpdatePaymentConfigRequest) error {
+	m, err := s.BuildPaymentConfigUpdates(req)
+	if err != nil {
+		return err
+	}
+	return s.settingRepo.SetMultiple(ctx, m)
+}
+
+// BuildPaymentConfigUpdates validates and serializes a payment-config patch
+// without persisting it, so callers can include it in a larger atomic settings write.
+func (s *PaymentConfigService) BuildPaymentConfigUpdates(req UpdatePaymentConfigRequest) (map[string]string, error) {
 	if req.BalanceRechargeMultiplier != nil {
 		if math.IsNaN(*req.BalanceRechargeMultiplier) || math.IsInf(*req.BalanceRechargeMultiplier, 0) || *req.BalanceRechargeMultiplier <= 0 {
-			return infraerrors.BadRequest("INVALID_BALANCE_RECHARGE_MULTIPLIER", "balance recharge multiplier must be greater than 0")
+			return nil, infraerrors.BadRequest("INVALID_BALANCE_RECHARGE_MULTIPLIER", "balance recharge multiplier must be greater than 0")
 		}
 	}
 	if req.RechargeFeeRate != nil {
 		v := *req.RechargeFeeRate
 		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 100 {
-			return infraerrors.BadRequest("INVALID_RECHARGE_FEE_RATE", "recharge fee rate must be between 0 and 100")
+			return nil, infraerrors.BadRequest("INVALID_RECHARGE_FEE_RATE", "recharge fee rate must be between 0 and 100")
 		}
 		// Enforce max 2 decimal places
 		if math.Round(v*100) != v*100 {
-			return infraerrors.BadRequest("INVALID_RECHARGE_FEE_RATE", "recharge fee rate allows at most 2 decimal places")
+			return nil, infraerrors.BadRequest("INVALID_RECHARGE_FEE_RATE", "recharge fee rate allows at most 2 decimal places")
 		}
 	}
-	m := map[string]string{
-		SettingPaymentEnabled:                    formatBoolOrEmpty(req.Enabled),
-		SettingMinRechargeAmount:                 formatPositiveFloat(req.MinAmount),
-		SettingMaxRechargeAmount:                 formatPositiveFloat(req.MaxAmount),
-		SettingDailyRechargeLimit:                formatPositiveFloat(req.DailyLimit),
-		SettingOrderTimeoutMinutes:               formatPositiveInt(req.OrderTimeoutMin),
-		SettingMaxPendingOrders:                  formatPositiveInt(req.MaxPendingOrders),
-		SettingBalancePayDisabled:                formatBoolOrEmpty(req.BalanceDisabled),
-		SettingBalanceRechargeMult:               formatPositiveFloat(req.BalanceRechargeMultiplier),
-		SettingRechargeFeeRate:                   formatNonNegativeFloat(req.RechargeFeeRate),
-		SettingLoadBalanceStrategy:               derefStr(req.LoadBalanceStrategy),
-		SettingProductNamePrefix:                 derefStr(req.ProductNamePrefix),
-		SettingProductNameSuffix:                 derefStr(req.ProductNameSuffix),
-		SettingHelpImageURL:                      derefStr(req.HelpImageURL),
-		SettingHelpText:                          derefStr(req.HelpText),
-		SettingCancelRateLimitOn:                 formatBoolOrEmpty(req.CancelRateLimitEnabled),
-		SettingCancelRateLimitMax:                formatPositiveInt(req.CancelRateLimitMax),
-		SettingCancelWindowSize:                  formatPositiveInt(req.CancelRateLimitWindow),
-		SettingCancelWindowUnit:                  derefStr(req.CancelRateLimitUnit),
-		SettingCancelWindowMode:                  derefStr(req.CancelRateLimitMode),
-		SettingPaymentVisibleMethodAlipaySource:  derefStr(req.VisibleMethodAlipaySource),
-		SettingPaymentVisibleMethodWxpaySource:   derefStr(req.VisibleMethodWxpaySource),
-		SettingPaymentVisibleMethodAlipayEnabled: formatBoolOrEmpty(req.VisibleMethodAlipayEnabled),
-		SettingPaymentVisibleMethodWxpayEnabled:  formatBoolOrEmpty(req.VisibleMethodWxpayEnabled),
+	m := make(map[string]string)
+	putBool := func(key string, value *bool) {
+		if value != nil {
+			m[key] = formatBoolOrEmpty(value)
+		}
 	}
+	putFloat := func(key string, value *float64, format func(*float64) string) {
+		if value != nil {
+			m[key] = format(value)
+		}
+	}
+	putInt := func(key string, value *int) {
+		if value != nil {
+			m[key] = formatPositiveInt(value)
+		}
+	}
+	putString := func(key string, value *string) {
+		if value != nil {
+			m[key] = derefStr(value)
+		}
+	}
+
+	putBool(SettingPaymentEnabled, req.Enabled)
+	putFloat(SettingMinRechargeAmount, req.MinAmount, formatPositiveFloat)
+	putFloat(SettingMaxRechargeAmount, req.MaxAmount, formatPositiveFloat)
+	putFloat(SettingDailyRechargeLimit, req.DailyLimit, formatPositiveFloat)
+	putInt(SettingOrderTimeoutMinutes, req.OrderTimeoutMin)
+	putInt(SettingMaxPendingOrders, req.MaxPendingOrders)
+	putBool(SettingBalancePayDisabled, req.BalanceDisabled)
+	putFloat(SettingBalanceRechargeMult, req.BalanceRechargeMultiplier, formatPositiveFloat)
+	putFloat(SettingRechargeFeeRate, req.RechargeFeeRate, formatNonNegativeFloat)
+	putString(SettingLoadBalanceStrategy, req.LoadBalanceStrategy)
+	putString(SettingProductNamePrefix, req.ProductNamePrefix)
+	putString(SettingProductNameSuffix, req.ProductNameSuffix)
+	putString(SettingHelpImageURL, req.HelpImageURL)
+	putString(SettingHelpText, req.HelpText)
+	putBool(SettingCancelRateLimitOn, req.CancelRateLimitEnabled)
+	putInt(SettingCancelRateLimitMax, req.CancelRateLimitMax)
+	putInt(SettingCancelWindowSize, req.CancelRateLimitWindow)
+	putString(SettingCancelWindowUnit, req.CancelRateLimitUnit)
+	putString(SettingCancelWindowMode, req.CancelRateLimitMode)
+	putString(SettingPaymentVisibleMethodAlipaySource, req.VisibleMethodAlipaySource)
+	putString(SettingPaymentVisibleMethodWxpaySource, req.VisibleMethodWxpaySource)
+	putBool(SettingPaymentVisibleMethodAlipayEnabled, req.VisibleMethodAlipayEnabled)
+	putBool(SettingPaymentVisibleMethodWxpayEnabled, req.VisibleMethodWxpayEnabled)
 	if req.EnabledTypes != nil {
 		m[SettingEnabledPaymentTypes] = strings.Join(req.EnabledTypes, ",")
-	} else {
-		m[SettingEnabledPaymentTypes] = ""
 	}
-	return s.settingRepo.SetMultiple(ctx, m)
+	return m, nil
 }
 
 func formatBoolOrEmpty(v *bool) string {

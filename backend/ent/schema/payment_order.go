@@ -195,5 +195,7 @@ func (PaymentOrder) Indexes() []ent.Index {
 		index.Fields("paid_at"),
 		index.Fields("payment_type", "paid_at"),
 		index.Fields("order_type"),
+		index.Fields("provider_instance_id", "created_at").
+			Annotations(entsql.IndexWhere("provider_instance_id IS NOT NULL")),
 	}
 }

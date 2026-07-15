@@ -12,7 +12,9 @@ const (
 	encryptedCredentialMarkerKey = "__sub2api_encrypted"
 	encryptedCredentialAlgKey    = "alg"
 	encryptedCredentialValueKey  = "ciphertext"
-	encryptedCredentialAlg       = "aes-256-gcm-json-v1"
+	encryptedCredentialAlgV1     = "aes-256-gcm-json-v1"
+	encryptedCredentialAlgV2     = "aes-256-gcm-json-domain-v2"
+	encryptedCredentialAlgV3     = "aes-256-gcm-json-domain-v3"
 )
 
 var sensitiveCredentialKeys = map[string]struct{}{
@@ -86,22 +88,15 @@ func encryptCredentialValue(key string, value any, encryptor service.SecretEncry
 	if value == nil {
 		return nil, nil
 	}
-	if encryptor == nil {
-		return copyJSONValue(value), nil
+	alg, ciphertext, envelope, err := parseEncryptedCredentialEnvelope(value)
+	if err != nil {
+		return nil, err
 	}
-	if isEncryptedCredentialEnvelope(value) {
-		return copyJSONValue(value), nil
+	if envelope {
+		return preserveDomainCredentialEnvelope(value, alg, ciphertext, encryptor)
 	}
 	if isSensitiveCredentialKey(key) {
-		payload, err := json.Marshal(value)
-		if err != nil {
-			return nil, err
-		}
-		ciphertext, err := encryptor.Encrypt(string(payload))
-		if err != nil {
-			return nil, err
-		}
-		return encryptedCredentialEnvelope(ciphertext), nil
+		return encryptCredentialJSON(value, encryptor)
 	}
 
 	switch typed := value.(type) {
@@ -122,14 +117,43 @@ func encryptCredentialValue(key string, value any, encryptor service.SecretEncry
 	}
 }
 
+func preserveDomainCredentialEnvelope(value any, alg, ciphertext string, encryptor service.SecretEncryptor) (any, error) {
+	if alg != encryptedCredentialAlgV3 {
+		return nil, fmt.Errorf("legacy credential envelope requires security migration")
+	}
+	plaintext, err := service.DecryptForSecretDomain(encryptor, service.SecretDomainAccountCredential, ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("validate domain-bound credential: %w", err)
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(plaintext), &decoded); err != nil {
+		return nil, fmt.Errorf("validate domain-bound credential payload: %w", err)
+	}
+	return copyJSONValue(value), nil
+}
+
+func encryptCredentialJSON(value any, encryptor service.SecretEncryptor) (any, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := service.EncryptForSecretDomain(encryptor, service.SecretDomainAccountCredential, string(payload))
+	if err != nil {
+		return nil, err
+	}
+	return encryptedCredentialEnvelope(encryptedCredentialAlgV3, ciphertext), nil
+}
+
 func decryptCredentialValue(value any, encryptor service.SecretEncryptor) (any, error) {
-	if isEncryptedCredentialEnvelope(value) {
-		if encryptor == nil {
-			return copyJSONValue(value), nil
+	alg, ciphertext, envelope, err := parseEncryptedCredentialEnvelope(value)
+	if err != nil {
+		return nil, err
+	}
+	if envelope {
+		if alg != encryptedCredentialAlgV3 {
+			return nil, fmt.Errorf("legacy credential envelope requires security migration")
 		}
-		envelope, _ := value.(map[string]any)
-		ciphertext, _ := envelope[encryptedCredentialValueKey].(string)
-		plaintext, err := encryptor.Decrypt(ciphertext)
+		plaintext, err := service.DecryptForSecretDomain(encryptor, service.SecretDomainAccountCredential, ciphertext)
 		if err != nil {
 			return nil, err
 		}
@@ -164,23 +188,29 @@ func isSensitiveCredentialKey(key string) bool {
 	return ok
 }
 
-func encryptedCredentialEnvelope(ciphertext string) map[string]any {
+func encryptedCredentialEnvelope(alg, ciphertext string) map[string]any {
 	return map[string]any{
 		encryptedCredentialMarkerKey: true,
-		encryptedCredentialAlgKey:    encryptedCredentialAlg,
+		encryptedCredentialAlgKey:    alg,
 		encryptedCredentialValueKey:  ciphertext,
 	}
 }
 
-func isEncryptedCredentialEnvelope(value any) bool {
-	envelope, ok := value.(map[string]any)
+func parseEncryptedCredentialEnvelope(value any) (alg, ciphertext string, isEnvelope bool, err error) {
+	envelopeMap, ok := value.(map[string]any)
 	if !ok {
-		return false
+		return "", "", false, nil
 	}
-	marker, _ := envelope[encryptedCredentialMarkerKey].(bool)
-	alg, _ := envelope[encryptedCredentialAlgKey].(string)
-	ciphertext, _ := envelope[encryptedCredentialValueKey].(string)
-	return marker && alg == encryptedCredentialAlg && ciphertext != ""
+	marker, _ := envelopeMap[encryptedCredentialMarkerKey].(bool)
+	if !marker {
+		return "", "", false, nil
+	}
+	alg, _ = envelopeMap[encryptedCredentialAlgKey].(string)
+	ciphertext, _ = envelopeMap[encryptedCredentialValueKey].(string)
+	if (alg != encryptedCredentialAlgV1 && alg != encryptedCredentialAlgV2 && alg != encryptedCredentialAlgV3) || ciphertext == "" {
+		return "", "", true, fmt.Errorf("invalid encrypted credential envelope")
+	}
+	return alg, ciphertext, true, nil
 }
 
 func copyJSONValue(value any) any {

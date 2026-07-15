@@ -103,7 +103,7 @@ func (r *channelMonitorRequestTemplateRepository) List(ctx context.Context, para
 	return out, nil
 }
 
-// ApplyToMonitors 把模板当前配置覆盖到 monitorIDs 列表里的关联监控。
+// ApplyToMonitors 把模板当前的密文 envelope 快照覆盖到 monitorIDs 列表里的关联监控。
 // WHERE 双重过滤：template_id = id AND id IN (monitorIDs)，防止用户传了未关联本模板的 id
 // 就被覆盖。走 ent UpdateMany 保留 hooks。
 func (r *channelMonitorRequestTemplateRepository) ApplyToMonitors(ctx context.Context, id int64, monitorIDs []int64) (int64, error) {

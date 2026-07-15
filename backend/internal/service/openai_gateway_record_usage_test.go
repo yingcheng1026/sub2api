@@ -277,6 +277,7 @@ func newOpenAIRecordUsageServiceForTest(usageRepo UsageLogRepository, userRepo U
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	svc.requireUsageBillingOutbox = false
 	svc.userGroupRateResolver = newUserGroupRateResolver(

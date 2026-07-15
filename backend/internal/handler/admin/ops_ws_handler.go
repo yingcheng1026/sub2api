@@ -47,8 +47,8 @@ var upgrader = websocket.Upgrader{
 		return isAllowedOpsWSOrigin(r)
 	},
 	// Subprotocol negotiation:
-	// - The frontend passes ["sub2api-admin", "jwt.<token>"].
-	// - We always select "sub2api-admin" so the token is never echoed back in the handshake response.
+	// - The frontend passes ["sub2api-admin", "ticket.<short-lived-ticket>"].
+	// - We always select "sub2api-admin" so the ticket is never echoed back.
 	Subprotocols: []string{"sub2api-admin"},
 }
 
@@ -688,14 +688,14 @@ func loadOpsWSRuntimeLimitsFromEnv() opsWSRuntimeLimits {
 	}
 
 	if v := strings.TrimSpace(os.Getenv(envOpsWSMaxConns)); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+		if parsed, err := strconv.ParseInt(v, 10, 32); err == nil && parsed > 0 {
 			cfg.MaxConns = int32(parsed)
 		} else {
 			logger.LegacyPrintf("handler.admin.ops_ws", "[OpsWS] invalid %s=%q (expected int>0); using default=%d", envOpsWSMaxConns, v, cfg.MaxConns)
 		}
 	}
 	if v := strings.TrimSpace(os.Getenv(envOpsWSMaxConnsPerIP)); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed >= 0 {
+		if parsed, err := strconv.ParseInt(v, 10, 32); err == nil && parsed >= 0 {
 			cfg.MaxConnsPerIP = int32(parsed)
 		} else {
 			logger.LegacyPrintf("handler.admin.ops_ws", "[OpsWS] invalid %s=%q (expected int>=0); using default=%d", envOpsWSMaxConnsPerIP, v, cfg.MaxConnsPerIP)

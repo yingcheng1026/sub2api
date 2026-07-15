@@ -23,6 +23,9 @@ const (
 // RateLimitOptions 限流可选配置
 type RateLimitOptions struct {
 	FailureMode RateLimitFailureMode
+	// KeyFunc may return an authenticated stable subject instead of ClientIP.
+	// Empty values fall back to ClientIP.
+	KeyFunc func(*gin.Context) string
 }
 
 var rateLimitScript = redis.NewScript(`
@@ -88,8 +91,23 @@ func (r *RateLimiter) LimitWithOptions(key string, limit int, window time.Durati
 	}
 
 	return func(c *gin.Context) {
-		ip := c.ClientIP()
-		redisKey := r.prefix + key + ":" + ip
+		if r == nil || r.redis == nil {
+			log.Printf("[RateLimit] redis client unavailable: mode=%s", failureModeLabel(failureMode))
+			if failureMode == RateLimitFailClose {
+				abortRateLimit(c)
+				return
+			}
+			c.Next()
+			return
+		}
+		identity := ""
+		if opts.KeyFunc != nil {
+			identity = opts.KeyFunc(c)
+		}
+		if identity == "" {
+			identity = c.ClientIP()
+		}
+		redisKey := r.prefix + key + ":" + identity
 
 		ctx := c.Request.Context()
 

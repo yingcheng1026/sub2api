@@ -106,6 +106,15 @@ func (r *usageBillingRepository) claimUsageBillingKey(ctx context.Context, tx *s
 }
 
 func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, tx *sql.Tx, cmd *service.UsageBillingCommand, result *service.UsageBillingApplyResult) error {
+	walletAdmissionHandled, walletBalance, walletInsufficient, err := settleUsageBillingWalletAdmission(ctx, tx, cmd)
+	if err != nil {
+		return err
+	}
+	if walletAdmissionHandled {
+		result.NewWalletBalance = &walletBalance
+		result.WalletInsufficient = walletInsufficient
+	}
+
 	if cmd.SubscriptionCost > 0 && cmd.SubscriptionID != nil {
 		if err := incrementUsageBillingSubscription(ctx, tx, *cmd.SubscriptionID, cmd.SubscriptionCost, cmd.BindingsFrozen); err != nil {
 			return err
@@ -114,19 +123,18 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 
 	// 钱包模式 (v4) 扣款：FOR UPDATE 锁住 user_subscriptions 行扣减 wallet_balance_usd
 	// 并落 ledger 流水。SubscriptionCost 与 WalletCost 由 buildUsageBillingCommand 保证互斥。
-	if cmd.WalletCost > 0 && cmd.SubscriptionID != nil {
+	if !walletAdmissionHandled && cmd.WalletCost > 0 && cmd.SubscriptionID != nil {
 		newBalance, insufficient, err := deductUsageBillingWallet(ctx, tx, *cmd.SubscriptionID, cmd.WalletCost, cmd.BindingsFrozen)
 		if err != nil {
 			return err
 		}
 		if insufficient {
-			// 余额不足：本次请求已经被上游服务响应（detached billing 在响应后跑），
-			// 这里只标记 flag 给监控用，不强行扣到 -0.01 以下违反 CHECK 约束。
-			// 真正的预防在 CheckBillingEligibility (A4) 里 ≤ 0 直接 402 拒绝。
+			// 余额不足发生在上游响应之后，仍然完整结算为负数债务；否则保留
+			// 正余额会让相同请求继续通过预检并无限免费调用。下一次预检看到
+			// balance <= 0 会直接 402，flag 同时供告警/运营对账使用。
 			result.WalletInsufficient = true
-		} else {
-			result.NewWalletBalance = &newBalance
 		}
+		result.NewWalletBalance = &newBalance
 	}
 
 	if cmd.BalanceCost > 0 {
@@ -159,6 +167,190 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 		result.QuotaState = quotaState
 	}
 
+	return settleUsageBillingNonWalletAdmission(ctx, tx, cmd)
+}
+
+// settleUsageBillingWalletAdmission consumes the pre-upstream hold in the same
+// transaction as the authoritative wallet debit. Missing admissions are
+// treated as legacy events created before admission enforcement was enabled;
+// production Enqueue requires an admission before it can create a new outbox
+// event. A present wallet admission is always fail-closed.
+func settleUsageBillingWalletAdmission(
+	ctx context.Context,
+	tx *sql.Tx,
+	cmd *service.UsageBillingCommand,
+) (handled bool, newBalance float64, insufficient bool, err error) {
+	if cmd == nil || !cmd.BindingsFrozen {
+		return false, 0, false, nil
+	}
+
+	var walletSubscriptionID sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+		SELECT wallet_subscription_id
+		FROM usage_billing_admissions
+		WHERE request_id = $1 AND api_key_id = $2
+	`, cmd.RequestID, cmd.APIKeyID).Scan(&walletSubscriptionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, 0, false, nil
+	}
+	if err != nil {
+		return false, 0, false, err
+	}
+	if !walletSubscriptionID.Valid {
+		if cmd.WalletCost > 0 {
+			return false, 0, false, service.ErrUsageBillingRequestConflict
+		}
+		return false, 0, false, nil
+	}
+	if cmd.SubscriptionID == nil || *cmd.SubscriptionID != walletSubscriptionID.Int64 {
+		return false, 0, false, service.ErrUsageBillingRequestConflict
+	}
+
+	var balance sql.NullFloat64
+	err = tx.QueryRowContext(ctx, `
+		SELECT wallet_balance_usd
+		FROM user_subscriptions
+		WHERE id = $1 AND ($2 OR deleted_at IS NULL)
+		FOR UPDATE
+	`, walletSubscriptionID.Int64, cmd.BindingsFrozen).Scan(&balance)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, 0, false, service.ErrSubscriptionNotFound
+	}
+	if err != nil {
+		return false, 0, false, err
+	}
+	if !balance.Valid {
+		return false, 0, false, service.ErrSubscriptionNotFound
+	}
+
+	var (
+		state        string
+		reservedUSD  float64
+		consumedAt   sql.NullTime
+		releasedAt   sql.NullTime
+		lockedWallet sql.NullInt64
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT state, wallet_subscription_id, wallet_reserved_usd,
+			wallet_consumed_at, wallet_released_at
+		FROM usage_billing_admissions
+		WHERE request_id = $1 AND api_key_id = $2
+		FOR UPDATE
+	`, cmd.RequestID, cmd.APIKeyID).Scan(
+		&state, &lockedWallet, &reservedUSD, &consumedAt, &releasedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, 0, false, service.ErrUsageBillingAdmissionMissing
+	}
+	if err != nil {
+		return false, 0, false, err
+	}
+	if state != service.UsageBillingAdmissionStateOutboxPending ||
+		!lockedWallet.Valid || lockedWallet.Int64 != walletSubscriptionID.Int64 ||
+		reservedUSD <= 0 || consumedAt.Valid || releasedAt.Valid {
+		return false, 0, false, service.ErrUsageBillingAdmissionLeaseLost
+	}
+	if cmd.WalletCost > reservedUSD+1e-12 {
+		return false, 0, false, service.ErrUsageBillingRequestConflict
+	}
+
+	newBalance = balance.Float64
+	if cmd.WalletCost > 0 {
+		insufficient = balance.Float64 < cmd.WalletCost
+		newBalance = balance.Float64 - cmd.WalletCost
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE user_subscriptions
+			SET wallet_balance_usd = $1, updated_at = NOW()
+			WHERE id = $2
+		`, newBalance, walletSubscriptionID.Int64); err != nil {
+			return false, 0, false, err
+		}
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO subscription_wallet_ledger
+				(subscription_id, delta_usd, balance_after, reason, usage_log_id, operator_id, notes)
+			VALUES ($1, $2, $3, 'usage', NULL, NULL, NULL)
+		`, walletSubscriptionID.Int64, -cmd.WalletCost, newBalance); err != nil {
+			return false, 0, false, err
+		}
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE usage_billing_admissions
+		SET state = 'settled',
+			settled_at = COALESCE(settled_at, NOW()),
+			wallet_consumed_at = NOW(),
+			updated_at = NOW()
+		WHERE request_id = $1 AND api_key_id = $2
+		  AND state = 'outbox_pending'
+		  AND wallet_consumed_at IS NULL
+		  AND wallet_released_at IS NULL
+	`, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return false, 0, false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, 0, false, err
+	}
+	if updated != 1 {
+		return false, 0, false, service.ErrUsageBillingAdmissionLeaseLost
+	}
+	return true, newBalance, insufficient, nil
+}
+
+// settleUsageBillingNonWalletAdmission closes the admission in the same
+// transaction as all balance, quota and usage effects. Events written before
+// admission enforcement intentionally remain replayable without a base row.
+func settleUsageBillingNonWalletAdmission(
+	ctx context.Context,
+	tx *sql.Tx,
+	cmd *service.UsageBillingCommand,
+) error {
+	if cmd == nil || !cmd.BindingsFrozen {
+		return nil
+	}
+	var (
+		state                string
+		walletSubscriptionID sql.NullInt64
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT state, wallet_subscription_id
+		FROM usage_billing_admissions
+		WHERE request_id = $1 AND api_key_id = $2
+		FOR UPDATE
+	`, cmd.RequestID, cmd.APIKeyID).Scan(&state, &walletSubscriptionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if walletSubscriptionID.Valid {
+		if state == service.UsageBillingAdmissionStateSettled {
+			return nil
+		}
+		return service.ErrUsageBillingAdmissionLeaseLost
+	}
+	if state != service.UsageBillingAdmissionStateOutboxPending {
+		return service.ErrUsageBillingAdmissionLeaseLost
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE usage_billing_admissions
+		SET state = 'settled', settled_at = COALESCE(settled_at, NOW()), updated_at = NOW()
+		WHERE request_id = $1 AND api_key_id = $2
+		  AND state = 'outbox_pending'
+		  AND wallet_subscription_id IS NULL
+	`, cmd.RequestID, cmd.APIKeyID)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return service.ErrUsageBillingAdmissionLeaseLost
+	}
 	return nil
 }
 
@@ -193,8 +385,8 @@ func incrementUsageBillingSubscription(ctx context.Context, tx *sql.Tx, subscrip
 // deductUsageBillingWallet 钱包模式 (v4) 在共享 billing 事务内扣款 + 落 ledger。
 //
 // 返回值：
-//   - newBalance: 扣款后余额；insufficient=true 时为扣款前余额（未扣）。
-//   - insufficient: balance < cost 即标 true，调用方决定是否标 flag 走告警。
+//   - newBalance: 完整结算后的余额；可能为负，表示已交付请求产生的欠费。
+//   - insufficient: 扣款前 balance < cost 时为 true，供调用方告警。
 //
 // 不会返回 service.ErrWalletInsufficient — 这一层不拒事务，把决策权交给调用方
 // （usage_logs 已经写入，钱包扣款失败应当作可观察异常而非阻断 billing 提交）。
@@ -218,10 +410,7 @@ func deductUsageBillingWallet(ctx context.Context, tx *sql.Tx, subscriptionID in
 		return 0, false, service.ErrSubscriptionNotFound
 	}
 
-	if balance.Float64 < costUSD {
-		return balance.Float64, true, nil
-	}
-
+	insufficient := balance.Float64 < costUSD
 	newBalance := balance.Float64 - costUSD
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE user_subscriptions
@@ -239,7 +428,7 @@ func deductUsageBillingWallet(ctx context.Context, tx *sql.Tx, subscriptionID in
 	`, subscriptionID, -costUSD, newBalance, notes); err != nil {
 		return 0, false, err
 	}
-	return newBalance, false, nil
+	return newBalance, insufficient, nil
 }
 
 func deductUsageBillingBalance(ctx context.Context, tx *sql.Tx, userID int64, amount float64, bindingsFrozen bool) (float64, error) {

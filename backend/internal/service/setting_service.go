@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -19,7 +21,8 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/imroc/req/v3"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
+	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -1298,6 +1301,12 @@ func (s *SettingService) OIDCSecurityWriteDefaults(ctx context.Context) (bool, b
 
 // UpdateSettingsWithAuthSourceDefaults persists system settings and auth-source defaults in a single write.
 func (s *SettingService) UpdateSettingsWithAuthSourceDefaults(ctx context.Context, settings *SystemSettings, authDefaults *AuthSourceDefaultSettings) error {
+	return s.UpdateSettingsWithAuthSourceDefaultsAndAdditional(ctx, settings, authDefaults, nil)
+}
+
+// UpdateSettingsWithAuthSourceDefaultsAndAdditional persists every settings
+// domain through one repository bulk write. additional must already be validated.
+func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsAndAdditional(ctx context.Context, settings *SystemSettings, authDefaults *AuthSourceDefaultSettings, additional map[string]string) error {
 	updates, err := s.buildSystemSettingsUpdates(ctx, settings)
 	if err != nil {
 		return err
@@ -1308,6 +1317,9 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaults(ctx context.Contex
 		return err
 	}
 	for key, value := range authSourceUpdates {
+		updates[key] = value
+	}
+	for key, value := range additional {
 		updates[key] = value
 	}
 
@@ -1809,10 +1821,10 @@ func (s *SettingService) IsBackendModeEnabled(ctx context.Context) bool {
 			}
 			slog.Warn("failed to get backend_mode_enabled setting", "error", err)
 			backendModeCache.Store(&cachedBackendMode{
-				value:     false,
+				value:     true,
 				expiresAt: time.Now().Add(backendModeErrorTTL).UnixNano(),
 			})
-			return false, nil
+			return true, nil
 		}
 		enabled := value == "true"
 		backendModeCache.Store(&cachedBackendMode{
@@ -1824,7 +1836,7 @@ func (s *SettingService) IsBackendModeEnabled(ctx context.Context) bool {
 	if val, ok := result.(bool); ok {
 		return val
 	}
-	return false
+	return true
 }
 
 type gatewayForwardingSettingsResult struct {
@@ -2047,10 +2059,10 @@ func (s *SettingService) IsTotpEnabled(ctx context.Context) bool {
 	return value == "true"
 }
 
-// IsTotpEncryptionKeyConfigured 检查 TOTP 加密密钥是否已手动配置
-// 只有手动配置了密钥才允许在管理后台启用 TOTP 功能
+// IsTotpEncryptionKeyConfigured checks the dedicated TOTP secret-domain root.
+// The legacy TOTP_ENCRYPTION_KEY is migration-only and must not enable 2FA.
 func (s *SettingService) IsTotpEncryptionKeyConfigured() bool {
-	return s.cfg.Totp.EncryptionKeyConfigured
+	return strings.TrimSpace(s.cfg.SecretEncryption.TOTPSecretKey) != ""
 }
 
 // GetSiteName 获取网站名称
@@ -3471,16 +3483,40 @@ func (s *SettingService) GetOIDCConnectOAuthConfig(ctx context.Context) (config.
 		effective.DiscoveryURL = discoveryURL
 	}
 	if discoveryURL != "" {
-		if err := config.ValidateAbsoluteHTTPURL(discoveryURL); err != nil {
+		allowInsecureHTTP := false
+		allowPrivateHosts := false
+		if s.cfg != nil {
+			allowInsecureHTTP = s.cfg.Security.URLAllowlist.AllowInsecureHTTP
+			allowPrivateHosts = s.cfg.Security.URLAllowlist.AllowPrivateHosts
+		}
+		normalizedDiscoveryURL, err := urlvalidator.ValidateHTTPURL(
+			discoveryURL,
+			allowInsecureHTTP,
+			urlvalidator.ValidationOptions{AllowPrivate: allowPrivateHosts},
+		)
+		if err != nil {
 			return config.OIDCConnectConfig{}, infraerrors.InternalServer("OAUTH_CONFIG_INVALID", "oauth discovery url invalid")
 		}
+		discoveryURL = normalizedDiscoveryURL
+		effective.DiscoveryURL = normalizedDiscoveryURL
 	}
 
 	needsDiscovery := strings.TrimSpace(effective.AuthorizeURL) == "" ||
 		strings.TrimSpace(effective.TokenURL) == "" ||
 		(effective.ValidateIDToken && strings.TrimSpace(effective.JWKSURL) == "")
 	if needsDiscovery && discoveryURL != "" {
-		metadata, resolveErr := oidcResolveProviderMetadata(ctx, discoveryURL)
+		allowInsecureHTTP := false
+		allowPrivateHosts := false
+		if s.cfg != nil {
+			allowInsecureHTTP = s.cfg.Security.URLAllowlist.AllowInsecureHTTP
+			allowPrivateHosts = s.cfg.Security.URLAllowlist.AllowPrivateHosts
+		}
+		metadata, resolveErr := oidcResolveProviderMetadataWithPolicy(
+			ctx,
+			discoveryURL,
+			allowInsecureHTTP,
+			allowPrivateHosts,
+		)
 		if resolveErr != nil {
 			return config.OIDCConnectConfig{}, infraerrors.InternalServer("OAUTH_CONFIG_INVALID", "oauth discovery resolve failed").WithCause(resolveErr)
 		}
@@ -3565,6 +3601,11 @@ type oidcProviderMetadata struct {
 	JWKSURI               string `json:"jwks_uri"`
 }
 
+const (
+	oidcDiscoveryRequestTimeout   = 15 * time.Second
+	oidcDiscoveryMaxResponseBytes = 1 << 20
+)
+
 func oidcDefaultDiscoveryURL(issuerURL string) string {
 	issuerURL = strings.TrimSpace(issuerURL)
 	if issuerURL == "" {
@@ -3573,27 +3614,62 @@ func oidcDefaultDiscoveryURL(issuerURL string) string {
 	return strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration"
 }
 
-func oidcResolveProviderMetadata(ctx context.Context, discoveryURL string) (*oidcProviderMetadata, error) {
+func oidcResolveProviderMetadataWithPolicy(
+	ctx context.Context,
+	discoveryURL string,
+	allowInsecureHTTP bool,
+	allowPrivateHosts bool,
+) (*oidcProviderMetadata, error) {
 	discoveryURL = strings.TrimSpace(discoveryURL)
 	if discoveryURL == "" {
 		return nil, fmt.Errorf("discovery url is empty")
 	}
-
-	resp, err := req.C().
-		SetTimeout(15*time.Second).
-		R().
-		SetContext(ctx).
-		SetHeader("Accept", "application/json").
-		Get(discoveryURL)
+	normalizedURL, err := urlvalidator.ValidateHTTPURL(
+		discoveryURL,
+		allowInsecureHTTP,
+		urlvalidator.ValidationOptions{AllowPrivate: allowPrivateHosts},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("validate discovery url: %w", err)
+	}
+	baseClient, err := httpclient.GetClient(httpclient.Options{
+		Timeout:               oidcDiscoveryRequestTimeout,
+		ResponseHeaderTimeout: oidcDiscoveryRequestTimeout,
+		ValidateResolvedIP:    true,
+		AllowPrivateHosts:     allowPrivateHosts,
+		MaxIdleConnsPerHost:   2,
+		MaxConnsPerHost:       4,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create discovery client: %w", err)
+	}
+	client := *baseClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return errors.New("oidc discovery redirect is not allowed")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, normalizedURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create discovery request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	resp, err := client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("request discovery document: %w", err)
 	}
-	if !resp.IsSuccessState() {
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("discovery request failed: status=%d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, oidcDiscoveryMaxResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read discovery document: %w", err)
+	}
+	if len(body) > oidcDiscoveryMaxResponseBytes {
+		return nil, fmt.Errorf("discovery document too large")
 	}
 
 	metadata := &oidcProviderMetadata{}
-	if err := json.Unmarshal(resp.Bytes(), metadata); err != nil {
+	if err := json.Unmarshal(body, metadata); err != nil {
 		return nil, fmt.Errorf("parse discovery document: %w", err)
 	}
 	return metadata, nil
@@ -3862,8 +3938,18 @@ func (s *SettingService) GetOpenAIFastPolicySettings(ctx context.Context) (*Open
 
 // SetOpenAIFastPolicySettings 设置 OpenAI fast 策略配置
 func (s *SettingService) SetOpenAIFastPolicySettings(ctx context.Context, settings *OpenAIFastPolicySettings) error {
+	updates, err := BuildOpenAIFastPolicySettingsUpdates(settings)
+	if err != nil {
+		return err
+	}
+	return s.settingRepo.Set(ctx, SettingKeyOpenAIFastPolicySettings, updates[SettingKeyOpenAIFastPolicySettings])
+}
+
+// BuildOpenAIFastPolicySettingsUpdates validates and serializes the policy
+// without persisting it, allowing an enclosing atomic settings update.
+func BuildOpenAIFastPolicySettingsUpdates(settings *OpenAIFastPolicySettings) (map[string]string, error) {
 	if settings == nil {
-		return fmt.Errorf("settings cannot be nil")
+		return nil, fmt.Errorf("settings cannot be nil")
 	}
 
 	validActions := map[string]bool{
@@ -3882,33 +3968,32 @@ func (s *SettingService) SetOpenAIFastPolicySettings(ctx context.Context, settin
 			tier = OpenAIFastTierAny
 		}
 		if !validTiers[tier] {
-			return fmt.Errorf("rule[%d]: invalid service_tier %q", i, rule.ServiceTier)
+			return nil, fmt.Errorf("rule[%d]: invalid service_tier %q", i, rule.ServiceTier)
 		}
 		settings.Rules[i].ServiceTier = tier
 		if !validActions[rule.Action] {
-			return fmt.Errorf("rule[%d]: invalid action %q", i, rule.Action)
+			return nil, fmt.Errorf("rule[%d]: invalid action %q", i, rule.Action)
 		}
 		if !validScopes[rule.Scope] {
-			return fmt.Errorf("rule[%d]: invalid scope %q", i, rule.Scope)
+			return nil, fmt.Errorf("rule[%d]: invalid scope %q", i, rule.Scope)
 		}
 		for j, pattern := range rule.ModelWhitelist {
 			trimmed := strings.TrimSpace(pattern)
 			if trimmed == "" {
-				return fmt.Errorf("rule[%d]: model_whitelist[%d] cannot be empty", i, j)
+				return nil, fmt.Errorf("rule[%d]: model_whitelist[%d] cannot be empty", i, j)
 			}
 			settings.Rules[i].ModelWhitelist[j] = trimmed
 		}
 		if rule.FallbackAction != "" && !validActions[rule.FallbackAction] {
-			return fmt.Errorf("rule[%d]: invalid fallback_action %q", i, rule.FallbackAction)
+			return nil, fmt.Errorf("rule[%d]: invalid fallback_action %q", i, rule.FallbackAction)
 		}
 	}
 
 	data, err := json.Marshal(settings)
 	if err != nil {
-		return fmt.Errorf("marshal openai fast policy settings: %w", err)
+		return nil, fmt.Errorf("marshal openai fast policy settings: %w", err)
 	}
-
-	return s.settingRepo.Set(ctx, SettingKeyOpenAIFastPolicySettings, string(data))
+	return map[string]string{SettingKeyOpenAIFastPolicySettings: string(data)}, nil
 }
 
 // SetStreamTimeoutSettings 设置流超时处理配置

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -14,7 +15,7 @@ type ChannelMonitorRequestTemplateRepository interface {
 	Update(ctx context.Context, t *ChannelMonitorRequestTemplate) error
 	Delete(ctx context.Context, id int64) error
 	List(ctx context.Context, params ChannelMonitorRequestTemplateListParams) ([]*ChannelMonitorRequestTemplate, error)
-	// ApplyToMonitors 把模板当前的 extra_headers / body_override_mode / body_override
+	// ApplyToMonitors 把模板当前已加密的 extra_headers / body_override 快照和 mode
 	// 批量覆盖到指定 monitorIDs 的监控上（同时还要求这些监控当前 template_id = id，
 	// 防止误覆盖未关联的监控）。monitorIDs 必须非空；空列表直接返回 0 不写库。
 	// 返回被覆盖的监控数量。
@@ -36,12 +37,13 @@ type AssociatedMonitorBrief struct {
 
 // ChannelMonitorRequestTemplateService 模板管理 service。
 type ChannelMonitorRequestTemplateService struct {
-	repo ChannelMonitorRequestTemplateRepository
+	repo      ChannelMonitorRequestTemplateRepository
+	encryptor SecretEncryptor
 }
 
 // NewChannelMonitorRequestTemplateService 创建模板 service。
-func NewChannelMonitorRequestTemplateService(repo ChannelMonitorRequestTemplateRepository) *ChannelMonitorRequestTemplateService {
-	return &ChannelMonitorRequestTemplateService{repo: repo}
+func NewChannelMonitorRequestTemplateService(repo ChannelMonitorRequestTemplateRepository, encryptor SecretEncryptor) *ChannelMonitorRequestTemplateService {
+	return &ChannelMonitorRequestTemplateService{repo: repo, encryptor: encryptor}
 }
 
 // ---------- CRUD ----------
@@ -53,12 +55,28 @@ func (s *ChannelMonitorRequestTemplateService) List(ctx context.Context, params 
 			return nil, err
 		}
 	}
-	return s.repo.List(ctx, params)
+	items, err := s.repo.List(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if err := s.openRequestPayloadInPlace(item); err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
 }
 
 // Get 返回单个模板。
 func (s *ChannelMonitorRequestTemplateService) Get(ctx context.Context, id int64) (*ChannelMonitorRequestTemplate, error) {
-	return s.repo.GetByID(ctx, id)
+	t, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.openRequestPayloadInPlace(t); err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
 // Create 创建模板（会校验 headers 黑名单和 body 模式匹配）。
@@ -74,9 +92,14 @@ func (s *ChannelMonitorRequestTemplateService) Create(ctx context.Context, p Cha
 		BodyOverrideMode: defaultBodyMode(p.BodyOverrideMode),
 		BodyOverride:     p.BodyOverride,
 	}
+	plainHeaders, plainBody := t.ExtraHeaders, t.BodyOverride
+	if err := s.sealRequestPayloadInPlace(t); err != nil {
+		return nil, err
+	}
 	if err := s.repo.Create(ctx, t); err != nil {
 		return nil, fmt.Errorf("create template: %w", err)
 	}
+	t.ExtraHeaders, t.BodyOverride = plainHeaders, plainBody
 	return t, nil
 }
 
@@ -86,12 +109,20 @@ func (s *ChannelMonitorRequestTemplateService) Update(ctx context.Context, id in
 	if err != nil {
 		return nil, err
 	}
+	if err := s.openRequestPayloadInPlace(existing); err != nil {
+		return nil, err
+	}
 	if err := applyTemplateUpdate(existing, p); err != nil {
+		return nil, err
+	}
+	plainHeaders, plainBody := existing.ExtraHeaders, existing.BodyOverride
+	if err := s.sealRequestPayloadInPlace(existing); err != nil {
 		return nil, err
 	}
 	if err := s.repo.Update(ctx, existing); err != nil {
 		return nil, fmt.Errorf("update template: %w", err)
 	}
+	existing.ExtraHeaders, existing.BodyOverride = plainHeaders, plainBody
 	return existing, nil
 }
 
@@ -107,7 +138,7 @@ func (s *ChannelMonitorRequestTemplateService) Delete(ctx context.Context, id in
 // monitorIDs 必须非空且每个 id 都必须当前 template_id = id；不满足条件的会被 SQL WHERE 过滤掉。
 // 返回实际被覆盖的监控数。
 func (s *ChannelMonitorRequestTemplateService) ApplyToMonitors(ctx context.Context, id int64, monitorIDs []int64) (int64, error) {
-	if _, err := s.repo.GetByID(ctx, id); err != nil {
+	if _, err := s.Get(ctx, id); err != nil {
 		return 0, err
 	}
 	if len(monitorIDs) == 0 {
@@ -176,6 +207,9 @@ func applyTemplateUpdate(existing *ChannelMonitorRequestTemplate, p ChannelMonit
 	newBody := existing.BodyOverride
 	if p.BodyOverrideMode != nil {
 		newMode = *p.BodyOverrideMode
+		if newMode == MonitorBodyOverrideModeOff {
+			newBody = nil
+		}
 	}
 	if p.BodyOverride != nil {
 		newBody = *p.BodyOverride
@@ -190,6 +224,9 @@ func applyTemplateUpdate(existing *ChannelMonitorRequestTemplate, p ChannelMonit
 
 // validateBodyModeParams 校验 body_override_mode 合法，且 merge/replace 模式下 body_override 非空。
 func validateBodyModeParams(mode string, body map[string]any) error {
+	if err := validateChannelMonitorBodyOverride(body); err != nil {
+		return err
+	}
 	switch mode {
 	case "", MonitorBodyOverrideModeOff:
 		return nil
@@ -209,26 +246,108 @@ var headerNameRegex = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_` + "`" + `|~]
 // forbiddenHeaderNames hop-by-hop + HTTP 客户端自管的 header；禁止用户覆盖，
 // 否则会让 Go http.Client 行为异常（双重 Content-Length、连接复用错乱等）。
 var forbiddenHeaderNames = map[string]bool{
-	"host":              true,
-	"content-length":    true,
-	"content-encoding":  true,
-	"transfer-encoding": true,
-	"connection":        true,
+	"host":                          true,
+	"content-length":                true,
+	"content-encoding":              true,
+	"transfer-encoding":             true,
+	"connection":                    true,
+	"authorization":                 true,
+	"proxy-authorization":           true,
+	"cookie":                        true,
+	"set-cookie":                    true,
+	"x-api-key":                     true,
+	"api-key":                       true,
+	"x-goog-api-key":                true,
+	"x-auth-token":                  true,
+	ChannelMonitorSecretEnvelopeKey: true,
+}
+
+var forbiddenCredentialHeaderFragments = []string{
+	"authorization",
+	"apikey",
+	"authtoken",
+	"accesstoken",
+	"securitytoken",
+	"credential",
+	"clientsecret",
+	"privatekey",
+	"signature",
+	"cookie",
+	"token",
+	"password",
 }
 
 // IsForbiddenHeaderName 对外暴露，checker 运行时也会再过滤一次做兜底。
 func IsForbiddenHeaderName(name string) bool {
-	return forbiddenHeaderNames[strings.ToLower(strings.TrimSpace(name))]
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if forbiddenHeaderNames[normalized] {
+		return true
+	}
+	parts := strings.FieldsFunc(normalized, func(r rune) bool { return r == '-' || r == '_' || r == '.' })
+	if len(parts) > 0 && parts[len(parts)-1] == "key" {
+		return true
+	}
+	compact := strings.NewReplacer("-", "", "_", "", ".", "").Replace(normalized)
+	for _, fragment := range forbiddenCredentialHeaderFragments {
+		if strings.Contains(compact, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateExtraHeaders 校验 header 名字格式 + 黑名单。保存时就拒绝非法 header，早失败。
 func validateExtraHeaders(h map[string]string) error {
-	for k := range h {
+	for k, v := range h {
 		if !headerNameRegex.MatchString(k) {
 			return ErrChannelMonitorTemplateHeaderInvalidName
 		}
 		if IsForbiddenHeaderName(k) {
 			return ErrChannelMonitorTemplateHeaderForbidden
+		}
+		if claimsOfficialProviderClientHeader(k, v) {
+			return ErrChannelMonitorTemplateOfficialClientAttribution
+		}
+	}
+	return nil
+}
+
+func claimsOfficialProviderClientHeader(name, value string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch name {
+	case "user-agent":
+		return strings.HasPrefix(value, "claude-cli/")
+	case "x-app":
+		return value == "cli"
+	case "anthropic-beta":
+		return strings.Contains(value, "claude-code-") || strings.Contains(value, "oauth-")
+	case "anthropic-dangerous-direct-browser-access":
+		return value == "true"
+	default:
+		return false
+	}
+}
+
+func validateChannelMonitorBodyOverride(body map[string]any) error {
+	if err := validateChannelMonitorBodyEnvelopeKey(body); err != nil {
+		return err
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal channel monitor body for validation: %w", err)
+	}
+	normalized := strings.ToLower(string(raw))
+	for _, marker := range []string{
+		"anthropic's official cli for claude",
+		`"cc_entrypoint"`,
+		"<billing_attribution>",
+	} {
+		if strings.Contains(normalized, marker) {
+			return ErrChannelMonitorTemplateOfficialClientAttribution
 		}
 	}
 	return nil
@@ -248,4 +367,33 @@ func defaultBodyMode(mode string) string {
 		return MonitorBodyOverrideModeOff
 	}
 	return mode
+}
+
+func (s *ChannelMonitorRequestTemplateService) sealRequestPayloadInPlace(t *ChannelMonitorRequestTemplate) error {
+	headers, err := SealChannelMonitorExtraHeaders(s.encryptor, t.ExtraHeaders)
+	if err != nil {
+		return err
+	}
+	body, err := SealChannelMonitorBodyOverride(s.encryptor, t.BodyOverride)
+	if err != nil {
+		return err
+	}
+	t.ExtraHeaders, t.BodyOverride = headers, body
+	return nil
+}
+
+func (s *ChannelMonitorRequestTemplateService) openRequestPayloadInPlace(t *ChannelMonitorRequestTemplate) error {
+	if t == nil {
+		return nil
+	}
+	headers, err := OpenChannelMonitorExtraHeaders(s.encryptor, t.ExtraHeaders)
+	if err != nil {
+		return fmt.Errorf("open channel monitor template %d extra headers: %w", t.ID, err)
+	}
+	body, err := OpenChannelMonitorBodyOverride(s.encryptor, t.BodyOverride)
+	if err != nil {
+		return fmt.Errorf("open channel monitor template %d body override: %w", t.ID, err)
+	}
+	t.ExtraHeaders, t.BodyOverride = headers, body
+	return nil
 }

@@ -14,6 +14,14 @@ const (
 	// ClientRequestID 客户端请求的唯一标识，用于追踪请求全生命周期（用于 Ops 监控与排障）。
 	ClientRequestID Key = "ctx_client_request_id"
 
+	// UsageBillingRequestID freezes the server-side billing identity before any
+	// upstream bytes are sent. It survives request cancellation via WithoutCancel.
+	UsageBillingRequestID Key = "ctx_usage_billing_request_id"
+
+	// UsageBillingOwnerToken fences one live handler from concurrent reuse of
+	// the same request identity. Account failover attempts share this owner.
+	UsageBillingOwnerToken Key = "ctx_usage_billing_owner_token"
+
 	// Model 请求模型标识（用于统一请求链路日志字段）。
 	Model Key = "ctx_model"
 

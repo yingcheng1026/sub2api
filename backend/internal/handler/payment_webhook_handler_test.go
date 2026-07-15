@@ -134,10 +134,16 @@ func TestWebhookConstants(t *testing.T) {
 	t.Run("maxWebhookBodySize is 1MB", func(t *testing.T) {
 		assert.Equal(t, int64(1<<20), int64(maxWebhookBodySize))
 	})
+}
 
-	t.Run("webhookLogTruncateLen is 200", func(t *testing.T) {
-		assert.Equal(t, 200, webhookLogTruncateLen)
-	})
+func TestWebhookVerifyFailureLogAttributesExcludeRawPayload(t *testing.T) {
+	secret := "cardholder-secret-do-not-log"
+	attrs := webhookVerifyFailureLogAttributes(payment.TypeEasyPay, http.MethodPost, len(secret))
+	encoded := fmt.Sprint(attrs)
+
+	require.NotContains(t, encoded, secret)
+	require.NotContains(t, encoded, "rawBody")
+	require.Contains(t, encoded, "bodyLen")
 }
 
 func TestExtractOutTradeNo(t *testing.T) {
@@ -220,7 +226,7 @@ type webhookHandlerProviderStub struct {
 	verifyErr    error
 }
 
-func (p webhookHandlerProviderStub) Name() string { return p.key }
+func (p webhookHandlerProviderStub) Name() string        { return p.key }
 func (p webhookHandlerProviderStub) ProviderKey() string { return p.key }
 func (p webhookHandlerProviderStub) SupportedTypes() []payment.PaymentType {
 	return []payment.PaymentType{payment.PaymentType(p.key)}

@@ -61,6 +61,22 @@ const (
 	FieldTotalRecharged = "total_recharged"
 	// FieldRpmLimit holds the string denoting the rpm_limit field in the database.
 	FieldRpmLimit = "rpm_limit"
+	// FieldSignupIP holds the string denoting the signup_ip field in the database.
+	FieldSignupIP = "signup_ip"
+	// FieldSignupIPPrefix holds the string denoting the signup_ip_prefix field in the database.
+	FieldSignupIPPrefix = "signup_ip_prefix"
+	// FieldSignupUserAgentHash holds the string denoting the signup_user_agent_hash field in the database.
+	FieldSignupUserAgentHash = "signup_user_agent_hash"
+	// FieldSignupDeviceFingerprintHash holds the string denoting the signup_device_fingerprint_hash field in the database.
+	FieldSignupDeviceFingerprintHash = "signup_device_fingerprint_hash"
+	// FieldTrialBonusEligible holds the string denoting the trial_bonus_eligible field in the database.
+	FieldTrialBonusEligible = "trial_bonus_eligible"
+	// FieldTrialBonusHoldReason holds the string denoting the trial_bonus_hold_reason field in the database.
+	FieldTrialBonusHoldReason = "trial_bonus_hold_reason"
+	// FieldTrialBonusRiskScore holds the string denoting the trial_bonus_risk_score field in the database.
+	FieldTrialBonusRiskScore = "trial_bonus_risk_score"
+	// FieldTokenVersion holds the string denoting the token_version field in the database.
+	FieldTokenVersion = "token_version"
 	// EdgeAPIKeys holds the string denoting the api_keys edge name in mutations.
 	EdgeAPIKeys = "api_keys"
 	// EdgeRedeemCodes holds the string denoting the redeem_codes edge name in mutations.
@@ -215,6 +231,14 @@ var Columns = []string{
 	FieldBalanceNotifyExtraEmails,
 	FieldTotalRecharged,
 	FieldRpmLimit,
+	FieldSignupIP,
+	FieldSignupIPPrefix,
+	FieldSignupUserAgentHash,
+	FieldSignupDeviceFingerprintHash,
+	FieldTrialBonusEligible,
+	FieldTrialBonusHoldReason,
+	FieldTrialBonusRiskScore,
+	FieldTokenVersion,
 }
 
 var (
@@ -285,6 +309,34 @@ var (
 	DefaultTotalRecharged float64
 	// DefaultRpmLimit holds the default value on creation for the "rpm_limit" field.
 	DefaultRpmLimit int
+	// DefaultSignupIP holds the default value on creation for the "signup_ip" field.
+	DefaultSignupIP string
+	// SignupIPValidator is a validator for the "signup_ip" field. It is called by the builders before save.
+	SignupIPValidator func(string) error
+	// DefaultSignupIPPrefix holds the default value on creation for the "signup_ip_prefix" field.
+	DefaultSignupIPPrefix string
+	// SignupIPPrefixValidator is a validator for the "signup_ip_prefix" field. It is called by the builders before save.
+	SignupIPPrefixValidator func(string) error
+	// DefaultSignupUserAgentHash holds the default value on creation for the "signup_user_agent_hash" field.
+	DefaultSignupUserAgentHash string
+	// SignupUserAgentHashValidator is a validator for the "signup_user_agent_hash" field. It is called by the builders before save.
+	SignupUserAgentHashValidator func(string) error
+	// DefaultSignupDeviceFingerprintHash holds the default value on creation for the "signup_device_fingerprint_hash" field.
+	DefaultSignupDeviceFingerprintHash string
+	// SignupDeviceFingerprintHashValidator is a validator for the "signup_device_fingerprint_hash" field. It is called by the builders before save.
+	SignupDeviceFingerprintHashValidator func(string) error
+	// DefaultTrialBonusEligible holds the default value on creation for the "trial_bonus_eligible" field.
+	DefaultTrialBonusEligible bool
+	// DefaultTrialBonusHoldReason holds the default value on creation for the "trial_bonus_hold_reason" field.
+	DefaultTrialBonusHoldReason string
+	// TrialBonusHoldReasonValidator is a validator for the "trial_bonus_hold_reason" field. It is called by the builders before save.
+	TrialBonusHoldReasonValidator func(string) error
+	// DefaultTrialBonusRiskScore holds the default value on creation for the "trial_bonus_risk_score" field.
+	DefaultTrialBonusRiskScore int
+	// DefaultTokenVersion holds the default value on creation for the "token_version" field.
+	DefaultTokenVersion int64
+	// TokenVersionValidator is a validator for the "token_version" field. It is called by the builders before save.
+	TokenVersionValidator func(int64) error
 )
 
 // OrderOption defines the ordering options for the User queries.
@@ -408,6 +460,46 @@ func ByTotalRecharged(opts ...sql.OrderTermOption) OrderOption {
 // ByRpmLimit orders the results by the rpm_limit field.
 func ByRpmLimit(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRpmLimit, opts...).ToFunc()
+}
+
+// BySignupIP orders the results by the signup_ip field.
+func BySignupIP(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSignupIP, opts...).ToFunc()
+}
+
+// BySignupIPPrefix orders the results by the signup_ip_prefix field.
+func BySignupIPPrefix(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSignupIPPrefix, opts...).ToFunc()
+}
+
+// BySignupUserAgentHash orders the results by the signup_user_agent_hash field.
+func BySignupUserAgentHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSignupUserAgentHash, opts...).ToFunc()
+}
+
+// BySignupDeviceFingerprintHash orders the results by the signup_device_fingerprint_hash field.
+func BySignupDeviceFingerprintHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSignupDeviceFingerprintHash, opts...).ToFunc()
+}
+
+// ByTrialBonusEligible orders the results by the trial_bonus_eligible field.
+func ByTrialBonusEligible(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTrialBonusEligible, opts...).ToFunc()
+}
+
+// ByTrialBonusHoldReason orders the results by the trial_bonus_hold_reason field.
+func ByTrialBonusHoldReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTrialBonusHoldReason, opts...).ToFunc()
+}
+
+// ByTrialBonusRiskScore orders the results by the trial_bonus_risk_score field.
+func ByTrialBonusRiskScore(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTrialBonusRiskScore, opts...).ToFunc()
+}
+
+// ByTokenVersion orders the results by the token_version field.
+func ByTokenVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTokenVersion, opts...).ToFunc()
 }
 
 // ByAPIKeysCount orders the results by api_keys count.

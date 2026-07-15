@@ -44,12 +44,13 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "accounts", "overload_until", "timestamp with time zone", 0, true)
 	requireColumn(t, tx, "accounts", "session_window_status", "character varying", 20, true)
 
-	// api_keys: key length should be 128
-	requireColumn(t, tx, "api_keys", "key", "character varying", 128, false)
+	// api_keys: AES-GCM envelope requires more room than the raw 128-byte key.
+	requireColumn(t, tx, "api_keys", "key", "character varying", 512, false)
 	requireColumn(t, tx, "api_keys", "key_hash", "character varying", 64, true)
 	requireColumn(t, tx, "api_keys", "key_prefix", "character varying", 16, false)
 	requireIndex(t, tx, "api_keys", "apikey_key_hash")
 	requirePartialUniqueIndexDefinition(t, tx, "api_keys", "apikey_key_hash", "key_hash", "deleted_at IS NULL", "key_hash IS NOT NULL")
+	requireConstraintDefinitionContains(t, tx, "api_keys", "chk_api_keys_encrypted_storage", "enc:v1:", "__deleted__")
 
 	// redeem_codes: subscription fields
 	requireColumn(t, tx, "redeem_codes", "group_id", "bigint", 0, true)
@@ -97,6 +98,163 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "user_subscriptions", "deleted_at", "timestamp with time zone", 0, true)
 	requireColumn(t, tx, "user_subscriptions", "locked_rates", "jsonb", 0, true)
 	requireConstraintDefinitionContains(t, tx, "user_subscriptions", "chk_user_subscriptions_locked_rates_object", "jsonb_typeof", "locked_rates")
+	requirePartialUniqueIndexDefinition(
+		t,
+		tx,
+		"user_subscriptions",
+		"idx_user_subscriptions_one_active_credits_wallet",
+		"user_id",
+		"wallet_balance_usd IS NOT NULL",
+		"status",
+		"'active'",
+		"deleted_at IS NULL",
+		"2099-12-30 23:59:59+00",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"user_subscriptions",
+		"trg_hfc_guard_user_subscription_no_finite_wallet",
+		"BEFORE INSERT OR UPDATE",
+		"hfc_guard_user_subscription_no_finite_wallet",
+	)
+	requireConstraintAbsent(t, tx, "user_subscriptions", "chk_user_subscriptions_wallet_balance_nonneg")
+	requireConstraintDefinitionContains(
+		t,
+		tx,
+		"user_subscriptions",
+		"chk_user_subscriptions_wallet_balance_finite",
+		"wallet_balance_usd",
+		"NaN",
+		"Infinity",
+	)
+	requireForeignKeyOnDelete(t, tx, "user_subscriptions", "group_id", "groups", "RESTRICT")
+	requireForeignKeyOnDelete(t, tx, "subscription_plans", "group_id", "groups", "RESTRICT")
+	requireForeignKeyOnDelete(t, tx, "subscription_plan_groups", "group_id", "groups", "RESTRICT")
+	requireConstraintDefinitionContains(
+		t,
+		tx,
+		"user_subscriptions",
+		"chk_user_subscriptions_wallet_initial_valid",
+		"wallet_initial_usd",
+		"NaN",
+		"Infinity",
+	)
+
+	// Wallet integrity and monthly-vs-credits separation (migrations 175-176).
+	requirePartialUniqueIndexDefinition(
+		t,
+		tx,
+		"subscription_wallet_ledger",
+		"idx_wallet_ledger_one_activation",
+		"subscription_id",
+		"reason",
+		"'activation'",
+	)
+	requireConstraintDefinitionContains(
+		t,
+		tx,
+		"subscription_wallet_ledger",
+		"chk_wallet_ledger_amounts_finite",
+		"delta_usd",
+		"balance_after",
+		"NaN",
+		"Infinity",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"subscription_wallet_ledger",
+		"trg_hfc_lock_wallet_ledger_parent",
+		"BEFORE INSERT",
+		"hfc_lock_wallet_ledger_parent",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"subscription_wallet_ledger",
+		"trg_hfc_reject_wallet_ledger_mutation",
+		"BEFORE DELETE OR UPDATE",
+		"hfc_reject_wallet_ledger_mutation",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"subscription_wallet_ledger",
+		"trg_hfc_check_wallet_ledger_integrity",
+		"AFTER INSERT",
+		"DEFERRABLE INITIALLY DEFERRED",
+		"hfc_check_wallet_ledger_integrity",
+	)
+	requireForeignKeyOnDelete(t, tx, "subscription_wallet_ledger", "subscription_id", "user_subscriptions", "RESTRICT")
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"user_subscriptions",
+		"trg_hfc_check_wallet_subscription_integrity",
+		"AFTER INSERT OR UPDATE",
+		"DEFERRABLE INITIALLY DEFERRED",
+		"hfc_check_wallet_subscription_integrity",
+	)
+	requireConstraintDefinitionContains(
+		t,
+		tx,
+		"subscription_plans",
+		"chk_hfc_subscription_plans_monthly_group_only",
+		"plan_type",
+		"'subscription'",
+		"group_id IS NOT NULL",
+		"wallet_quota_usd IS NULL",
+		"'credits'",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"payment_orders",
+		"trg_hfc_guard_monthly_payment_order_group_path",
+		"BEFORE INSERT OR UPDATE",
+		"status",
+		"paid_at",
+		"payment_trade_no",
+		"hfc_guard_monthly_payment_order_group_path",
+	)
+	requireIndex(t, tx, "payment_orders", "paymentorder_provider_instance_id_created_at")
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"subscription_plans",
+		"trg_hfc_guard_subscription_plan_group",
+		"BEFORE INSERT OR UPDATE",
+		"hfc_guard_subscription_plan_group",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"subscription_plans",
+		"trg_hfc_guard_plan_shape_change_with_open_orders",
+		"BEFORE UPDATE",
+		"plan_type",
+		"group_id",
+		"wallet_quota_usd",
+		"hfc_guard_plan_shape_change_with_open_orders",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"subscription_plans",
+		"trg_hfc_guard_plan_delete_with_open_orders",
+		"BEFORE DELETE",
+		"hfc_guard_plan_delete_with_open_orders",
+	)
+	requireTriggerDefinitionContains(
+		t,
+		tx,
+		"groups",
+		"trg_hfc_guard_subscription_group_lifecycle",
+		"AFTER DELETE OR UPDATE",
+		"DEFERRABLE INITIALLY DEFERRED",
+		"hfc_guard_subscription_group_lifecycle",
+	)
 
 	// orphan_allowed_groups_audit table should exist (migration 013)
 	var orphanAuditRegclass sql.NullString
@@ -332,6 +490,46 @@ WHERE ns.nspname = 'public'
 
 	for _, fragment := range fragments {
 		require.Contains(t, def, fragment, "expected constraint definition for %s.%s to contain %q", table, constraint, fragment)
+	}
+}
+
+func requireConstraintAbsent(t *testing.T, tx *sql.Tx, table, constraint string) {
+	t.Helper()
+
+	var exists bool
+	err := tx.QueryRowContext(context.Background(), `
+SELECT EXISTS (
+	SELECT 1
+	FROM pg_constraint c
+	JOIN pg_class tbl ON tbl.oid = c.conrelid
+	JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+	WHERE ns.nspname = 'public'
+	  AND tbl.relname = $1
+	  AND c.conname = $2
+)
+`, table, constraint).Scan(&exists)
+	require.NoError(t, err, "query constraint existence for %s.%s", table, constraint)
+	require.False(t, exists, "expected constraint %s on %s to be absent", constraint, table)
+}
+
+func requireTriggerDefinitionContains(t *testing.T, tx *sql.Tx, table, trigger string, fragments ...string) {
+	t.Helper()
+
+	var def string
+	err := tx.QueryRowContext(context.Background(), `
+SELECT pg_get_triggerdef(t.oid)
+FROM pg_trigger t
+JOIN pg_class tbl ON tbl.oid = t.tgrelid
+JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+WHERE ns.nspname = 'public'
+  AND tbl.relname = $1
+  AND t.tgname = $2
+  AND NOT t.tgisinternal
+`, table, trigger).Scan(&def)
+	require.NoError(t, err, "query trigger definition for %s.%s", table, trigger)
+
+	for _, fragment := range fragments {
+		require.Contains(t, def, fragment, "expected trigger definition for %s.%s to contain %q", table, trigger, fragment)
 	}
 }
 

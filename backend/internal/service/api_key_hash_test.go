@@ -15,7 +15,7 @@ func TestAPIKeyPrefixForStorage(t *testing.T) {
 		t.Fatalf("short prefix = %q", got)
 	}
 
-	if got := APIKeyPrefixForStorage("hfc_1234567890abcdef"); got != "hfc_12345678" {
+	if got := APIKeyPrefixForStorage("hfc_1234567890abcdef"); got != "hfc_1234" {
 		t.Fatalf("long prefix = %q", got)
 	}
 }

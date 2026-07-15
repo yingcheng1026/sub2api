@@ -4,10 +4,22 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+const (
+	maxResponsesCompatibilityEvents      = 65_536
+	maxResponsesCompatibilityToolCalls   = 128
+	maxResponsesCompatibilityOutputBytes = 16 << 20
+)
+
+// ErrResponsesCompatibilityResourceLimit marks an upstream compatibility
+// stream that exceeded bounded in-memory conversion work. Callers should stop
+// reading that response rather than returning a partial reconstructed result.
+var ErrResponsesCompatibilityResourceLimit = errors.New("responses compatibility resource limit exceeded")
 
 // ---------------------------------------------------------------------------
 // Non-streaming: ResponsesResponse → ChatCompletionsResponse
@@ -29,8 +41,8 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		Model:   model,
 	}
 
-	var contentText string
-	var reasoningText string
+	var contentText strings.Builder
+	var reasoningText strings.Builder
 	var toolCalls []ChatToolCall
 
 	for _, item := range resp.Output {
@@ -38,7 +50,7 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		case "message":
 			for _, part := range item.Content {
 				if part.Type == "output_text" && part.Text != "" {
-					contentText += part.Text
+					_, _ = contentText.WriteString(part.Text)
 				}
 			}
 		case "function_call":
@@ -53,7 +65,7 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		case "reasoning":
 			for _, s := range item.Summary {
 				if s.Type == "summary_text" && s.Text != "" {
-					reasoningText += s.Text
+					_, _ = reasoningText.WriteString(s.Text)
 				}
 			}
 		case "web_search_call":
@@ -65,12 +77,12 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
 	}
-	if contentText != "" {
-		raw, _ := json.Marshal(contentText)
+	if contentText.Len() > 0 {
+		raw, _ := json.Marshal(contentText.String())
 		msg.Content = raw
 	}
-	if reasoningText != "" {
-		msg.ReasoningContent = reasoningText
+	if reasoningText.Len() > 0 {
+		msg.ReasoningContent = reasoningText.String()
 	}
 
 	finishReason := responsesStatusToChatFinishReason(resp.Status, resp.IncompleteDetails, toolCalls)
@@ -133,6 +145,8 @@ type ResponsesEventToChatState struct {
 	OutputIndexToToolIndex map[int]int // Responses output_index → Chat tool_calls index
 	IncludeUsage           bool
 	Usage                  *ChatUsage
+	eventCount             int
+	limitErr               error
 }
 
 // NewResponsesEventToChatState returns an initialised stream state.
@@ -144,9 +158,33 @@ func NewResponsesEventToChatState() *ResponsesEventToChatState {
 	}
 }
 
+// Err returns the first resource-limit violation observed by the stream
+// converter. Once set, subsequent events are ignored.
+func (s *ResponsesEventToChatState) Err() error {
+	if s == nil {
+		return nil
+	}
+	return s.limitErr
+}
+
+func (s *ResponsesEventToChatState) failLimit(reason string) {
+	if s.limitErr == nil {
+		s.limitErr = fmt.Errorf("%w: %s", ErrResponsesCompatibilityResourceLimit, reason)
+	}
+}
+
 // ResponsesEventToChatChunks converts a single Responses SSE event into zero
 // or more Chat Completions chunks, updating state as it goes.
 func ResponsesEventToChatChunks(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	if evt == nil || state == nil || state.limitErr != nil {
+		return nil
+	}
+	state.eventCount++
+	if state.eventCount > maxResponsesCompatibilityEvents {
+		state.failLimit("event count")
+		return nil
+	}
+
 	switch evt.Type {
 	case "response.created":
 		return resToChatHandleCreated(evt, state)
@@ -241,6 +279,14 @@ func resToChatHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 
 func resToChatHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
 	if evt.Item == nil || evt.Item.Type != "function_call" {
+		return nil
+	}
+
+	if _, exists := state.OutputIndexToToolIndex[evt.OutputIndex]; exists {
+		return nil
+	}
+	if len(state.OutputIndexToToolIndex) >= maxResponsesCompatibilityToolCalls {
+		state.failLimit("tool call count")
 		return nil
 	}
 
@@ -393,10 +439,13 @@ type bufferedFuncCall struct {
 type BufferedResponseAccumulator struct {
 	text                 strings.Builder
 	reasoning            strings.Builder
-	funcCalls            []bufferedFuncCall
+	funcCalls            []*bufferedFuncCall
 	outputIndexToFuncIdx map[int]int
 	responseID           string
 	responseModel        string
+	eventCount           int
+	retainedBytes        int
+	limitErr             error
 }
 
 // NewBufferedResponseAccumulator returns an initialised accumulator.
@@ -409,28 +458,58 @@ func NewBufferedResponseAccumulator() *BufferedResponseAccumulator {
 // ProcessEvent inspects a single Responses SSE event and accumulates any
 // content it carries. Only delta events that contribute to the final output
 // are handled; all other event types are silently ignored.
-func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) {
-	if event == nil {
-		return
+func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) error {
+	if a == nil || event == nil {
+		return nil
+	}
+	if a.limitErr != nil {
+		return a.limitErr
+	}
+	a.eventCount++
+	if a.eventCount > maxResponsesCompatibilityEvents {
+		return a.failLimit("event count")
 	}
 	if event.Response != nil {
+		responseID := ""
+		responseModel := ""
 		if a.responseID == "" {
-			a.responseID = strings.TrimSpace(event.Response.ID)
+			responseID = strings.TrimSpace(event.Response.ID)
 		}
 		if a.responseModel == "" {
-			a.responseModel = strings.TrimSpace(event.Response.Model)
+			responseModel = strings.TrimSpace(event.Response.Model)
+		}
+		if err := a.reserveBytes(len(responseID) + len(responseModel)); err != nil {
+			return err
+		}
+		if responseID != "" {
+			a.responseID = responseID
+		}
+		if responseModel != "" {
+			a.responseModel = responseModel
 		}
 	}
 	switch event.Type {
 	case "response.output_text.delta":
 		if event.Delta != "" {
+			if err := a.reserveBytes(len(event.Delta)); err != nil {
+				return err
+			}
 			_, _ = a.text.WriteString(event.Delta)
 		}
 	case "response.output_item.added":
 		if event.Item != nil && event.Item.Type == "function_call" {
+			if _, exists := a.outputIndexToFuncIdx[event.OutputIndex]; exists {
+				return nil
+			}
+			if len(a.funcCalls) >= maxResponsesCompatibilityToolCalls {
+				return a.failLimit("tool call count")
+			}
+			if err := a.reserveBytes(len(event.Item.CallID) + len(event.Item.Name)); err != nil {
+				return err
+			}
 			idx := len(a.funcCalls)
 			a.outputIndexToFuncIdx[event.OutputIndex] = idx
-			a.funcCalls = append(a.funcCalls, bufferedFuncCall{
+			a.funcCalls = append(a.funcCalls, &bufferedFuncCall{
 				CallID: event.Item.CallID,
 				Name:   event.Item.Name,
 			})
@@ -438,14 +517,44 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 	case "response.function_call_arguments.delta":
 		if event.Delta != "" {
 			if idx, ok := a.outputIndexToFuncIdx[event.OutputIndex]; ok {
+				if err := a.reserveBytes(len(event.Delta)); err != nil {
+					return err
+				}
 				_, _ = a.funcCalls[idx].Args.WriteString(event.Delta)
 			}
 		}
 	case "response.reasoning_summary_text.delta":
 		if event.Delta != "" {
+			if err := a.reserveBytes(len(event.Delta)); err != nil {
+				return err
+			}
 			_, _ = a.reasoning.WriteString(event.Delta)
 		}
 	}
+	return nil
+}
+
+// Err returns the first cumulative conversion limit violation.
+func (a *BufferedResponseAccumulator) Err() error {
+	if a == nil {
+		return nil
+	}
+	return a.limitErr
+}
+
+func (a *BufferedResponseAccumulator) reserveBytes(size int) error {
+	if size < 0 || size > maxResponsesCompatibilityOutputBytes-a.retainedBytes {
+		return a.failLimit("retained output bytes")
+	}
+	a.retainedBytes += size
+	return nil
+}
+
+func (a *BufferedResponseAccumulator) failLimit(reason string) error {
+	if a.limitErr == nil {
+		a.limitErr = fmt.Errorf("%w: %s", ErrResponsesCompatibilityResourceLimit, reason)
+	}
+	return a.limitErr
 }
 
 // ResponseID returns the first response ID observed in the stream.
@@ -466,6 +575,9 @@ func (a *BufferedResponseAccumulator) ResponseModel() string {
 
 // HasContent reports whether any content has been accumulated.
 func (a *BufferedResponseAccumulator) HasContent() bool {
+	if a == nil || a.limitErr != nil {
+		return false
+	}
 	return a.text.Len() > 0 || len(a.funcCalls) > 0 || a.reasoning.Len() > 0
 }
 
@@ -473,6 +585,9 @@ func (a *BufferedResponseAccumulator) HasContent() bool {
 // Non-streaming gateways use this to avoid synthesizing a successful response
 // from a potentially partial tool call when an upstream stream ends abruptly.
 func (a *BufferedResponseAccumulator) HasFunctionCalls() bool {
+	if a == nil || a.limitErr != nil {
+		return false
+	}
 	return len(a.funcCalls) > 0
 }
 
@@ -480,6 +595,9 @@ func (a *BufferedResponseAccumulator) HasFunctionCalls() bool {
 // content. The order matches what ResponsesToChatCompletions expects:
 // reasoning → message → function_calls.
 func (a *BufferedResponseAccumulator) BuildOutput() []ResponsesOutput {
+	if a == nil || a.limitErr != nil {
+		return nil
+	}
 	var out []ResponsesOutput
 
 	if a.reasoning.Len() > 0 {

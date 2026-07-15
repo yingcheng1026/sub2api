@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -34,13 +36,16 @@ const (
 	VisibleMethodSourceOfficialWechat = "official_wxpay"
 	VisibleMethodSourceEasyPayWechat  = "easypay_wxpay"
 
-	wechatPaymentResumeTokenType = "wechat_payment_resume"
+	wechatPaymentResumeTokenType       = "wechat_payment_resume"
+	wechatPaymentOAuthSubjectTokenType = "wechat_payment_oauth_subject"
 
 	paymentResumeNotConfiguredCode    = "PAYMENT_RESUME_NOT_CONFIGURED"
 	paymentResumeNotConfiguredMessage = "payment resume tokens require a configured signing key"
+	paymentResumeMinSigningKeyBytes   = 32
 
-	paymentResumeTokenTTL       = 24 * time.Hour
-	wechatPaymentResumeTokenTTL = 15 * time.Minute
+	paymentResumeTokenTTL        = 24 * time.Hour
+	wechatPaymentResumeTokenTTL  = 15 * time.Minute
+	wechatPaymentSubjectTokenTTL = 10 * time.Minute
 )
 
 type ResumeTokenClaims struct {
@@ -56,6 +61,8 @@ type ResumeTokenClaims struct {
 
 type WeChatPaymentResumeClaims struct {
 	TokenType   string `json:"tk,omitempty"`
+	UserID      int64  `json:"uid"`
+	JTI         string `json:"jti"`
 	OpenID      string `json:"openid"`
 	PaymentType string `json:"pt,omitempty"`
 	Amount      string `json:"amt,omitempty"`
@@ -65,6 +72,14 @@ type WeChatPaymentResumeClaims struct {
 	Scope       string `json:"scp,omitempty"`
 	IssuedAt    int64  `json:"iat"`
 	ExpiresAt   int64  `json:"exp,omitempty"`
+}
+
+type WeChatPaymentOAuthSubjectClaims struct {
+	TokenType string `json:"tk"`
+	UserID    int64  `json:"uid"`
+	JTI       string `json:"jti"`
+	IssuedAt  int64  `json:"iat"`
+	ExpiresAt int64  `json:"exp"`
 }
 
 type PaymentResumeService struct {
@@ -79,12 +94,12 @@ type visibleMethodLoadBalancer struct {
 
 func NewPaymentResumeService(signingKey []byte, verifyFallbacks ...[]byte) *PaymentResumeService {
 	svc := &PaymentResumeService{}
-	if len(signingKey) > 0 {
+	if len(signingKey) >= paymentResumeMinSigningKeyBytes {
 		svc.signingKey = append([]byte(nil), signingKey...)
 		svc.verifyKeys = append(svc.verifyKeys, svc.signingKey)
 	}
 	for _, fallback := range verifyFallbacks {
-		if len(fallback) == 0 {
+		if len(fallback) < paymentResumeMinSigningKeyBytes {
 			continue
 		}
 		cloned := append([]byte(nil), fallback...)
@@ -232,17 +247,21 @@ func visibleMethodSourceSettingKey(method string) string {
 	}
 }
 
-func CanonicalizeReturnURL(raw string, srcHost string, srcURL string) (string, error) {
+func CanonicalizeReturnURL(raw string, trustedFrontendURL string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
-		return "", infraerrors.BadRequest("INVALID_RETURN_URL", "return_url must be an absolute http/https URL")
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil {
+		return "", infraerrors.BadRequest("INVALID_RETURN_URL", "return_url must be an absolute URL without credentials")
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", infraerrors.BadRequest("INVALID_RETURN_URL", "return_url must use http or https")
+	trusted, err := url.Parse(strings.TrimSpace(trustedFrontendURL))
+	if err != nil || !trusted.IsAbs() || trusted.Host == "" || trusted.User != nil {
+		return "", infraerrors.ServiceUnavailable("PAYMENT_RETURN_URL_NOT_CONFIGURED", "canonical frontend URL is not configured")
+	}
+	if !isSecurePaymentReturnOrigin(parsed) || !isSecurePaymentReturnOrigin(trusted) {
+		return "", infraerrors.BadRequest("INVALID_RETURN_URL", "return_url must use HTTPS except for loopback development")
 	}
 	parsed.Fragment = ""
 	if parsed.Path == "" {
@@ -251,29 +270,54 @@ func CanonicalizeReturnURL(raw string, srcHost string, srcURL string) (string, e
 	if parsed.Path != paymentResultReturnPath {
 		return "", infraerrors.BadRequest("INVALID_RETURN_URL", "return_url must target the canonical internal payment result page")
 	}
-	if !allowedReturnURLHost(parsed.Host, srcHost, srcURL) {
-		return "", infraerrors.BadRequest("INVALID_RETURN_URL", "return_url must use the same host as the current site or browser origin")
+	if !sameURLOrigin(parsed, trusted) {
+		return "", infraerrors.BadRequest("INVALID_RETURN_URL", "return_url must use the configured frontend origin")
 	}
 	return parsed.String(), nil
 }
 
-func allowedReturnURLHost(returnURLHost string, requestHost string, refererURL string) bool {
-	if sameOriginHost(returnURLHost, requestHost) {
+func isSecurePaymentReturnOrigin(parsed *url.URL) bool {
+	if parsed == nil {
+		return false
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
 		return true
 	}
-
-	refererURL = strings.TrimSpace(refererURL)
-	if refererURL == "" {
+	if !strings.EqualFold(parsed.Scheme, "http") {
 		return false
 	}
-	parsedReferer, err := url.Parse(refererURL)
-	if err != nil || parsedReferer.Host == "" {
-		return false
+	hostname := strings.TrimSpace(parsed.Hostname())
+	if strings.EqualFold(hostname, "localhost") || strings.HasSuffix(strings.ToLower(hostname), ".localhost") {
+		return true
 	}
-	return sameOriginHost(returnURLHost, parsedReferer.Host)
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 
-func buildPaymentReturnURL(base string, orderID int64, outTradeNo string, resumeToken string) (string, error) {
+func sameURLOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil || !strings.EqualFold(left.Scheme, right.Scheme) {
+		return false
+	}
+	if !strings.EqualFold(left.Hostname(), right.Hostname()) {
+		return false
+	}
+	return effectiveURLPort(left) == effectiveURLPort(right)
+}
+
+func effectiveURLPort(parsed *url.URL) string {
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(parsed.Scheme, "http") {
+		return "80"
+	}
+	return ""
+}
+
+func buildPaymentReturnURL(base string, orderID int64, outTradeNo string) (string, error) {
 	canonical := strings.TrimSpace(base)
 	if canonical == "" {
 		return "", nil
@@ -295,38 +339,10 @@ func buildPaymentReturnURL(base string, orderID int64, outTradeNo string, resume
 	if strings.TrimSpace(outTradeNo) != "" {
 		query.Set("out_trade_no", strings.TrimSpace(outTradeNo))
 	}
-	if strings.TrimSpace(resumeToken) != "" {
-		query.Set("resume_token", strings.TrimSpace(resumeToken))
-	}
 	query.Set("status", "success")
 	parsed.RawQuery = query.Encode()
 
 	return parsed.String(), nil
-}
-
-func sameOriginHost(returnURLHost string, requestHost string) bool {
-	returnHost := strings.TrimSpace(returnURLHost)
-	reqHost := strings.TrimSpace(requestHost)
-	if returnHost == "" || reqHost == "" {
-		return false
-	}
-	if strings.EqualFold(returnHost, reqHost) {
-		return true
-	}
-
-	returnName, returnPort := splitHostPortDefault(returnHost)
-	reqName, reqPort := splitHostPortDefault(reqHost)
-	if returnName == "" || reqName == "" {
-		return false
-	}
-	return strings.EqualFold(returnName, reqName) && returnPort == reqPort
-}
-
-func splitHostPortDefault(raw string) (string, string) {
-	if host, port, err := net.SplitHostPort(raw); err == nil {
-		return host, port
-	}
-	return raw, ""
 }
 
 func (s *PaymentResumeService) CreateToken(claims ResumeTokenClaims) (string, error) {
@@ -335,6 +351,9 @@ func (s *PaymentResumeService) CreateToken(claims ResumeTokenClaims) (string, er
 	}
 	if claims.OrderID <= 0 {
 		return "", fmt.Errorf("resume token requires order id")
+	}
+	if claims.UserID <= 0 {
+		return "", fmt.Errorf("resume token requires user id")
 	}
 	if claims.IssuedAt == 0 {
 		claims.IssuedAt = time.Now().Unix()
@@ -346,6 +365,9 @@ func (s *PaymentResumeService) CreateToken(claims ResumeTokenClaims) (string, er
 }
 
 func (s *PaymentResumeService) ParseToken(token string) (*ResumeTokenClaims, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, infraerrors.BadRequest("INVALID_RESUME_TOKEN", "resume token is required")
+	}
 	if err := s.ensureSigningKey(); err != nil {
 		return nil, err
 	}
@@ -356,6 +378,12 @@ func (s *PaymentResumeService) ParseToken(token string) (*ResumeTokenClaims, err
 	if claims.OrderID <= 0 {
 		return nil, infraerrors.BadRequest("INVALID_RESUME_TOKEN", "resume token missing order id")
 	}
+	if claims.UserID <= 0 {
+		return nil, infraerrors.BadRequest("INVALID_RESUME_TOKEN", "resume token missing user binding")
+	}
+	if claims.ExpiresAt <= 0 {
+		return nil, infraerrors.BadRequest("INVALID_RESUME_TOKEN", "resume token missing expiry")
+	}
 	if err := validatePaymentResumeExpiry(claims.ExpiresAt, "INVALID_RESUME_TOKEN", "resume token has expired"); err != nil {
 		return nil, err
 	}
@@ -364,6 +392,14 @@ func (s *PaymentResumeService) ParseToken(token string) (*ResumeTokenClaims, err
 
 func (s *PaymentResumeService) CreateWeChatPaymentResumeToken(claims WeChatPaymentResumeClaims) (string, error) {
 	if err := s.ensureSigningKey(); err != nil {
+		return "", err
+	}
+	if claims.UserID <= 0 {
+		return "", fmt.Errorf("wechat payment resume token requires user id")
+	}
+	var err error
+	claims.JTI, err = normalizeOrGeneratePaymentResumeJTI(claims.JTI)
+	if err != nil {
 		return "", err
 	}
 	claims.OpenID = strings.TrimSpace(claims.OpenID)
@@ -400,9 +436,18 @@ func (s *PaymentResumeService) ParseWeChatPaymentResumeToken(token string) (*WeC
 	if claims.TokenType != wechatPaymentResumeTokenType {
 		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token type mismatch")
 	}
+	if claims.UserID <= 0 {
+		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token missing user binding")
+	}
+	if !isValidPaymentResumeJTI(claims.JTI) {
+		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token missing replay binding")
+	}
 	claims.OpenID = strings.TrimSpace(claims.OpenID)
 	if claims.OpenID == "" {
 		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token missing openid")
+	}
+	if claims.ExpiresAt <= 0 {
+		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token missing expiry")
 	}
 	if err := validatePaymentResumeExpiry(claims.ExpiresAt, "INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token has expired"); err != nil {
 		return nil, err
@@ -417,6 +462,71 @@ func (s *PaymentResumeService) ParseWeChatPaymentResumeToken(token string) (*WeC
 		claims.OrderType = payment.OrderTypeBalance
 	}
 	return &claims, nil
+}
+
+func (s *PaymentResumeService) CreateWeChatPaymentOAuthSubjectToken(userID int64) (string, error) {
+	if err := s.ensureSigningKey(); err != nil {
+		return "", err
+	}
+	if userID <= 0 {
+		return "", fmt.Errorf("wechat payment oauth subject token requires user id")
+	}
+	jti, err := normalizeOrGeneratePaymentResumeJTI("")
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	return s.createSignedToken(WeChatPaymentOAuthSubjectClaims{
+		TokenType: wechatPaymentOAuthSubjectTokenType,
+		UserID:    userID,
+		JTI:       jti,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(wechatPaymentSubjectTokenTTL).Unix(),
+	})
+}
+
+func (s *PaymentResumeService) ParseWeChatPaymentOAuthSubjectToken(token string) (*WeChatPaymentOAuthSubjectClaims, error) {
+	if err := s.ensureSigningKey(); err != nil {
+		return nil, err
+	}
+	var claims WeChatPaymentOAuthSubjectClaims
+	if err := s.parseSignedToken(strings.TrimSpace(token), &claims); err != nil {
+		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_OAUTH_SUBJECT", "wechat payment oauth subject token payload is invalid")
+	}
+	if claims.TokenType != wechatPaymentOAuthSubjectTokenType || claims.UserID <= 0 || !isValidPaymentResumeJTI(claims.JTI) {
+		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_OAUTH_SUBJECT", "wechat payment oauth subject token binding is invalid")
+	}
+	if claims.ExpiresAt <= 0 {
+		return nil, infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_OAUTH_SUBJECT", "wechat payment oauth subject token missing expiry")
+	}
+	if err := validatePaymentResumeExpiry(claims.ExpiresAt, "INVALID_WECHAT_PAYMENT_OAUTH_SUBJECT", "wechat payment oauth subject token has expired"); err != nil {
+		return nil, err
+	}
+	return &claims, nil
+}
+
+func normalizeOrGeneratePaymentResumeJTI(raw string) (string, error) {
+	jti := strings.TrimSpace(raw)
+	if jti == "" {
+		randomBytes := make([]byte, 16)
+		if _, err := rand.Read(randomBytes); err != nil {
+			return "", fmt.Errorf("generate payment resume jti: %w", err)
+		}
+		return hex.EncodeToString(randomBytes), nil
+	}
+	if !isValidPaymentResumeJTI(jti) {
+		return "", fmt.Errorf("payment resume jti must be a 128-bit hexadecimal value")
+	}
+	return strings.ToLower(jti), nil
+}
+
+func isValidPaymentResumeJTI(raw string) bool {
+	jti := strings.TrimSpace(raw)
+	if len(jti) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(jti)
+	return err == nil
 }
 
 func (s *PaymentResumeService) createSignedToken(claims any) (string, error) {

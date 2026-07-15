@@ -116,12 +116,12 @@ func (s *apiKeyRepoStub) CountByGroupID(ctx context.Context, groupID int64) (int
 	panic("unexpected CountByGroupID call")
 }
 
-func (s *apiKeyRepoStub) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
-	panic("unexpected ListKeysByUserID call")
+func (s *apiKeyRepoStub) ListAuthCacheLocatorsByUserID(ctx context.Context, userID int64) ([]string, error) {
+	panic("unexpected ListAuthCacheLocatorsByUserID call")
 }
 
-func (s *apiKeyRepoStub) ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error) {
-	panic("unexpected ListKeysByGroupID call")
+func (s *apiKeyRepoStub) ListAuthCacheLocatorsByGroupID(ctx context.Context, groupID int64) ([]string, error) {
+	panic("unexpected ListAuthCacheLocatorsByGroupID call")
 }
 
 func (s *apiKeyRepoStub) IncrementQuotaUsed(ctx context.Context, id int64, amount float64) (float64, error) {
@@ -250,6 +250,24 @@ func TestApiKeyService_Delete_Success(t *testing.T) {
 	require.Equal(t, []string{svc.authCacheKey("k")}, cache.deleteAuthKeys)
 	_, exists := svc.lastUsedTouchL1.Load(int64(42))
 	require.False(t, exists, "delete should clear touch debounce cache")
+}
+
+func TestAPIKeyServiceDeleteRejectsWalletUniversalPurpose(t *testing.T) {
+	repo := &apiKeyRepoStub{
+		apiKey: &APIKey{
+			ID:      43,
+			UserID:  7,
+			Key:     "wallet-system-key",
+			Name:    WalletUniversalAPIKeyName,
+			Purpose: APIKeyPurposeWalletUniversal,
+		},
+	}
+	svc := &APIKeyService{apiKeyRepo: repo, cache: &apiKeyCacheStub{}}
+
+	err := svc.Delete(context.Background(), 43, 7)
+
+	require.ErrorIs(t, err, ErrWalletUniversalKeyDelete)
+	require.Empty(t, repo.deletedIDs)
 }
 
 // TestApiKeyService_Delete_NotFound 测试删除不存在的 API Key 时返回正确的错误。

@@ -155,8 +155,7 @@ func (s *GatewayService) handleWebSearchEmulation(
 		return nil, fmt.Errorf("web search emulation: no query found in messages")
 	}
 
-	slog.Info("web search emulation: executing search",
-		"account_id", account.ID, "account_name", account.Name, "query", query)
+	logWebSearchExecution(account, query)
 
 	resp, providerName, err := doWebSearch(ctx, account, query)
 	if err != nil {
@@ -182,6 +181,18 @@ func (s *GatewayService) handleWebSearchEmulation(
 		return writeWebSearchStreamResponse(c, query, resp, model, startTime)
 	}
 	return writeWebSearchNonStreamResponse(c, query, resp, model, startTime)
+}
+
+func logWebSearchExecution(account *Account, query string) {
+	if account == nil {
+		slog.Info("web search emulation: executing search", "query_bytes", len(query))
+		return
+	}
+	slog.Info("web search emulation: executing search",
+		"account_id", account.ID,
+		"account_name", account.Name,
+		"query_bytes", len(query),
+	)
 }
 
 func doWebSearch(ctx context.Context, account *Account, query string) (*websearch.SearchResponse, string, error) {

@@ -27,6 +27,14 @@ func TestRedactText_QueryLike(t *testing.T) {
 	}
 }
 
+func TestRedactTextAPIKeyFields(t *testing.T) {
+	in := `{"api_key":"sk-secret-value","custom_key":"custom-secret","verification":"fresh-password","other":"ok"}`
+	out := RedactText(in)
+	if strings.Contains(out, "sk-secret-value") || strings.Contains(out, "custom-secret") || strings.Contains(out, "fresh-password") {
+		t.Fatalf("expected API key fields redacted, got %q", out)
+	}
+}
+
 func TestRedactText_GOCSPX(t *testing.T) {
 	in := "client_secret=GOCSPX-your-client-secret"
 	out := RedactText(in)
@@ -64,6 +72,28 @@ func TestRedactText_DefaultPathDoesNotUseExtraCache(t *testing.T) {
 	}
 	if got := countExtraTextPatternCacheEntries(); got != 0 {
 		t.Fatalf("expected extra cache to remain empty, got %d", got)
+	}
+}
+
+func TestRedactTextRemovesProxyURLUserInfo(t *testing.T) {
+	input := `proxy=http://alice:p%40ssword@proxy.example.com:8080/path?mode=ok`
+	out := RedactText(input)
+	if strings.Contains(out, "alice") || strings.Contains(out, "ssword") {
+		t.Fatalf("expected proxy userinfo removed, got %q", out)
+	}
+	if !strings.Contains(out, "http://proxy.example.com:8080/path?mode=ok") {
+		t.Fatalf("expected non-secret endpoint retained, got %q", out)
+	}
+}
+
+func TestRedactJSONRemovesProxyURLUserInfoFromValues(t *testing.T) {
+	input := `{"proxy":"socks5h://alice:secret@socks.example.com:1080","other":"ok"}`
+	out := RedactText(input)
+	if strings.Contains(out, "alice") || strings.Contains(out, "secret") {
+		t.Fatalf("expected proxy userinfo removed from JSON value, got %q", out)
+	}
+	if !strings.Contains(out, "socks5h://socks.example.com:1080") {
+		t.Fatalf("expected non-secret endpoint retained, got %q", out)
 	}
 }
 

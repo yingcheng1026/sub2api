@@ -3,6 +3,8 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 
+import { authorizeEnvironmentCredentialFallback } from "./auth.mjs";
+
 const port = Number.parseInt(process.env.PORT || "8787", 10);
 const host = process.env.HOST || "127.0.0.1";
 const sidecarMode = (process.env.KIRO_SIDECAR_MODE || "auto").toLowerCase();
@@ -1178,6 +1180,16 @@ function nowSeconds() {
 }
 
 async function handleInference(req, res, path) {
+  const apiKey = getHeader(req, "x-kiro-api-key");
+  const authorization = authorizeEnvironmentCredentialFallback({
+    providedCredential: apiKey,
+    authorizationHeader: getHeader(req, "authorization"),
+  });
+  if (!authorization.allowed) {
+    sendError(res, authorization.status, authorization.type, authorization.message);
+    return;
+  }
+
   const raw = await readBody(req);
   let payload;
   try {
@@ -1187,7 +1199,6 @@ async function handleInference(req, res, path) {
     return;
   }
 
-  const apiKey = getHeader(req, "x-kiro-api-key");
   const requestContext = buildKiroPayload(path, payload, req);
   const prompt = extractPrompt(payload).trim();
   const shouldTryDirect = sidecarMode !== "cli";

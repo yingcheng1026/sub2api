@@ -12,8 +12,9 @@ import (
 )
 
 type billingCacheWorkerStub struct {
-	balanceUpdates      int64
-	subscriptionUpdates int64
+	balanceUpdates            int64
+	subscriptionUpdates       int64
+	subscriptionInvalidations int64
 }
 
 func (b *billingCacheWorkerStub) GetUserBalance(ctx context.Context, userID int64) (float64, error) {
@@ -49,6 +50,7 @@ func (b *billingCacheWorkerStub) UpdateSubscriptionUsage(ctx context.Context, us
 }
 
 func (b *billingCacheWorkerStub) InvalidateSubscriptionCache(ctx context.Context, userID, groupID int64) error {
+	atomic.AddInt64(&b.subscriptionInvalidations, 1)
 	return nil
 }
 
@@ -88,6 +90,38 @@ func TestBillingCacheServiceQueueHighLoad(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt64(&cache.subscriptionUpdates) > 0
 	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestInvalidateBillingCacheAfterCommitWaitsForInvalidation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		invalidateBillingCacheAfterCommit(context.Background(), "test", func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		})
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cache invalidation did not start")
+	}
+	select {
+	case <-done:
+		t.Fatal("helper returned before cache invalidation completed")
+	default:
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("helper did not return after cache invalidation completed")
+	}
 }
 
 func TestBillingCacheServiceEnqueueAfterStopReturnsFalse(t *testing.T) {

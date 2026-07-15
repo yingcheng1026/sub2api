@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -22,14 +25,16 @@ type PaymentHandler struct {
 	channelService *service.ChannelService
 	paymentService *service.PaymentService
 	configService  *service.PaymentConfigService
+	settingService *service.SettingService
 }
 
 // NewPaymentHandler creates a new PaymentHandler.
-func NewPaymentHandler(paymentService *service.PaymentService, configService *service.PaymentConfigService, channelService *service.ChannelService) *PaymentHandler {
+func NewPaymentHandler(paymentService *service.PaymentService, configService *service.PaymentConfigService, channelService *service.ChannelService, settingService *service.SettingService) *PaymentHandler {
 	return &PaymentHandler{
 		channelService: channelService,
 		paymentService: paymentService,
 		configService:  configService,
+		settingService: settingService,
 	}
 }
 
@@ -226,6 +231,8 @@ type CreateOrderRequest struct {
 	PaymentSource     string  `json:"payment_source"`
 	OrderType         string  `json:"order_type"`
 	PlanID            int64   `json:"plan_id"`
+	ResumeTokenUserID int64   `json:"-"`
+	ResumeTokenJTI    string  `json:"-"`
 	// IsMobile lets the frontend declare its mobile status directly. When
 	// nil we fall back to User-Agent heuristics (which miss iPadOS / some
 	// embedded browsers that strip the "Mobile" keyword).
@@ -251,7 +258,7 @@ func (h *PaymentHandler) CreateOrder(c *gin.Context) {
 			response.ErrorFrom(c, err)
 			return
 		}
-		if err := applyWeChatPaymentResumeClaims(&req, claims); err != nil {
+		if err := applyWeChatPaymentResumeClaims(&req, claims, subject.UserID); err != nil {
 			response.ErrorFrom(c, err)
 			return
 		}
@@ -261,21 +268,27 @@ func (h *PaymentHandler) CreateOrder(c *gin.Context) {
 	if req.IsMobile != nil {
 		mobile = *req.IsMobile
 	}
-	result, err := h.paymentService.CreateOrder(c.Request.Context(), service.CreateOrderRequest{
-		UserID:          subject.UserID,
-		Amount:          req.Amount,
-		PaymentType:     req.PaymentType,
-		OpenID:          req.OpenID,
-		ClientIP:        c.ClientIP(),
-		IsMobile:        mobile,
-		IsWeChatBrowser: isWeChatBrowser(c),
-		SrcHost:         c.Request.Host,
-		SrcURL:          c.Request.Referer(),
-		ReturnURL:       req.ReturnURL,
-		PaymentSource:   req.PaymentSource,
-		OrderType:       req.OrderType,
-		PlanID:          req.PlanID,
-	})
+	serviceReq := service.CreateOrderRequest{
+		UserID:            subject.UserID,
+		ResumeTokenUserID: req.ResumeTokenUserID,
+		ResumeTokenJTI:    req.ResumeTokenJTI,
+		Amount:            req.Amount,
+		PaymentType:       req.PaymentType,
+		OpenID:            req.OpenID,
+		ClientIP:          c.ClientIP(),
+		IsMobile:          mobile,
+		IsWeChatBrowser:   isWeChatBrowser(c),
+		SrcHost:           c.Request.Host,
+		SrcURL:            c.Request.Referer(),
+		ReturnURL:         req.ReturnURL,
+		PaymentSource:     req.PaymentSource,
+		OrderType:         req.OrderType,
+		PlanID:            req.PlanID,
+	}
+	if h.settingService != nil {
+		serviceReq.TrustedFrontendURL = h.settingService.GetFrontendURL(c.Request.Context())
+	}
+	result, err := executeWeChatResumeOrderCreate(c.Request.Context(), service.DefaultIdempotencyCoordinator(), serviceReq, h.paymentService.CreateOrder)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -283,9 +296,16 @@ func (h *PaymentHandler) CreateOrder(c *gin.Context) {
 	response.Success(c, result)
 }
 
-func applyWeChatPaymentResumeClaims(req *CreateOrderRequest, claims *service.WeChatPaymentResumeClaims) error {
+func applyWeChatPaymentResumeClaims(req *CreateOrderRequest, claims *service.WeChatPaymentResumeClaims, authenticatedUserID int64) error {
 	if req == nil || claims == nil {
 		return infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume context is missing")
+	}
+	if authenticatedUserID <= 0 || claims.UserID <= 0 || claims.UserID != authenticatedUserID {
+		return infraerrors.Forbidden("WECHAT_PAYMENT_RESUME_USER_MISMATCH", "wechat payment resume token belongs to a different user")
+	}
+	jti := strings.TrimSpace(claims.JTI)
+	if jti == "" {
+		return infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token missing replay binding")
 	}
 	openid := strings.TrimSpace(claims.OpenID)
 	if openid == "" {
@@ -307,18 +327,111 @@ func applyWeChatPaymentResumeClaims(req *CreateOrderRequest, claims *service.WeC
 
 	if strings.TrimSpace(claims.Amount) != "" {
 		amount, err := strconv.ParseFloat(strings.TrimSpace(claims.Amount), 64)
-		if err != nil || amount <= 0 {
+		if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
 			return infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", fmt.Sprintf("invalid resume amount: %s", claims.Amount))
 		}
 		req.Amount = amount
 	}
 	if claims.OrderType != "" {
-		req.OrderType = claims.OrderType
+		switch claims.OrderType {
+		case payment.OrderTypeBalance, payment.OrderTypeSubscription:
+			req.OrderType = claims.OrderType
+		default:
+			return infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token order type is invalid")
+		}
 	}
 	if claims.PlanID > 0 {
 		req.PlanID = claims.PlanID
 	}
+	req.PaymentSource = service.PaymentSourceWechatInAppResume
+	req.ResumeTokenUserID = claims.UserID
+	req.ResumeTokenJTI = jti
 	return nil
+}
+
+type wechatResumeOrderFingerprint struct {
+	UserID        int64   `json:"user_id"`
+	Amount        float64 `json:"amount"`
+	PaymentType   string  `json:"payment_type"`
+	OpenID        string  `json:"openid"`
+	ReturnURL     string  `json:"return_url"`
+	PaymentSource string  `json:"payment_source"`
+	OrderType     string  `json:"order_type"`
+	PlanID        int64   `json:"plan_id"`
+}
+
+func executeWeChatResumeOrderCreate(
+	ctx context.Context,
+	coordinator *service.IdempotencyCoordinator,
+	req service.CreateOrderRequest,
+	execute func(context.Context, service.CreateOrderRequest) (*service.CreateOrderResponse, error),
+) (*service.CreateOrderResponse, error) {
+	if strings.TrimSpace(req.ResumeTokenJTI) == "" {
+		return execute(ctx, req)
+	}
+	if coordinator == nil {
+		service.RecordIdempotencyStoreUnavailable("/api/v1/payment/orders", service.WeChatPaymentResumeIdempotencyScope, "coordinator_nil")
+		return nil, service.ErrIdempotencyStoreUnavail
+	}
+
+	var fresh *service.CreateOrderResponse
+	result, err := coordinator.Execute(ctx, service.IdempotencyExecuteOptions{
+		Scope:          service.WeChatPaymentResumeIdempotencyScope,
+		ActorScope:     "user:" + strconv.FormatInt(req.UserID, 10),
+		Method:         "POST",
+		Route:          "/api/v1/payment/orders",
+		IdempotencyKey: req.ResumeTokenJTI,
+		Payload: wechatResumeOrderFingerprint{
+			UserID:        req.UserID,
+			Amount:        req.Amount,
+			PaymentType:   req.PaymentType,
+			OpenID:        req.OpenID,
+			ReturnURL:     req.ReturnURL,
+			PaymentSource: req.PaymentSource,
+			OrderType:     req.OrderType,
+			PlanID:        req.PlanID,
+		},
+		RequireKey:         true,
+		TTL:                30 * time.Minute,
+		ProcessingTimeout:  20 * time.Minute,
+		FailedRetryBackoff: 20 * time.Minute,
+	}, func(execCtx context.Context) (any, error) {
+		var execErr error
+		fresh, execErr = execute(execCtx, req)
+		if execErr != nil {
+			return nil, execErr
+		}
+		if fresh == nil || fresh.OrderID <= 0 {
+			return nil, infraerrors.InternalServer("WECHAT_PAYMENT_RESUME_RESULT_INVALID", "wechat payment resume did not create an order")
+		}
+		return fresh, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result != nil && result.Replayed {
+		replayed, replayErr := decodeReplayedCreateOrderResponse(result.Data)
+		if replayErr != nil {
+			return nil, replayErr
+		}
+		return replayed, nil
+	}
+	if fresh == nil {
+		return nil, infraerrors.InternalServer("WECHAT_PAYMENT_RESUME_RESULT_INVALID", "wechat payment resume result is unavailable")
+	}
+	return fresh, nil
+}
+
+func decodeReplayedCreateOrderResponse(data any) (*service.CreateOrderResponse, error) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, infraerrors.InternalServer("WECHAT_PAYMENT_RESUME_REPLAY_INVALID", "wechat payment resume replay is unavailable").WithCause(err)
+	}
+	var responseData service.CreateOrderResponse
+	if err := json.Unmarshal(raw, &responseData); err != nil || responseData.OrderID <= 0 {
+		return nil, infraerrors.InternalServer("WECHAT_PAYMENT_RESUME_REPLAY_INVALID", "wechat payment resume replay is unavailable").WithCause(err)
+	}
+	return &responseData, nil
 }
 
 // GetMyOrders returns the authenticated user's orders.
@@ -465,60 +578,45 @@ func (h *PaymentHandler) VerifyOrder(c *gin.Context) {
 // PublicOrderResult is the limited order info returned by the public verify endpoint.
 // No user details are exposed — only payment status information.
 type PublicOrderResult struct {
-	ID                  int64      `json:"id"`
-	OutTradeNo          string     `json:"out_trade_no"`
-	Amount              float64    `json:"amount"`
-	PayAmount           float64    `json:"pay_amount"`
-	FeeRate             float64    `json:"fee_rate"`
-	PaymentType         string     `json:"payment_type"`
-	OrderType           string     `json:"order_type"`
-	Status              string     `json:"status"`
-	CreatedAt           time.Time  `json:"created_at"`
-	ExpiresAt           time.Time  `json:"expires_at"`
-	PaidAt              *time.Time `json:"paid_at,omitempty"`
-	CompletedAt         *time.Time `json:"completed_at,omitempty"`
-	RefundAmount        float64    `json:"refund_amount"`
-	RefundReason        *string    `json:"refund_reason,omitempty"`
-	RefundRequestedAt   *time.Time `json:"refund_requested_at,omitempty"`
-	RefundRequestedBy   *string    `json:"refund_requested_by,omitempty"`
-	RefundRequestReason *string    `json:"refund_request_reason,omitempty"`
-	PlanID              *int64     `json:"plan_id,omitempty"`
+	ID          int64      `json:"id"`
+	OutTradeNo  string     `json:"out_trade_no"`
+	Amount      float64    `json:"amount"`
+	PayAmount   float64    `json:"pay_amount"`
+	FeeRate     float64    `json:"fee_rate"`
+	PaymentType string     `json:"payment_type"`
+	OrderType   string     `json:"order_type"`
+	Status      string     `json:"status"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	PaidAt      *time.Time `json:"paid_at,omitempty"`
 }
 
 func buildPublicOrderResult(order *dbent.PaymentOrder) PublicOrderResult {
 	return PublicOrderResult{
-		ID:                  order.ID,
-		OutTradeNo:          order.OutTradeNo,
-		Amount:              order.Amount,
-		PayAmount:           order.PayAmount,
-		FeeRate:             order.FeeRate,
-		PaymentType:         order.PaymentType,
-		OrderType:           order.OrderType,
-		Status:              order.Status,
-		CreatedAt:           order.CreatedAt,
-		ExpiresAt:           order.ExpiresAt,
-		PaidAt:              order.PaidAt,
-		CompletedAt:         order.CompletedAt,
-		RefundAmount:        order.RefundAmount,
-		RefundReason:        order.RefundReason,
-		RefundRequestedAt:   order.RefundRequestedAt,
-		RefundRequestedBy:   order.RefundRequestedBy,
-		RefundRequestReason: order.RefundRequestReason,
-		PlanID:              order.PlanID,
+		ID:          order.ID,
+		OutTradeNo:  order.OutTradeNo,
+		Amount:      order.Amount,
+		PayAmount:   order.PayAmount,
+		FeeRate:     order.FeeRate,
+		PaymentType: order.PaymentType,
+		OrderType:   order.OrderType,
+		Status:      order.Status,
+		ExpiresAt:   order.ExpiresAt,
+		PaidAt:      order.PaidAt,
 	}
 }
 
-// VerifyOrderPublic keeps the legacy anonymous out_trade_no lookup available as
-// a compatibility path for older result pages and staggered deploys.
+// VerifyOrderPublic keeps the legacy URL available during staggered deploys,
+// but requires the same signed resume token as the canonical resolve endpoint.
+// Anonymous out_trade_no lookup is deliberately not supported.
 // POST /api/v1/payment/public/orders/verify
 func (h *PaymentHandler) VerifyOrderPublic(c *gin.Context) {
-	var req VerifyOrderRequest
+	var req ResolveOrderByResumeTokenRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
 
-	order, err := h.paymentService.VerifyOrderPublic(c.Request.Context(), req.OutTradeNo)
+	order, err := h.paymentService.GetPublicOrderByResumeToken(c.Request.Context(), req.ResumeToken)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

@@ -114,42 +114,48 @@ func init() {
 			return nil
 		}
 	}()
+	// apikeyDescPurpose is the schema descriptor for purpose field.
+	apikeyDescPurpose := apikeyFields[5].Descriptor()
+	// apikey.DefaultPurpose holds the default value on creation for the purpose field.
+	apikey.DefaultPurpose = apikeyDescPurpose.Default.(string)
+	// apikey.PurposeValidator is a validator for the "purpose" field. It is called by the builders before save.
+	apikey.PurposeValidator = apikeyDescPurpose.Validators[0].(func(string) error)
 	// apikeyDescStatus is the schema descriptor for status field.
-	apikeyDescStatus := apikeyFields[6].Descriptor()
+	apikeyDescStatus := apikeyFields[7].Descriptor()
 	// apikey.DefaultStatus holds the default value on creation for the status field.
 	apikey.DefaultStatus = apikeyDescStatus.Default.(string)
 	// apikey.StatusValidator is a validator for the "status" field. It is called by the builders before save.
 	apikey.StatusValidator = apikeyDescStatus.Validators[0].(func(string) error)
 	// apikeyDescQuota is the schema descriptor for quota field.
-	apikeyDescQuota := apikeyFields[10].Descriptor()
+	apikeyDescQuota := apikeyFields[11].Descriptor()
 	// apikey.DefaultQuota holds the default value on creation for the quota field.
 	apikey.DefaultQuota = apikeyDescQuota.Default.(float64)
 	// apikeyDescQuotaUsed is the schema descriptor for quota_used field.
-	apikeyDescQuotaUsed := apikeyFields[11].Descriptor()
+	apikeyDescQuotaUsed := apikeyFields[12].Descriptor()
 	// apikey.DefaultQuotaUsed holds the default value on creation for the quota_used field.
 	apikey.DefaultQuotaUsed = apikeyDescQuotaUsed.Default.(float64)
 	// apikeyDescRateLimit5h is the schema descriptor for rate_limit_5h field.
-	apikeyDescRateLimit5h := apikeyFields[13].Descriptor()
+	apikeyDescRateLimit5h := apikeyFields[14].Descriptor()
 	// apikey.DefaultRateLimit5h holds the default value on creation for the rate_limit_5h field.
 	apikey.DefaultRateLimit5h = apikeyDescRateLimit5h.Default.(float64)
 	// apikeyDescRateLimit1d is the schema descriptor for rate_limit_1d field.
-	apikeyDescRateLimit1d := apikeyFields[14].Descriptor()
+	apikeyDescRateLimit1d := apikeyFields[15].Descriptor()
 	// apikey.DefaultRateLimit1d holds the default value on creation for the rate_limit_1d field.
 	apikey.DefaultRateLimit1d = apikeyDescRateLimit1d.Default.(float64)
 	// apikeyDescRateLimit7d is the schema descriptor for rate_limit_7d field.
-	apikeyDescRateLimit7d := apikeyFields[15].Descriptor()
+	apikeyDescRateLimit7d := apikeyFields[16].Descriptor()
 	// apikey.DefaultRateLimit7d holds the default value on creation for the rate_limit_7d field.
 	apikey.DefaultRateLimit7d = apikeyDescRateLimit7d.Default.(float64)
 	// apikeyDescUsage5h is the schema descriptor for usage_5h field.
-	apikeyDescUsage5h := apikeyFields[16].Descriptor()
+	apikeyDescUsage5h := apikeyFields[17].Descriptor()
 	// apikey.DefaultUsage5h holds the default value on creation for the usage_5h field.
 	apikey.DefaultUsage5h = apikeyDescUsage5h.Default.(float64)
 	// apikeyDescUsage1d is the schema descriptor for usage_1d field.
-	apikeyDescUsage1d := apikeyFields[17].Descriptor()
+	apikeyDescUsage1d := apikeyFields[18].Descriptor()
 	// apikey.DefaultUsage1d holds the default value on creation for the usage_1d field.
 	apikey.DefaultUsage1d = apikeyDescUsage1d.Default.(float64)
 	// apikeyDescUsage7d is the schema descriptor for usage_7d field.
-	apikeyDescUsage7d := apikeyFields[18].Descriptor()
+	apikeyDescUsage7d := apikeyFields[19].Descriptor()
 	// apikey.DefaultUsage7d holds the default value on creation for the usage_7d field.
 	apikey.DefaultUsage7d = apikeyDescUsage7d.Default.(float64)
 	accountMixin := schema.Account{}.Mixin()
@@ -1347,10 +1353,6 @@ func init() {
 	proxyDescUsername := proxyFields[4].Descriptor()
 	// proxy.UsernameValidator is a validator for the "username" field. It is called by the builders before save.
 	proxy.UsernameValidator = proxyDescUsername.Validators[0].(func(string) error)
-	// proxyDescPassword is the schema descriptor for password field.
-	proxyDescPassword := proxyFields[5].Descriptor()
-	// proxy.PasswordValidator is a validator for the "password" field. It is called by the builders before save.
-	proxy.PasswordValidator = proxyDescPassword.Validators[0].(func(string) error)
 	// proxyDescStatus is the schema descriptor for status field.
 	proxyDescStatus := proxyFields[6].Descriptor()
 	// proxy.DefaultStatus holds the default value on creation for the status field.
@@ -1545,7 +1547,7 @@ func init() {
 	// subscriptionwalletledger.ReasonValidator is a validator for the "reason" field. It is called by the builders before save.
 	subscriptionwalletledger.ReasonValidator = subscriptionwalletledgerDescReason.Validators[0].(func(string) error)
 	// subscriptionwalletledgerDescCreatedAt is the schema descriptor for created_at field.
-	subscriptionwalletledgerDescCreatedAt := subscriptionwalletledgerFields[7].Descriptor()
+	subscriptionwalletledgerDescCreatedAt := subscriptionwalletledgerFields[8].Descriptor()
 	// subscriptionwalletledger.DefaultCreatedAt holds the default value on creation for the created_at field.
 	subscriptionwalletledger.DefaultCreatedAt = subscriptionwalletledgerDescCreatedAt.Default.(func() time.Time)
 	tlsfingerprintprofileMixin := schema.TLSFingerprintProfile{}.Mixin()
@@ -1895,6 +1897,50 @@ func init() {
 	userDescRpmLimit := userFields[19].Descriptor()
 	// user.DefaultRpmLimit holds the default value on creation for the rpm_limit field.
 	user.DefaultRpmLimit = userDescRpmLimit.Default.(int)
+	// userDescSignupIP is the schema descriptor for signup_ip field.
+	userDescSignupIP := userFields[20].Descriptor()
+	// user.DefaultSignupIP holds the default value on creation for the signup_ip field.
+	user.DefaultSignupIP = userDescSignupIP.Default.(string)
+	// user.SignupIPValidator is a validator for the "signup_ip" field. It is called by the builders before save.
+	user.SignupIPValidator = userDescSignupIP.Validators[0].(func(string) error)
+	// userDescSignupIPPrefix is the schema descriptor for signup_ip_prefix field.
+	userDescSignupIPPrefix := userFields[21].Descriptor()
+	// user.DefaultSignupIPPrefix holds the default value on creation for the signup_ip_prefix field.
+	user.DefaultSignupIPPrefix = userDescSignupIPPrefix.Default.(string)
+	// user.SignupIPPrefixValidator is a validator for the "signup_ip_prefix" field. It is called by the builders before save.
+	user.SignupIPPrefixValidator = userDescSignupIPPrefix.Validators[0].(func(string) error)
+	// userDescSignupUserAgentHash is the schema descriptor for signup_user_agent_hash field.
+	userDescSignupUserAgentHash := userFields[22].Descriptor()
+	// user.DefaultSignupUserAgentHash holds the default value on creation for the signup_user_agent_hash field.
+	user.DefaultSignupUserAgentHash = userDescSignupUserAgentHash.Default.(string)
+	// user.SignupUserAgentHashValidator is a validator for the "signup_user_agent_hash" field. It is called by the builders before save.
+	user.SignupUserAgentHashValidator = userDescSignupUserAgentHash.Validators[0].(func(string) error)
+	// userDescSignupDeviceFingerprintHash is the schema descriptor for signup_device_fingerprint_hash field.
+	userDescSignupDeviceFingerprintHash := userFields[23].Descriptor()
+	// user.DefaultSignupDeviceFingerprintHash holds the default value on creation for the signup_device_fingerprint_hash field.
+	user.DefaultSignupDeviceFingerprintHash = userDescSignupDeviceFingerprintHash.Default.(string)
+	// user.SignupDeviceFingerprintHashValidator is a validator for the "signup_device_fingerprint_hash" field. It is called by the builders before save.
+	user.SignupDeviceFingerprintHashValidator = userDescSignupDeviceFingerprintHash.Validators[0].(func(string) error)
+	// userDescTrialBonusEligible is the schema descriptor for trial_bonus_eligible field.
+	userDescTrialBonusEligible := userFields[24].Descriptor()
+	// user.DefaultTrialBonusEligible holds the default value on creation for the trial_bonus_eligible field.
+	user.DefaultTrialBonusEligible = userDescTrialBonusEligible.Default.(bool)
+	// userDescTrialBonusHoldReason is the schema descriptor for trial_bonus_hold_reason field.
+	userDescTrialBonusHoldReason := userFields[25].Descriptor()
+	// user.DefaultTrialBonusHoldReason holds the default value on creation for the trial_bonus_hold_reason field.
+	user.DefaultTrialBonusHoldReason = userDescTrialBonusHoldReason.Default.(string)
+	// user.TrialBonusHoldReasonValidator is a validator for the "trial_bonus_hold_reason" field. It is called by the builders before save.
+	user.TrialBonusHoldReasonValidator = userDescTrialBonusHoldReason.Validators[0].(func(string) error)
+	// userDescTrialBonusRiskScore is the schema descriptor for trial_bonus_risk_score field.
+	userDescTrialBonusRiskScore := userFields[26].Descriptor()
+	// user.DefaultTrialBonusRiskScore holds the default value on creation for the trial_bonus_risk_score field.
+	user.DefaultTrialBonusRiskScore = userDescTrialBonusRiskScore.Default.(int)
+	// userDescTokenVersion is the schema descriptor for token_version field.
+	userDescTokenVersion := userFields[27].Descriptor()
+	// user.DefaultTokenVersion holds the default value on creation for the token_version field.
+	user.DefaultTokenVersion = userDescTokenVersion.Default.(int64)
+	// user.TokenVersionValidator is a validator for the "token_version" field. It is called by the builders before save.
+	user.TokenVersionValidator = userDescTokenVersion.Validators[0].(func(int64) error)
 	userallowedgroupFields := schema.UserAllowedGroup{}.Fields()
 	_ = userallowedgroupFields
 	// userallowedgroupDescCreatedAt is the schema descriptor for created_at field.

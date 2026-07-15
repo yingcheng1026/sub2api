@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +16,14 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+)
+
+const (
+	maxUserUsagePage      = 1000
+	maxUserUsagePageSize  = 100
+	maxUserUsageOffset    = 10_000
+	maxUserUsageRangeDays = 366
+	maxUserUsageQueryTime = 10 * time.Second
 )
 
 // UsageHandler handles usage-related requests
@@ -38,8 +48,14 @@ func (h *UsageHandler) List(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	requestCtx, cancel := boundedUsageContext(c.Request.Context())
+	defer cancel()
 
-	page, pageSize := response.ParsePagination(c)
+	page, pageSize, err := parseUsagePagination(c)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	var apiKeyID int64
 	if apiKeyIDStr := c.Query("api_key_id"); apiKeyIDStr != "" {
@@ -50,7 +66,7 @@ func (h *UsageHandler) List(c *gin.Context) {
 		}
 
 		// [Security Fix] Verify API Key ownership to prevent horizontal privilege escalation
-		apiKey, err := h.apiKeyService.GetByID(c.Request.Context(), id)
+		apiKey, err := h.apiKeyService.GetByID(requestCtx, id)
 		if err != nil {
 			response.ErrorFrom(c, err)
 			return
@@ -96,27 +112,10 @@ func (h *UsageHandler) List(c *gin.Context) {
 		billingType = &bt
 	}
 
-	// Parse date range
-	var startTime, endTime *time.Time
-	userTZ := c.Query("timezone") // Get user's timezone from request
-	if startDateStr := c.Query("start_date"); startDateStr != "" {
-		t, err := timezone.ParseInUserLocation("2006-01-02", startDateStr, userTZ)
-		if err != nil {
-			response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
-			return
-		}
-		startTime = &t
-	}
-
-	if endDateStr := c.Query("end_date"); endDateStr != "" {
-		t, err := timezone.ParseInUserLocation("2006-01-02", endDateStr, userTZ)
-		if err != nil {
-			response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
-			return
-		}
-		// Use half-open range [start, end), move to next calendar day start (DST-safe).
-		t = t.AddDate(0, 0, 1)
-		endTime = &t
+	startTime, endTime, err := parseBoundedUsageTimeRange(c, 365, false)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
 	}
 
 	params := pagination.PaginationParams{
@@ -132,11 +131,11 @@ func (h *UsageHandler) List(c *gin.Context) {
 		RequestType: requestType,
 		Stream:      stream,
 		BillingType: billingType,
-		StartTime:   startTime,
-		EndTime:     endTime,
+		StartTime:   &startTime,
+		EndTime:     &endTime,
 	}
 
-	records, result, err := h.usageService.ListWithFilters(c.Request.Context(), params, filters)
+	records, result, err := h.usageService.ListWithFilters(requestCtx, params, filters)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -157,6 +156,8 @@ func (h *UsageHandler) GetByID(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	requestCtx, cancel := boundedUsageContext(c.Request.Context())
+	defer cancel()
 
 	usageID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -164,15 +165,9 @@ func (h *UsageHandler) GetByID(c *gin.Context) {
 		return
 	}
 
-	record, err := h.usageService.GetByID(c.Request.Context(), usageID)
+	record, err := h.usageService.GetByIDForUser(requestCtx, usageID, subject.UserID)
 	if err != nil {
 		response.ErrorFrom(c, err)
-		return
-	}
-
-	// 验证所有权
-	if record.UserID != subject.UserID {
-		response.Forbidden(c, "Not authorized to access this record")
 		return
 	}
 
@@ -187,6 +182,8 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	requestCtx, cancel := boundedUsageContext(c.Request.Context())
+	defer cancel()
 
 	var apiKeyID int64
 	if apiKeyIDStr := c.Query("api_key_id"); apiKeyIDStr != "" {
@@ -197,7 +194,7 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 		}
 
 		// [Security Fix] Verify API Key ownership to prevent horizontal privilege escalation
-		apiKey, err := h.apiKeyService.GetByID(c.Request.Context(), id)
+		apiKey, err := h.apiKeyService.GetByID(requestCtx, id)
 		if err != nil {
 			response.NotFound(c, "API key not found")
 			return
@@ -219,21 +216,13 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 	startDateStr := c.Query("start_date")
 	endDateStr := c.Query("end_date")
 
-	if startDateStr != "" && endDateStr != "" {
-		// 使用自定义日期范围
+	if startDateStr != "" || endDateStr != "" {
 		var err error
-		startTime, err = timezone.ParseInUserLocation("2006-01-02", startDateStr, userTZ)
+		startTime, endTime, err = parseBoundedUsageTimeRange(c, 365, true)
 		if err != nil {
-			response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
+			response.BadRequest(c, err.Error())
 			return
 		}
-		endTime, err = timezone.ParseInUserLocation("2006-01-02", endDateStr, userTZ)
-		if err != nil {
-			response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
-			return
-		}
-		// 与 SQL 条件 created_at < end 对齐，使用次日 00:00 作为上边界（DST-safe）。
-		endTime = endTime.AddDate(0, 0, 1)
 	} else {
 		// 使用 period 参数
 		period := c.DefaultQuery("period", "today")
@@ -253,9 +242,9 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 	var stats *service.UsageStats
 	var err error
 	if apiKeyID > 0 {
-		stats, err = h.usageService.GetStatsByAPIKey(c.Request.Context(), apiKeyID, startTime, endTime)
+		stats, err = h.usageService.GetStatsByAPIKey(requestCtx, apiKeyID, startTime, endTime)
 	} else {
-		stats, err = h.usageService.GetStatsByUser(c.Request.Context(), subject.UserID, startTime, endTime)
+		stats, err = h.usageService.GetStatsByUser(requestCtx, subject.UserID, startTime, endTime)
 	}
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -265,37 +254,84 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 	response.Success(c, stats)
 }
 
-// parseUserTimeRange parses start_date, end_date query parameters for user dashboard
-// Uses user's timezone if provided, otherwise falls back to server timezone
-func parseUserTimeRange(c *gin.Context) (time.Time, time.Time) {
-	userTZ := c.Query("timezone") // Get user's timezone from request
+func parseUsagePagination(c *gin.Context) (int, int, error) {
+	parse := func(name string, defaultValue int) (int, error) {
+		raw := strings.TrimSpace(c.Query(name))
+		if raw == "" {
+			return defaultValue, nil
+		}
+		value, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil || value <= 0 {
+			return 0, fmt.Errorf("invalid %s", name)
+		}
+		return int(value), nil
+	}
+
+	page, err := parse("page", 1)
+	if err != nil {
+		return 0, 0, err
+	}
+	if page > maxUserUsagePage {
+		return 0, 0, fmt.Errorf("page exceeds maximum %d", maxUserUsagePage)
+	}
+
+	sizeName := "page_size"
+	if strings.TrimSpace(c.Query(sizeName)) == "" && strings.TrimSpace(c.Query("limit")) != "" {
+		sizeName = "limit"
+	}
+	pageSize, err := parse(sizeName, 20)
+	if err != nil {
+		return 0, 0, err
+	}
+	if pageSize > maxUserUsagePageSize {
+		return 0, 0, fmt.Errorf("%s exceeds maximum %d", sizeName, maxUserUsagePageSize)
+	}
+	if page > 1 && page-1 > maxUserUsageOffset/pageSize {
+		return 0, 0, fmt.Errorf("page offset exceeds maximum %d", maxUserUsageOffset)
+	}
+	return page, pageSize, nil
+}
+
+func boundedUsageContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, maxUserUsageQueryTime)
+}
+
+// parseBoundedUsageTimeRange returns a half-open, calendar-day-aligned range.
+func parseBoundedUsageTimeRange(c *gin.Context, defaultLookbackDays int, requirePair bool) (time.Time, time.Time, error) {
+	userTZ := c.Query("timezone")
+	startRaw := strings.TrimSpace(c.Query("start_date"))
+	endRaw := strings.TrimSpace(c.Query("end_date"))
+	if requirePair && (startRaw == "") != (endRaw == "") {
+		return time.Time{}, time.Time{}, fmt.Errorf("start_date and end_date must be provided together")
+	}
+
 	now := timezone.NowInUserLocation(userTZ)
-	startDate := c.Query("start_date")
-	endDate := c.Query("end_date")
-
-	var startTime, endTime time.Time
-
-	if startDate != "" {
-		if t, err := timezone.ParseInUserLocation("2006-01-02", startDate, userTZ); err == nil {
-			startTime = t
-		} else {
-			startTime = timezone.StartOfDayInUserLocation(now.AddDate(0, 0, -7), userTZ)
+	endTime := timezone.StartOfDayInUserLocation(now.AddDate(0, 0, 1), userTZ)
+	startTime := endTime.AddDate(0, 0, -defaultLookbackDays)
+	var err error
+	if startRaw != "" {
+		startTime, err = timezone.ParseInUserLocation("2006-01-02", startRaw, userTZ)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid start_date format, use YYYY-MM-DD")
 		}
-	} else {
-		startTime = timezone.StartOfDayInUserLocation(now.AddDate(0, 0, -7), userTZ)
 	}
-
-	if endDate != "" {
-		if t, err := timezone.ParseInUserLocation("2006-01-02", endDate, userTZ); err == nil {
-			endTime = t.Add(24 * time.Hour) // Include the end date
-		} else {
-			endTime = timezone.StartOfDayInUserLocation(now.AddDate(0, 0, 1), userTZ)
+	if endRaw != "" {
+		endTime, err = timezone.ParseInUserLocation("2006-01-02", endRaw, userTZ)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid end_date format, use YYYY-MM-DD")
 		}
-	} else {
-		endTime = timezone.StartOfDayInUserLocation(now.AddDate(0, 0, 1), userTZ)
+		endTime = endTime.AddDate(0, 0, 1)
 	}
-
-	return startTime, endTime
+	if startRaw == "" {
+		startTime = endTime.AddDate(0, 0, -defaultLookbackDays)
+	}
+	if !startTime.Before(endTime) {
+		return time.Time{}, time.Time{}, fmt.Errorf("start_date must be before or equal to end_date")
+	}
+	if endTime.After(startTime.AddDate(0, 0, maxUserUsageRangeDays)) {
+		return time.Time{}, time.Time{}, fmt.Errorf("usage date range exceeds maximum %d days", maxUserUsageRangeDays)
+	}
+	return startTime, endTime, nil
 }
 
 // DashboardStats handles getting user dashboard statistics
@@ -306,8 +342,10 @@ func (h *UsageHandler) DashboardStats(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	requestCtx, cancel := boundedUsageContext(c.Request.Context())
+	defer cancel()
 
-	stats, err := h.usageService.GetUserDashboardStats(c.Request.Context(), subject.UserID)
+	stats, err := h.usageService.GetUserDashboardStats(requestCtx, subject.UserID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -324,11 +362,17 @@ func (h *UsageHandler) DashboardTrend(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	requestCtx, cancel := boundedUsageContext(c.Request.Context())
+	defer cancel()
 
-	startTime, endTime := parseUserTimeRange(c)
+	startTime, endTime, err := parseBoundedUsageTimeRange(c, 8, false)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	granularity := c.DefaultQuery("granularity", "day")
 
-	trend, err := h.usageService.GetUserUsageTrendByUserID(c.Request.Context(), subject.UserID, startTime, endTime, granularity)
+	trend, err := h.usageService.GetUserUsageTrendByUserID(requestCtx, subject.UserID, startTime, endTime, granularity)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -337,7 +381,7 @@ func (h *UsageHandler) DashboardTrend(c *gin.Context) {
 	response.Success(c, gin.H{
 		"trend":       trend,
 		"start_date":  startTime.Format("2006-01-02"),
-		"end_date":    endTime.Add(-24 * time.Hour).Format("2006-01-02"),
+		"end_date":    endTime.AddDate(0, 0, -1).Format("2006-01-02"),
 		"granularity": granularity,
 	})
 }
@@ -350,10 +394,16 @@ func (h *UsageHandler) DashboardModels(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	requestCtx, cancel := boundedUsageContext(c.Request.Context())
+	defer cancel()
 
-	startTime, endTime := parseUserTimeRange(c)
+	startTime, endTime, err := parseBoundedUsageTimeRange(c, 8, false)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
-	stats, err := h.usageService.GetUserModelStats(c.Request.Context(), subject.UserID, startTime, endTime)
+	stats, err := h.usageService.GetUserModelStats(requestCtx, subject.UserID, startTime, endTime)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -362,7 +412,7 @@ func (h *UsageHandler) DashboardModels(c *gin.Context) {
 	response.Success(c, gin.H{
 		"models":     stats,
 		"start_date": startTime.Format("2006-01-02"),
-		"end_date":   endTime.Add(-24 * time.Hour).Format("2006-01-02"),
+		"end_date":   endTime.AddDate(0, 0, -1).Format("2006-01-02"),
 	})
 }
 
@@ -379,6 +429,8 @@ func (h *UsageHandler) DashboardAPIKeysUsage(c *gin.Context) {
 		response.Unauthorized(c, "User not authenticated")
 		return
 	}
+	requestCtx, cancel := boundedUsageContext(c.Request.Context())
+	defer cancel()
 
 	var req BatchAPIKeysUsageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -397,7 +449,7 @@ func (h *UsageHandler) DashboardAPIKeysUsage(c *gin.Context) {
 		return
 	}
 
-	validAPIKeyIDs, err := h.apiKeyService.VerifyOwnership(c.Request.Context(), subject.UserID, req.APIKeyIDs)
+	validAPIKeyIDs, err := h.apiKeyService.VerifyOwnership(requestCtx, subject.UserID, req.APIKeyIDs)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -408,7 +460,12 @@ func (h *UsageHandler) DashboardAPIKeysUsage(c *gin.Context) {
 		return
 	}
 
-	stats, err := h.usageService.GetBatchAPIKeyUsageStats(c.Request.Context(), validAPIKeyIDs, time.Time{}, time.Time{})
+	startTime, endTime, err := parseBoundedUsageTimeRange(c, 365, false)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	stats, err := h.usageService.GetBatchAPIKeyUsageStats(requestCtx, validAPIKeyIDs, startTime, endTime)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

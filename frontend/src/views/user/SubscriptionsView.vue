@@ -9,7 +9,7 @@
       </div>
 
       <!-- Empty State -->
-      <div v-else-if="subscriptions.length === 0" class="card p-12 text-center">
+      <div v-else-if="walletSubscriptions.length === 0 && groupSubscriptions.length === 0" class="card p-12 text-center">
         <div
           class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gray-100 dark:bg-dark-700"
         >
@@ -24,20 +24,21 @@
       </div>
 
       <!-- 钱包模式 (v4)：钱包卡 + 全 group 倍率列表 -->
-      <div v-else-if="walletSubscriptions.length > 0" class="grid gap-6 lg:grid-cols-2">
-        <WalletBalanceCard
-          v-for="sub in walletSubscriptions"
-          :key="sub.id"
-          :subscription="sub"
-          @renew="goRenew(sub)"
-        />
-        <GroupRateMultiplierList :subscription="walletSubscriptions[0]" />
-      </div>
+      <template v-else>
+        <div v-if="walletSubscriptions.length > 0" class="grid gap-6 lg:grid-cols-2">
+          <WalletBalanceCard
+            v-for="sub in walletSubscriptions"
+            :key="sub.id"
+            :subscription="sub"
+            @renew="goRenew(sub)"
+          />
+          <GroupRateMultiplierList :subscription="walletSubscriptions[0]" />
+        </div>
 
       <!-- 老 group 订阅 (v3) Grid -->
-      <div v-else class="grid gap-6 lg:grid-cols-2">
+      <div v-if="groupSubscriptions.length > 0" class="mt-6 grid gap-6 lg:grid-cols-2">
         <div
-          v-for="subscription in subscriptions"
+          v-for="subscription in groupSubscriptions"
           :key="subscription.id"
           class="overflow-hidden rounded-2xl border bg-white dark:bg-dark-800"
           :class="platformBorderClass(subscription.group?.platform || '')"
@@ -252,11 +253,11 @@
           </div>
         </div>
       </div>
+      </template>
     </div>
 
     <RenewLiandongModal
       :show="renewModalSub !== null"
-      :subscription="renewModalSub"
       @close="closeRenewModal"
     />
   </AppLayout>
@@ -275,6 +276,7 @@ import GroupRateMultiplierList from '@/components/user/GroupRateMultiplierList.v
 import RenewLiandongModal from '@/components/user/RenewLiandongModal.vue'
 import { formatDateOnly } from '@/utils/format'
 import { platformBorderClass, platformBadgeClass, platformButtonClass, platformLabel } from '@/utils/platformColors'
+import { isActiveCreditsWallet } from '@/utils/subscriptionWallet'
 
 function platformAccentDotClass(p: string): string {
   switch (p) {
@@ -291,7 +293,7 @@ const appStore = useAppStore()
 
 const subscriptions = ref<UserSubscription[]>([])
 
-// 续费 SKU 选择 modal — 内置 ZPay 没开通,所有续费/充值统一跳链动小铺 SKU
+// 额度充值 SKU 选择 modal — 统一跳转链动小铺 SKU
 const renewModalSub = ref<UserSubscription | null>(null)
 
 function openRenewModal(sub: UserSubscription) {
@@ -304,10 +306,15 @@ function closeRenewModal() {
 
 const loading = ref(true)
 
-// 钱包模式订阅（v4）：wallet_balance_usd 非空。与老 group 订阅互斥，
-// 只要存在任意一条钱包订阅，整页就切到钱包视图。
+// 只把当前生效的永久 credits 订阅当作钱包。历史钱包不得遮挡
+// 同时存在的 group/月付订阅。
 const walletSubscriptions = computed(() =>
-  subscriptions.value.filter((s) => s.wallet_balance_usd != null)
+  subscriptions.value.filter(isActiveCreditsWallet)
+)
+const groupSubscriptions = computed(() =>
+  subscriptions.value.filter((subscription) =>
+    !isActiveCreditsWallet(subscription) && typeof subscription.group_id === 'number'
+  )
 )
 
 function goRenew(sub: UserSubscription) {

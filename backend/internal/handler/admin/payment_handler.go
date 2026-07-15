@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"fmt"
 	"strconv"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -29,11 +31,10 @@ func NewPaymentHandler(paymentService *service.PaymentService, configService *se
 // GetDashboard returns payment dashboard statistics.
 // GET /api/v1/admin/payment/dashboard
 func (h *PaymentHandler) GetDashboard(c *gin.Context) {
-	days := 30
-	if d := c.Query("days"); d != "" {
-		if v, err := strconv.Atoi(d); err == nil && v > 0 {
-			days = v
-		}
+	days, err := parsePaymentDashboardDays(c.Query("days"))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
 	}
 	stats, err := h.paymentService.GetDashboardStats(c.Request.Context(), days)
 	if err != nil {
@@ -41,6 +42,20 @@ func (h *PaymentHandler) GetDashboard(c *gin.Context) {
 		return
 	}
 	response.Success(c, stats)
+}
+
+func parsePaymentDashboardDays(raw string) (int, error) {
+	if raw == "" {
+		return 30, nil
+	}
+	days, err := strconv.Atoi(raw)
+	if err != nil || days <= 0 || days > service.MaxPaymentDashboardDays {
+		return 0, infraerrors.BadRequest(
+			"INVALID_DASHBOARD_DAYS",
+			fmt.Sprintf("days must be between 1 and %d", service.MaxPaymentDashboardDays),
+		)
+	}
+	return days, nil
 }
 
 // --- Orders ---

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
@@ -25,12 +26,30 @@ const (
 
 // ChannelMonitorHandler 渠道监控管理后台 handler。
 type ChannelMonitorHandler struct {
-	monitorService *service.ChannelMonitorService
+	monitorService  *service.ChannelMonitorService
+	apiKeyService   *service.APIKeyService
+	templateService channelMonitorTemplateResolver
+}
+
+type channelMonitorTemplateResolver interface {
+	Get(ctx context.Context, id int64) (*service.ChannelMonitorRequestTemplate, error)
 }
 
 // NewChannelMonitorHandler 创建 handler。
 func NewChannelMonitorHandler(monitorService *service.ChannelMonitorService) *ChannelMonitorHandler {
 	return &ChannelMonitorHandler{monitorService: monitorService}
+}
+
+func ProvideChannelMonitorHandler(
+	monitorService *service.ChannelMonitorService,
+	apiKeyService *service.APIKeyService,
+	templateService *service.ChannelMonitorRequestTemplateService,
+) *ChannelMonitorHandler {
+	return &ChannelMonitorHandler{
+		monitorService:  monitorService,
+		apiKeyService:   apiKeyService,
+		templateService: templateService,
+	}
 }
 
 // --- Request / Response ---
@@ -39,7 +58,8 @@ type channelMonitorCreateRequest struct {
 	Name             string            `json:"name" binding:"required,max=100"`
 	Provider         string            `json:"provider" binding:"required,oneof=openai anthropic gemini"`
 	Endpoint         string            `json:"endpoint" binding:"required,max=500"`
-	APIKey           string            `json:"api_key" binding:"required,max=2000"`
+	APIKey           string            `json:"api_key" binding:"max=2000"`
+	APIKeyID         *int64            `json:"api_key_id"`
 	PrimaryModel     string            `json:"primary_model" binding:"required,max=200"`
 	ExtraModels      []string          `json:"extra_models"`
 	GroupName        string            `json:"group_name" binding:"max=100"`
@@ -52,20 +72,22 @@ type channelMonitorCreateRequest struct {
 }
 
 type channelMonitorUpdateRequest struct {
-	Name             *string            `json:"name" binding:"omitempty,max=100"`
-	Provider         *string            `json:"provider" binding:"omitempty,oneof=openai anthropic gemini"`
-	Endpoint         *string            `json:"endpoint" binding:"omitempty,max=500"`
-	APIKey           *string            `json:"api_key" binding:"omitempty,max=2000"`
-	PrimaryModel     *string            `json:"primary_model" binding:"omitempty,max=200"`
-	ExtraModels      *[]string          `json:"extra_models"`
-	GroupName        *string            `json:"group_name" binding:"omitempty,max=100"`
-	Enabled          *bool              `json:"enabled"`
-	IntervalSeconds  *int               `json:"interval_seconds" binding:"omitempty,min=15,max=3600"`
-	TemplateID       *int64             `json:"template_id"`
-	ClearTemplate    bool               `json:"clear_template"` // true 时把 template_id 置空，忽略 TemplateID
-	ExtraHeaders     *map[string]string `json:"extra_headers"`
-	BodyOverrideMode *string            `json:"body_override_mode" binding:"omitempty,oneof=off merge replace"`
-	BodyOverride     *map[string]any    `json:"body_override"`
+	Name                        *string            `json:"name" binding:"omitempty,max=100"`
+	Provider                    *string            `json:"provider" binding:"omitempty,oneof=openai anthropic gemini"`
+	Endpoint                    *string            `json:"endpoint" binding:"omitempty,max=500"`
+	APIKey                      *string            `json:"api_key" binding:"omitempty,max=2000"`
+	APIKeyID                    *int64             `json:"api_key_id"`
+	PrimaryModel                *string            `json:"primary_model" binding:"omitempty,max=200"`
+	ExtraModels                 *[]string          `json:"extra_models"`
+	GroupName                   *string            `json:"group_name" binding:"omitempty,max=100"`
+	Enabled                     *bool              `json:"enabled"`
+	IntervalSeconds             *int               `json:"interval_seconds" binding:"omitempty,min=15,max=3600"`
+	TemplateID                  *int64             `json:"template_id"`
+	ClearTemplate               bool               `json:"clear_template"` // true 时把 template_id 置空，忽略 TemplateID
+	ExtraHeaders                *map[string]string `json:"extra_headers"`
+	BodyOverrideMode            *string            `json:"body_override_mode" binding:"omitempty,oneof=off merge replace"`
+	BodyOverride                *map[string]any    `json:"body_override"`
+	ReplaceRequestCustomization bool               `json:"replace_request_customization"`
 }
 
 type channelMonitorResponse struct {
@@ -88,11 +110,12 @@ type channelMonitorResponse struct {
 	PrimaryLatencyMs    *int                                 `json:"primary_latency_ms"`
 	Availability7d      float64                              `json:"availability_7d"`
 	ExtraModelsStatus   []dto.ChannelMonitorExtraModelStatus `json:"extra_models_status"`
-	// 请求自定义快照：前端编辑 / 展示「高级设置」用
-	TemplateID       *int64            `json:"template_id"`
-	ExtraHeaders     map[string]string `json:"extra_headers"`
-	BodyOverrideMode string            `json:"body_override_mode"`
-	BodyOverride     map[string]any    `json:"body_override"`
+	// 请求自定义字段是 write-only：响应只返回存在性元数据，绝不返回明文。
+	TemplateID             *int64 `json:"template_id"`
+	ExtraHeadersConfigured bool   `json:"extra_headers_configured"`
+	ExtraHeaderCount       int    `json:"extra_header_count"`
+	BodyOverrideMode       string `json:"body_override_mode"`
+	BodyOverrideConfigured bool   `json:"body_override_configured"`
 }
 
 type channelMonitorCheckResultResponse struct {
@@ -130,29 +153,26 @@ func channelMonitorToResponse(m *service.ChannelMonitor) *channelMonitorResponse
 	if extras == nil {
 		extras = []string{}
 	}
-	headers := m.ExtraHeaders
-	if headers == nil {
-		headers = map[string]string{}
-	}
 	resp := &channelMonitorResponse{
-		ID:                  m.ID,
-		Name:                m.Name,
-		Provider:            m.Provider,
-		Endpoint:            m.Endpoint,
-		APIKeyMasked:        maskAPIKey(m.APIKey),
-		APIKeyDecryptFailed: m.APIKeyDecryptFailed,
-		PrimaryModel:        m.PrimaryModel,
-		ExtraModels:         extras,
-		GroupName:           m.GroupName,
-		Enabled:             m.Enabled,
-		IntervalSeconds:     m.IntervalSeconds,
-		CreatedBy:           m.CreatedBy,
-		CreatedAt:           m.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:           m.UpdatedAt.UTC().Format(time.RFC3339),
-		TemplateID:          m.TemplateID,
-		ExtraHeaders:        headers,
-		BodyOverrideMode:    m.BodyOverrideMode,
-		BodyOverride:        m.BodyOverride,
+		ID:                     m.ID,
+		Name:                   m.Name,
+		Provider:               m.Provider,
+		Endpoint:               m.Endpoint,
+		APIKeyMasked:           maskAPIKey(m.APIKey),
+		APIKeyDecryptFailed:    m.APIKeyDecryptFailed,
+		PrimaryModel:           m.PrimaryModel,
+		ExtraModels:            extras,
+		GroupName:              m.GroupName,
+		Enabled:                m.Enabled,
+		IntervalSeconds:        m.IntervalSeconds,
+		CreatedBy:              m.CreatedBy,
+		CreatedAt:              m.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:              m.UpdatedAt.UTC().Format(time.RFC3339),
+		TemplateID:             m.TemplateID,
+		ExtraHeadersConfigured: len(m.ExtraHeaders) > 0,
+		ExtraHeaderCount:       len(m.ExtraHeaders),
+		BodyOverrideMode:       m.BodyOverrideMode,
+		BodyOverrideConfigured: len(m.BodyOverride) > 0,
 		// PrimaryStatus / PrimaryLatencyMs / Availability7d 由 List handler 在批量聚合后填充。
 	}
 	if m.LastCheckedAt != nil {
@@ -294,17 +314,27 @@ func (h *ChannelMonitorHandler) Create(c *gin.Context) {
 	}
 
 	subject, _ := middleware2.GetAuthSubjectFromContext(c)
+	apiKey, err := h.resolveOwnedAPIKey(c.Request.Context(), subject.UserID, req.APIKeyID, req.APIKey)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
+	}
+	extraHeaders, bodyMode, bodyOverride, err := h.resolveCreateRequestCustomization(c.Request.Context(), &req)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
 	}
 
 	m, err := h.monitorService.Create(c.Request.Context(), service.ChannelMonitorCreateParams{
 		Name:             req.Name,
 		Provider:         req.Provider,
 		Endpoint:         req.Endpoint,
-		APIKey:           req.APIKey,
+		APIKey:           apiKey,
 		PrimaryModel:     req.PrimaryModel,
 		ExtraModels:      req.ExtraModels,
 		GroupName:        req.GroupName,
@@ -312,9 +342,9 @@ func (h *ChannelMonitorHandler) Create(c *gin.Context) {
 		IntervalSeconds:  req.IntervalSeconds,
 		CreatedBy:        subject.UserID,
 		TemplateID:       req.TemplateID,
-		ExtraHeaders:     req.ExtraHeaders,
-		BodyOverrideMode: req.BodyOverrideMode,
-		BodyOverride:     req.BodyOverride,
+		ExtraHeaders:     extraHeaders,
+		BodyOverrideMode: bodyMode,
+		BodyOverride:     bodyOverride,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -334,12 +364,26 @@ func (h *ChannelMonitorHandler) Update(c *gin.Context) {
 		response.ErrorFrom(c, infraerrors.BadRequest("VALIDATION_ERROR", err.Error()))
 		return
 	}
+	if err := h.prepareMonitorCustomizationUpdate(c.Request.Context(), &req); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	subject, _ := middleware2.GetAuthSubjectFromContext(c)
+	apiKey := req.APIKey
+	if req.APIKeyID != nil {
+		resolved, err := h.resolveOwnedAPIKey(c.Request.Context(), subject.UserID, req.APIKeyID, "")
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		apiKey = &resolved
+	}
 
 	m, err := h.monitorService.Update(c.Request.Context(), id, service.ChannelMonitorUpdateParams{
 		Name:             req.Name,
 		Provider:         req.Provider,
 		Endpoint:         req.Endpoint,
-		APIKey:           req.APIKey,
+		APIKey:           apiKey,
 		PrimaryModel:     req.PrimaryModel,
 		ExtraModels:      req.ExtraModels,
 		GroupName:        req.GroupName,
@@ -356,6 +400,104 @@ func (h *ChannelMonitorHandler) Update(c *gin.Context) {
 		return
 	}
 	response.Success(c, channelMonitorToResponse(m))
+}
+
+func (h *ChannelMonitorHandler) resolveOwnedAPIKey(ctx context.Context, userID int64, apiKeyID *int64, raw string) (string, error) {
+	if apiKeyID == nil {
+		return strings.TrimSpace(raw), nil
+	}
+	if *apiKeyID <= 0 || h.apiKeyService == nil {
+		return "", infraerrors.BadRequest("INVALID_API_KEY_ID", "invalid API key id")
+	}
+	key, err := h.apiKeyService.GetByID(ctx, *apiKeyID)
+	if err != nil {
+		return "", err
+	}
+	if key.UserID != userID {
+		return "", service.ErrInsufficientPerms
+	}
+	if !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() {
+		return "", infraerrors.BadRequest("API_KEY_NOT_USABLE", "selected API key is not active and usable")
+	}
+	return key.Key, nil
+}
+
+func (h *ChannelMonitorHandler) resolveCreateRequestCustomization(
+	ctx context.Context,
+	req *channelMonitorCreateRequest,
+) (map[string]string, string, map[string]any, error) {
+	if req.TemplateID == nil {
+		return req.ExtraHeaders, req.BodyOverrideMode, req.BodyOverride, nil
+	}
+	return h.resolveTemplateSnapshot(ctx, *req.TemplateID, req.Provider)
+}
+
+func (h *ChannelMonitorHandler) prepareMonitorCustomizationUpdate(
+	ctx context.Context,
+	req *channelMonitorUpdateRequest,
+) error {
+	hasPayload := req.ExtraHeaders != nil || req.BodyOverrideMode != nil || req.BodyOverride != nil
+	if !req.ReplaceRequestCustomization {
+		if hasPayload || req.TemplateID != nil {
+			return infraerrors.BadRequest(
+				"REQUEST_CUSTOMIZATION_REPLACEMENT_REQUIRED",
+				"set replace_request_customization=true to replace write-only request customization",
+			)
+		}
+		return nil
+	}
+	if req.ClearTemplate && req.TemplateID != nil {
+		return infraerrors.BadRequest("INVALID_TEMPLATE_UPDATE", "template_id and clear_template cannot be used together")
+	}
+	if req.TemplateID != nil {
+		if req.Provider == nil || strings.TrimSpace(*req.Provider) == "" {
+			return infraerrors.BadRequest("MONITOR_PROVIDER_REQUIRED", "provider is required when applying a request template")
+		}
+		headers, mode, body, err := h.resolveTemplateSnapshot(ctx, *req.TemplateID, *req.Provider)
+		if err != nil {
+			return err
+		}
+		req.ExtraHeaders = &headers
+		req.BodyOverrideMode = &mode
+		req.BodyOverride = &body
+		return nil
+	}
+	if req.ExtraHeaders == nil {
+		headers := map[string]string{}
+		req.ExtraHeaders = &headers
+	}
+	if req.BodyOverrideMode == nil {
+		mode := service.MonitorBodyOverrideModeOff
+		req.BodyOverrideMode = &mode
+	}
+	if req.BodyOverride == nil {
+		var body map[string]any
+		req.BodyOverride = &body
+	}
+	// A direct payload replacement is no longer a snapshot of the previously
+	// associated template. Detach it server-side so stale/non-browser clients
+	// cannot leave a misleading association that a later template apply would
+	// silently overwrite.
+	req.ClearTemplate = true
+	return nil
+}
+
+func (h *ChannelMonitorHandler) resolveTemplateSnapshot(
+	ctx context.Context,
+	templateID int64,
+	provider string,
+) (map[string]string, string, map[string]any, error) {
+	if templateID <= 0 || h.templateService == nil {
+		return nil, "", nil, infraerrors.BadRequest("INVALID_TEMPLATE_ID", "invalid request template id")
+	}
+	tpl, err := h.templateService.Get(ctx, templateID)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if tpl.Provider != strings.TrimSpace(provider) {
+		return nil, "", nil, service.ErrChannelMonitorTemplateProviderMismatch
+	}
+	return tpl.ExtraHeaders, tpl.BodyOverrideMode, tpl.BodyOverride, nil
 }
 
 // Delete DELETE /api/v1/admin/channel-monitors/:id

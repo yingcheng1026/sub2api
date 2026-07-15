@@ -13,13 +13,21 @@ import (
 type openAIUsageOutboxRepoStub struct {
 	envelopes   []UsageBillingEnvelope
 	err         error
+	retryErrs   []error
+	calls       int
 	lastCtxErr  error
 	hadDeadline bool
 }
 
 func (s *openAIUsageOutboxRepoStub) Enqueue(ctx context.Context, envelope UsageBillingEnvelope) (*UsageBillingOutboxEvent, bool, error) {
+	s.calls++
 	s.lastCtxErr = ctx.Err()
 	_, s.hadDeadline = ctx.Deadline()
+	if len(s.retryErrs) > 0 {
+		err := s.retryErrs[0]
+		s.retryErrs = s.retryErrs[1:]
+		return nil, false, err
+	}
 	if s.err != nil {
 		return nil, false, s.err
 	}
@@ -111,7 +119,8 @@ func TestOpenAIUsageBillingProducer_PersistsAllEntrypointSnapshotsBeforeWake(t *
 				Result: result,
 				APIKey: &APIKey{ID: 11, Key: "sk-producer-test", GroupID: &groupID, Group: &Group{ID: groupID, RateMultiplier: 1}},
 				User:   &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeAPIKey},
-				InboundEndpoint: tt.inboundEndpoint, UpstreamEndpoint: "/v1/responses",
+				RequestPayloadHash: strings.Repeat("b", 64),
+				InboundEndpoint:    tt.inboundEndpoint, UpstreamEndpoint: "/v1/responses",
 				ChannelUsageFields: ChannelUsageFields{OriginalModel: tt.requestedModel, ChannelMappedModel: tt.billingModel},
 			})
 			require.NoError(t, err)
@@ -152,10 +161,70 @@ func TestOpenAIUsageBillingProducer_CanceledContextStillEnqueuesDetached(t *test
 		},
 		APIKey: &APIKey{ID: 11, Key: "sk-canceled-test", GroupID: &groupID, Group: &Group{ID: groupID, RateMultiplier: 1}},
 		User:   &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeAPIKey},
+		RequestPayloadHash: strings.Repeat("b", 64),
 	})
 	require.NoError(t, err)
 	require.NoError(t, outbox.lastCtxErr)
-	require.True(t, outbox.hadDeadline)
+	require.True(t, outbox.hadDeadline, "durable admission must be bounded even after detaching from the client request")
+}
+
+func TestOpenAIUsageBillingProducer_RetriesTransientAdmissionUntilDurable(t *testing.T) {
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{}, &openAIRecordUsageBillingRepoStub{}, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	sentinel := errors.New("temporary outbox connection failure")
+	outbox := &openAIUsageOutboxRepoStub{retryErrs: []error{
+		MarkUsageBillingOutboxAdmissionRetryable(sentinel),
+		MarkUsageBillingOutboxAdmissionRetryable(sentinel),
+	}}
+	svc.requireUsageBillingOutbox = true
+	svc.usageBillingOutboxRepo = outbox
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	groupID := int64(44)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "producer-retry", Model: "gpt-5.6-sol", UpstreamModel: "gpt-5.6-sol",
+			BillingModel: "gpt-5.6-sol", BillingIdentity: &ResolvedOpenAIBillingIdentity{
+				BillingModel: "gpt-5.6-sol", UpstreamModel: "gpt-5.6-sol", Pricing: openAIUsageProducerQuote(BillingModeToken),
+			},
+			Usage: OpenAIUsage{InputTokens: 1, OutputTokens: 1}, Duration: time.Second,
+		},
+		APIKey: &APIKey{ID: 11, Key: "sk-retry-test", GroupID: &groupID, Group: &Group{ID: groupID, RateMultiplier: 1}},
+		User:   &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeAPIKey},
+		RequestPayloadHash: strings.Repeat("b", 64),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 3, outbox.calls)
+	require.Len(t, outbox.envelopes, 1, "successful response must have one durable billing fact before RecordUsage returns")
+}
+
+func TestOpenAIUsageBillingProducer_StopsBoundedRetryWhenAdmissionNeverRecovers(t *testing.T) {
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{}, &openAIRecordUsageBillingRepoStub{}, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	sentinel := errors.New("temporary outbox connection failure")
+	outbox := &openAIUsageOutboxRepoStub{err: MarkUsageBillingOutboxAdmissionRetryable(sentinel)}
+	svc.requireUsageBillingOutbox = true
+	svc.usageBillingOutboxRepo = outbox
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	groupID := int64(44)
+
+	started := time.Now()
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "producer-retry-bounded", Model: "gpt-5.6-sol", UpstreamModel: "gpt-5.6-sol",
+			BillingModel: "gpt-5.6-sol", BillingIdentity: &ResolvedOpenAIBillingIdentity{
+				BillingModel: "gpt-5.6-sol", UpstreamModel: "gpt-5.6-sol", Pricing: openAIUsageProducerQuote(BillingModeToken),
+			},
+			Usage: OpenAIUsage{InputTokens: 1, OutputTokens: 1}, Duration: time.Second,
+		},
+		APIKey: &APIKey{ID: 11, Key: "sk-retry-bounded-test", GroupID: &groupID, Group: &Group{ID: groupID, RateMultiplier: 1}},
+		User:   &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeAPIKey},
+		RequestPayloadHash: strings.Repeat("b", 64),
+	})
+
+	require.ErrorIs(t, err, ErrUsageBillingOutboxAdmissionRetryable)
+	require.ErrorIs(t, err, sentinel)
+	require.Less(t, time.Since(started), time.Second, "admission retries must not pin one HTTP goroutine indefinitely")
+	require.Equal(t, usageBillingOutboxAdmissionMaxAttempts, outbox.calls)
 }
 
 func TestOpenAIUsageBillingProducer_FreezesMonthlyAnchorGroupSeparatelyFromRoutingGroup(t *testing.T) {
@@ -178,6 +247,7 @@ func TestOpenAIUsageBillingProducer_FreezesMonthlyAnchorGroupSeparatelyFromRouti
 		},
 		APIKey: &APIKey{ID: 11, Key: "sk-monthly-test", GroupID: &routingGroupID, Group: &Group{ID: routingGroupID, RateMultiplier: 1}},
 		User:   &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeAPIKey},
+		RequestPayloadHash: strings.Repeat("b", 64),
 		Subscription: &UserSubscription{
 			ID: subscriptionID, UserID: 22, GroupID: &anchorGroupID,
 			Group: &Group{ID: anchorGroupID, SubscriptionType: SubscriptionTypeSubscription, RateMultiplier: 1},
@@ -217,10 +287,26 @@ func TestOpenAIUsageBillingProducer_FailsClosedWithoutFallback(t *testing.T) {
 				},
 				APIKey: &APIKey{ID: 11, Key: "sk-fail-closed-test", GroupID: &groupID, Group: &Group{ID: groupID, RateMultiplier: 1}},
 				User:   &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeAPIKey},
+				RequestPayloadHash: strings.Repeat("b", 64),
 			})
 			require.ErrorIs(t, err, tt.want)
 			require.Zero(t, billingRepo.calls)
 			require.Zero(t, usageRepo.calls)
 		})
 	}
+}
+
+func TestOpenAIWalletRecordUsageRequiresAdmissionIdentityWhenOutboxIsRequired(t *testing.T) {
+	walletBalance := 10.0
+	svc := &OpenAIGatewayService{requireUsageBillingOutbox: true}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result:       &OpenAIForwardResult{RequestID: "openai-wallet-missing-admission", Model: "gpt-5.6-sol"},
+		APIKey:       &APIKey{ID: 11},
+		User:         &User{ID: 22},
+		Account:      &Account{ID: 33},
+		Subscription: &UserSubscription{ID: 71, WalletBalanceUSD: &walletBalance},
+	})
+
+	require.ErrorIs(t, err, ErrUsageBillingLifecycleContractInvalid)
 }

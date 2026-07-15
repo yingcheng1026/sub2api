@@ -43,7 +43,7 @@ func UserFromService(u *service.User) *User {
 		out.APIKeys = make([]APIKey, 0, len(u.APIKeys))
 		for i := range u.APIKeys {
 			k := u.APIKeys[i]
-			out.APIKeys = append(out.APIKeys, *APIKeyFromService(&k))
+			out.APIKeys = append(out.APIKeys, *APIKeyFromServiceMasked(&k))
 		}
 	}
 	if len(u.Subscriptions) > 0 {
@@ -66,6 +66,14 @@ func UserFromServiceAdmin(u *service.User) *AdminUser {
 	if base == nil {
 		return nil
 	}
+	if len(u.APIKeys) > 0 {
+		base.APIKeys = make([]APIKey, 0, len(u.APIKeys))
+		for i := range u.APIKeys {
+			if key := APIKeyFromServiceMasked(&u.APIKeys[i]); key != nil {
+				base.APIKeys = append(base.APIKeys, *key)
+			}
+		}
+	}
 	return &AdminUser{
 		User:       *base,
 		Notes:      u.Notes,
@@ -83,6 +91,7 @@ func APIKeyFromService(k *service.APIKey) *APIKey {
 		UserID:        k.UserID,
 		Key:           k.Key,
 		Name:          k.Name,
+		Purpose:       k.Purpose,
 		GroupID:       k.GroupID,
 		Status:        k.Status,
 		IPWhitelist:   k.IPWhitelist,
@@ -116,6 +125,26 @@ func APIKeyFromService(k *service.APIKey) *APIKey {
 	if k.Window7dStart != nil && !service.IsWindowExpired(k.Window7dStart, service.RateLimitWindow7d) {
 		t := k.Window7dStart.Add(service.RateLimitWindow7d)
 		out.Reset7dAt = &t
+	}
+	return out
+}
+
+// APIKeyFromServiceMasked is the only mapper admin endpoints should use.
+// Administrators can manage ownership and policy without receiving a
+// customer's reusable credential in their browser or idempotency records.
+func APIKeyFromServiceMasked(k *service.APIKey) *APIKey {
+	out := APIKeyFromService(k)
+	if out == nil {
+		return nil
+	}
+	prefix := strings.TrimSpace(k.KeyPrefix)
+	if prefix == "" && strings.TrimSpace(k.Key) != "" {
+		prefix = service.APIKeyPrefixForStorage(k.Key)
+	}
+	if prefix == "" {
+		out.Key = ""
+	} else {
+		out.Key = prefix + "••••"
 	}
 	return out
 }
@@ -603,7 +632,7 @@ func usageLogFromServiceUser(l *service.UsageLog) UsageLog {
 		BillingMode:           l.BillingMode,
 		CreatedAt:             l.CreatedAt,
 		User:                  UserFromServiceShallow(l.User),
-		APIKey:                APIKeyFromService(l.APIKey),
+		APIKey:                APIKeyFromServiceMasked(l.APIKey),
 		Group:                 GroupFromServiceShallow(l.Group),
 		Subscription:          UserSubscriptionFromService(l.Subscription),
 	}
@@ -767,7 +796,7 @@ func UserSubscriptionFromServiceAdmin(sub *service.UserSubscription) *AdminUserS
 	if len(sub.WalletGroupKeys) > 0 {
 		walletGroupKeys = make([]APIKey, 0, len(sub.WalletGroupKeys))
 		for i := range sub.WalletGroupKeys {
-			if dtoKey := APIKeyFromService(&sub.WalletGroupKeys[i]); dtoKey != nil {
+			if dtoKey := APIKeyFromServiceMasked(&sub.WalletGroupKeys[i]); dtoKey != nil {
 				walletGroupKeys = append(walletGroupKeys, *dtoKey)
 			}
 		}
@@ -779,7 +808,7 @@ func UserSubscriptionFromServiceAdmin(sub *service.UserSubscription) *AdminUserS
 	var walletUniversalKey *APIKey
 	var walletUniversalKeyCreated *bool
 	if sub.WalletUniversalKey != nil {
-		walletUniversalKey = APIKeyFromService(sub.WalletUniversalKey)
+		walletUniversalKey = APIKeyFromServiceMasked(sub.WalletUniversalKey)
 		c := sub.WalletUniversalKeyCreated
 		walletUniversalKeyCreated = &c
 	}

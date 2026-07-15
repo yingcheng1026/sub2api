@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -30,7 +31,18 @@ const (
 
 	// Security: max download size (500MB)
 	maxDownloadSize = 500 * 1024 * 1024
+
+	officialUpdateApplyEnabledEnv = "SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED"
+
+	// This HFC build carries fork-specific schema and security controls. Replacing it
+	// in-process with a generic upstream binary is never a compatible operation.
+	// Re-enabling official updates requires a reviewed build pipeline change, not an
+	// environment-only bypass.
+	hfcOfficialUpdateApplySupported = false
 )
+
+var ErrOfficialUpdateApplyDisabled = errors.New("official binary update apply is disabled for this build")
+var ErrOfficialUpdateChecksumRequired = errors.New("official release checksums.txt is required")
 
 // UpdateCache defines cache operations for update service
 type UpdateCache interface {
@@ -47,31 +59,34 @@ type GitHubReleaseClient interface {
 
 // UpdateService handles software updates
 type UpdateService struct {
-	cache          UpdateCache
-	githubClient   GitHubReleaseClient
-	currentVersion string
-	buildType      string // "source" for manual builds, "release" for CI builds
+	cache              UpdateCache
+	githubClient       GitHubReleaseClient
+	currentVersion     string
+	buildType          string // "source" for manual builds, "release" for CI builds
+	updateApplyAllowed bool
 }
 
 // NewUpdateService creates a new UpdateService
 func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string) *UpdateService {
 	return &UpdateService{
-		cache:          cache,
-		githubClient:   githubClient,
-		currentVersion: version,
-		buildType:      buildType,
+		cache:              cache,
+		githubClient:       githubClient,
+		currentVersion:     version,
+		buildType:          buildType,
+		updateApplyAllowed: hfcOfficialUpdateApplySupported && strings.EqualFold(strings.TrimSpace(os.Getenv(officialUpdateApplyEnabledEnv)), "true"),
 	}
 }
 
 // UpdateInfo contains update information
 type UpdateInfo struct {
-	CurrentVersion string       `json:"current_version"`
-	LatestVersion  string       `json:"latest_version"`
-	HasUpdate      bool         `json:"has_update"`
-	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
-	Cached         bool         `json:"cached"`
-	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source" or "release"
+	CurrentVersion     string       `json:"current_version"`
+	LatestVersion      string       `json:"latest_version"`
+	HasUpdate          bool         `json:"has_update"`
+	ReleaseInfo        *ReleaseInfo `json:"release_info,omitempty"`
+	Cached             bool         `json:"cached"`
+	Warning            string       `json:"warning,omitempty"`
+	BuildType          string       `json:"build_type"` // "source" or "release"
+	UpdateApplyAllowed bool         `json:"update_apply_allowed"`
 }
 
 // ReleaseInfo contains GitHub release details
@@ -111,7 +126,7 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 	// Try cache first
 	if !force {
 		if cached, err := s.getFromCache(ctx); err == nil && cached != nil {
-			return cached, nil
+			return s.applyUpdateMutationPolicy(cached), nil
 		}
 	}
 
@@ -121,17 +136,18 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 		// Return cached on error
 		if cached, cacheErr := s.getFromCache(ctx); cacheErr == nil && cached != nil {
 			cached.Warning = "Using cached data: " + err.Error()
-			return cached, nil
+			return s.applyUpdateMutationPolicy(cached), nil
 		}
-		return &UpdateInfo{
+		return s.applyUpdateMutationPolicy(&UpdateInfo{
 			CurrentVersion: s.currentVersion,
 			LatestVersion:  s.currentVersion,
 			HasUpdate:      false,
 			Warning:        err.Error(),
 			BuildType:      s.buildType,
-		}, nil
+		}), nil
 	}
 
+	info = s.applyUpdateMutationPolicy(info)
 	// Cache result
 	s.saveToCache(ctx, info)
 	return info, nil
@@ -140,6 +156,9 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s == nil || !s.updateApplyAllowed {
+		return ErrOfficialUpdateApplyDisabled
+	}
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -147,6 +166,9 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 
 	if !info.HasUpdate {
 		return fmt.Errorf("no update available")
+	}
+	if info.ReleaseInfo == nil {
+		return errors.New("latest release metadata is incomplete")
 	}
 
 	// Find matching archive and checksum for current platform
@@ -166,15 +188,16 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 	if downloadURL == "" {
 		return fmt.Errorf("no compatible release found for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
+	if checksumURL == "" {
+		return ErrOfficialUpdateChecksumRequired
+	}
 
 	// SECURITY: Validate download URL is from trusted domain
 	if err := validateDownloadURL(downloadURL); err != nil {
 		return fmt.Errorf("invalid download URL: %w", err)
 	}
-	if checksumURL != "" {
-		if err := validateDownloadURL(checksumURL); err != nil {
-			return fmt.Errorf("invalid checksum URL: %w", err)
-		}
+	if err := validateDownloadURL(checksumURL); err != nil {
+		return fmt.Errorf("invalid checksum URL: %w", err)
 	}
 
 	// Get current executable path
@@ -203,11 +226,10 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 		return fmt.Errorf("download failed: %w", err)
 	}
 
-	// Verify checksum if available
-	if checksumURL != "" {
-		if err := s.verifyChecksum(ctx, archivePath, checksumURL); err != nil {
-			return fmt.Errorf("checksum verification failed: %w", err)
-		}
+	// Checksums are mandatory: never install an artifact whose digest was not
+	// explicitly published for the selected archive.
+	if err := s.verifyChecksum(ctx, archivePath, checksumURL); err != nil {
+		return fmt.Errorf("checksum verification failed: %w", err)
 	}
 
 	// Extract binary from archive
@@ -251,6 +273,9 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 
 // Rollback restores the previous version
 func (s *UpdateService) Rollback() error {
+	if s == nil || !s.updateApplyAllowed {
+		return ErrOfficialUpdateApplyDisabled
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
@@ -271,6 +296,22 @@ func (s *UpdateService) Rollback() error {
 	}
 
 	return nil
+}
+
+func (s *UpdateService) applyUpdateMutationPolicy(info *UpdateInfo) *UpdateInfo {
+	if info == nil {
+		return nil
+	}
+	info.UpdateApplyAllowed = s != nil && s.updateApplyAllowed
+	if !info.UpdateApplyAllowed {
+		const warning = "Official binary apply is disabled for this custom build; review compatibility and deploy through the controlled release process."
+		if strings.TrimSpace(info.Warning) == "" {
+			info.Warning = warning
+		} else if !strings.Contains(info.Warning, warning) {
+			info.Warning += " " + warning
+		}
+	}
+	return info
 }
 
 func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {

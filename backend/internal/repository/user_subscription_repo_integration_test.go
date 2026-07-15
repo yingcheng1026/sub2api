@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -26,6 +27,15 @@ func (s *UserSubscriptionRepoSuite) SetupTest() {
 	tx := testEntTx(s.T())
 	s.client = tx.Client()
 	s.repo = NewUserSubscriptionRepository(s.client).(*userSubscriptionRepository)
+	_, err := tx.ExecContext(s.ctx, `
+		SET LOCAL session_replication_role = 'replica';
+		DELETE FROM user_subscriptions;
+		DELETE FROM user_allowed_groups;
+		DELETE FROM users;
+		DELETE FROM groups;
+		SET LOCAL session_replication_role = 'origin';
+	`)
+	s.Require().NoError(err, "isolate subscription repository test transaction")
 }
 
 func TestUserSubscriptionRepoSuite(t *testing.T) {
@@ -55,6 +65,7 @@ func (s *UserSubscriptionRepoSuite) mustCreateGroup(name string) *service.Group 
 	g, err := s.client.Group.Create().
 		SetName(name).
 		SetStatus(service.StatusActive).
+		SetSubscriptionType(service.SubscriptionTypeSubscription).
 		Save(s.ctx)
 	s.Require().NoError(err, "create group")
 	return groupEntityToService(g)
@@ -234,9 +245,9 @@ func (s *UserSubscriptionRepoSuite) TestGetActiveByPlanCoveringGroup_MNPlanUsesS
 	s.Require().NoError(err, "create claude target group")
 
 	plan, err := s.client.SubscriptionPlan.Create().
+		SetGroupID(subscriptionGroup.ID).
 		SetName("paid-lite-v3-mn").
 		SetPrice(99).
-		SetWalletQuotaUsd(400).
 		SetValidityDays(30).
 		SetValidityUnit("day").
 		Save(s.ctx)
@@ -255,9 +266,109 @@ func (s *UserSubscriptionRepoSuite) TestGetActiveByPlanCoveringGroup_MNPlanUsesS
 	s.Require().NoError(err, "M:N plan coverage should resolve through subscription anchor group")
 	s.Require().Equal(sub.ID, got.ID)
 
-	s.mustCreateSubscription(standardOnlyUser.ID, openAIGroup.ID, nil)
 	_, err = s.repo.GetActiveByPlanCoveringGroup(s.ctx, standardOnlyUser.ID, claudeGroup.ID)
-	s.Require().ErrorIs(err, service.ErrSubscriptionNotFound, "standard plan groups must not become subscription anchors")
+	s.Require().ErrorIs(err, service.ErrSubscriptionNotFound, "plan coverage requires a real subscription anchor")
+}
+
+func (s *UserSubscriptionRepoSuite) TestGetActiveByPlanCoveringGroup_SharedAnchorUsesCoverageIntersection() {
+	user := s.mustCreateUser("shared-anchor@test.com", service.RoleUser)
+	anchor := s.mustCreateGroup("g-shared-anchor")
+	target := s.mustCreateGroup("g-shared-target")
+	_, err := s.client.Group.UpdateOneID(target.ID).SetSubscriptionType(service.SubscriptionTypeStandard).Save(s.ctx)
+	s.Require().NoError(err)
+
+	createPlan := func(name string, coversTarget bool) *dbent.SubscriptionPlan {
+		plan, err := s.client.SubscriptionPlan.Create().
+			SetGroupID(anchor.ID).
+			SetPlanType(service.PlanTypeSubscription).
+			SetName(name).
+			SetPrice(10).
+			SetValidityDays(30).
+			Save(s.ctx)
+		s.Require().NoError(err)
+		_, err = s.client.SubscriptionPlanGroup.Create().SetPlanID(plan.ID).SetGroupID(anchor.ID).Save(s.ctx)
+		s.Require().NoError(err)
+		if coversTarget {
+			_, err = s.client.SubscriptionPlanGroup.Create().SetPlanID(plan.ID).SetGroupID(target.ID).Save(s.ctx)
+			s.Require().NoError(err)
+		}
+		return plan
+	}
+
+	narrow := createPlan("shared-anchor-narrow", false)
+	_ = createPlan("shared-anchor-broad", true)
+	sub := s.mustCreateSubscription(user.ID, anchor.ID, nil)
+
+	_, err = s.repo.GetActiveByPlanCoveringGroup(s.ctx, user.ID, target.ID)
+	s.Require().ErrorIs(err, service.ErrSubscriptionNotFound,
+		"one broader plan sharing the anchor must not expand an ambiguous legacy subscription")
+
+	_, err = s.client.SubscriptionPlanGroup.Create().SetPlanID(narrow.ID).SetGroupID(target.ID).Save(s.ctx)
+	s.Require().NoError(err)
+	got, err := s.repo.GetActiveByPlanCoveringGroup(s.ctx, user.ID, target.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(sub.ID, got.ID,
+		"legacy compatibility is allowed only when every plan sharing the anchor covers the target")
+}
+
+func (s *UserSubscriptionRepoSuite) TestGetActiveByPlanCoveringGroup_SnapshotIsAuthoritative() {
+	user := s.mustCreateUser("snapshot-authority@test.com", service.RoleUser)
+	anchor := s.mustCreateGroup("g-snapshot-anchor")
+	allowed := s.mustCreateGroup("g-snapshot-allowed")
+	denied := s.mustCreateGroup("g-snapshot-denied")
+	for _, groupID := range []int64{allowed.ID, denied.ID} {
+		_, err := s.client.Group.UpdateOneID(groupID).SetSubscriptionType(service.SubscriptionTypeStandard).Save(s.ctx)
+		s.Require().NoError(err)
+	}
+	plan, err := s.client.SubscriptionPlan.Create().
+		SetGroupID(anchor.ID).
+		SetPlanType(service.PlanTypeSubscription).
+		SetName("snapshot-authority-plan").
+		SetPrice(10).
+		SetValidityDays(30).
+		Save(s.ctx)
+	s.Require().NoError(err)
+	for _, groupID := range []int64{anchor.ID, allowed.ID, denied.ID} {
+		_, err = s.client.SubscriptionPlanGroup.Create().SetPlanID(plan.ID).SetGroupID(groupID).Save(s.ctx)
+		s.Require().NoError(err)
+	}
+	sub := s.mustCreateSubscription(user.ID, anchor.ID, nil)
+
+	_, err = s.client.ExecContext(s.ctx, "SET LOCAL session_replication_role = 'replica'")
+	s.Require().NoError(err)
+	insertIntegrationPlanFulfillmentSnapshot(s.T(), s.ctx, s.client, -sub.ID, user.ID, integrationPlanFulfillmentSnapshot{
+		SchemaVersion:    1,
+		PlanID:           plan.ID,
+		PlanType:         service.PlanTypeSubscription,
+		PlanName:         "snapshot authority plan",
+		PlanPrice:        10,
+		GroupID:          &anchor.ID,
+		SubscriptionDays: 30,
+		CoveredGroupIDs:  []int64{anchor.ID, allowed.ID},
+		LockedRates: map[string]float64{
+			strconv.FormatInt(anchor.ID, 10):  1,
+			strconv.FormatInt(allowed.ID, 10): 1,
+		},
+		CaptureSource: "integration-test",
+	})
+	_, err = s.client.ExecContext(s.ctx, `
+		UPDATE subscription_plan_fulfillment_snapshots
+		SET user_subscription_id = $1,
+		    grant_starts_at = NOW() - INTERVAL '1 minute',
+		    grant_expires_at = NOW() + INTERVAL '1 day',
+		    attached_at = NOW()
+		WHERE payment_order_id = $2
+	`, sub.ID, -sub.ID)
+	s.Require().NoError(err)
+	_, err = s.client.ExecContext(s.ctx, "SET LOCAL session_replication_role = 'origin'")
+	s.Require().NoError(err)
+
+	got, err := s.repo.GetActiveByPlanCoveringGroup(s.ctx, user.ID, allowed.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(sub.ID, got.ID)
+	_, err = s.repo.GetActiveByPlanCoveringGroup(s.ctx, user.ID, denied.ID)
+	s.Require().ErrorIs(err, service.ErrSubscriptionNotFound,
+		"a live plan mapping must not widen a subscription whose immutable snapshot excludes the target")
 }
 
 // --- ListByUserID / ListActiveByUserID ---
@@ -448,6 +559,87 @@ func (s *UserSubscriptionRepoSuite) TestResetDailyUsage() {
 	s.Require().InDelta(20.0, got.WeeklyUsageUSD, 1e-6)
 	s.Require().NotNil(got.DailyWindowStart)
 	s.Require().WithinDuration(resetAt, *got.DailyWindowStart, time.Microsecond)
+}
+
+func (s *UserSubscriptionRepoSuite) TestAdvanceUsageWindow_StaleResetCannotEraseNewUsage() {
+	oldStart := time.Now().UTC().Add(-31 * 24 * time.Hour).Truncate(time.Microsecond)
+	newStart := time.Now().UTC().Truncate(time.Microsecond)
+
+	for _, window := range []service.SubscriptionUsageWindow{
+		service.SubscriptionUsageWindowDaily,
+		service.SubscriptionUsageWindowWeekly,
+		service.SubscriptionUsageWindowMonthly,
+	} {
+		window := window
+		s.Run(string(window), func() {
+			user := s.mustCreateUser(fmt.Sprintf("window-cas-%s@test.com", window), service.RoleUser)
+			group := s.mustCreateGroup("g-window-cas-" + string(window))
+			sub := s.mustCreateSubscription(user.ID, group.ID, func(c *dbent.UserSubscriptionCreate) {
+				c.SetDailyWindowStart(oldStart).
+					SetWeeklyWindowStart(oldStart).
+					SetMonthlyWindowStart(oldStart).
+					SetDailyUsageUsd(11).
+					SetWeeklyUsageUsd(11).
+					SetMonthlyUsageUsd(11)
+			})
+
+			advanced, err := s.repo.AdvanceUsageWindow(s.ctx, sub.ID, service.SubscriptionUsageWindowAdvance{
+				Window:        window,
+				ExpectedStart: &oldStart,
+				NewStart:      newStart,
+				ResetUsage:    true,
+			})
+			s.Require().NoError(err)
+			s.Require().True(advanced)
+			s.Require().NoError(s.repo.IncrementUsage(s.ctx, sub.ID, 5))
+
+			advanced, err = s.repo.AdvanceUsageWindow(s.ctx, sub.ID, service.SubscriptionUsageWindowAdvance{
+				Window:        window,
+				ExpectedStart: &oldStart,
+				NewStart:      newStart.Add(time.Minute),
+				ResetUsage:    true,
+			})
+			s.Require().NoError(err)
+			s.Require().False(advanced)
+
+			got, err := s.repo.GetByID(s.ctx, sub.ID)
+			s.Require().NoError(err)
+			switch window {
+			case service.SubscriptionUsageWindowDaily:
+				s.Require().WithinDuration(newStart, *got.DailyWindowStart, time.Microsecond)
+				s.Require().InDelta(5, got.DailyUsageUSD, 1e-6)
+			case service.SubscriptionUsageWindowWeekly:
+				s.Require().WithinDuration(newStart, *got.WeeklyWindowStart, time.Microsecond)
+				s.Require().InDelta(5, got.WeeklyUsageUSD, 1e-6)
+			case service.SubscriptionUsageWindowMonthly:
+				s.Require().WithinDuration(newStart, *got.MonthlyWindowStart, time.Microsecond)
+				s.Require().InDelta(5, got.MonthlyUsageUSD, 1e-6)
+			}
+		})
+	}
+}
+
+func (s *UserSubscriptionRepoSuite) TestAdvanceUsageWindow_FirstActivationPreservesUsage() {
+	user := s.mustCreateUser("window-activation@test.com", service.RoleUser)
+	group := s.mustCreateGroup("g-window-activation")
+	sub := s.mustCreateSubscription(user.ID, group.ID, func(c *dbent.UserSubscriptionCreate) {
+		c.SetDailyUsageUsd(7)
+	})
+	start := time.Now().UTC().Truncate(time.Microsecond)
+
+	advanced, err := s.repo.AdvanceUsageWindow(s.ctx, sub.ID, service.SubscriptionUsageWindowAdvance{
+		Window:        service.SubscriptionUsageWindowDaily,
+		ExpectedStart: nil,
+		NewStart:      start,
+		ResetUsage:    false,
+	})
+	s.Require().NoError(err)
+	s.Require().True(advanced)
+
+	got, err := s.repo.GetByID(s.ctx, sub.ID)
+	s.Require().NoError(err)
+	s.Require().WithinDuration(start, *got.DailyWindowStart, time.Microsecond)
+	s.Require().InDelta(7, got.DailyUsageUSD, 1e-6)
 }
 
 func (s *UserSubscriptionRepoSuite) TestResetWeeklyUsage() {
@@ -781,6 +973,8 @@ func (s *UserSubscriptionRepoSuite) TestTxContext_RollbackIsolation() {
 
 	groupEnt, err := tx.Client().Group.Create().
 		SetName("tx-group-" + suffix).
+		SetStatus(service.StatusActive).
+		SetSubscriptionType(service.SubscriptionTypeSubscription).
 		Save(txCtx)
 	s.Require().NoError(err, "create group in tx")
 

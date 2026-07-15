@@ -100,10 +100,10 @@ describe('OidcCallbackView', () => {
     sessionStorage.clear()
   })
 
-  it('accepts the legacy fragment token success callback without pending-session exchange', async () => {
+  it('rejects a fragment token that is not backed by a pending browser session', async () => {
     window.location.hash =
       '#access_token=legacy-access-token&refresh_token=legacy-refresh-token&expires_in=3600&token_type=Bearer&redirect=%2Flegacy-dashboard'
-    setToken.mockResolvedValue({})
+    exchangePendingOAuthCompletion.mockRejectedValue(new Error('pending session not found'))
 
     mount(OidcCallbackView, {
       global: {
@@ -118,12 +118,12 @@ describe('OidcCallbackView', () => {
 
     await flushPromises()
 
-    expect(exchangePendingOAuthCompletion).not.toHaveBeenCalled()
-    expect(setToken).toHaveBeenCalledWith('legacy-access-token')
-    expect(localStorage.getItem('refresh_token')).toBe('legacy-refresh-token')
-    expect(localStorage.getItem('token_expires_at')).not.toBeNull()
-    expect(showSuccess).toHaveBeenCalledWith('auth.loginSuccess')
-    expect(replace).toHaveBeenCalledWith('/legacy-dashboard')
+    expect(exchangePendingOAuthCompletion).toHaveBeenCalledTimes(1)
+    expect(setToken).not.toHaveBeenCalled()
+    expect(localStorage.getItem('refresh_token')).toBeNull()
+    expect(localStorage.getItem('token_expires_at')).toBeNull()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(replace).not.toHaveBeenCalled()
   })
 
   it('accepts the legacy pending oauth invitation fragment without pending-session exchange', async () => {

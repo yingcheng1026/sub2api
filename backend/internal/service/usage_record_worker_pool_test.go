@@ -38,7 +38,7 @@ func TestUsageRecordWorkerPool_SubmitEnqueued(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
-func TestUsageRecordWorkerPool_OverflowDrop(t *testing.T) {
+func TestUsageRecordWorkerPool_OverflowDropPolicyFallsBackSynchronously(t *testing.T) {
 	pool := NewUsageRecordWorkerPoolWithOptions(UsageRecordWorkerPoolOptions{
 		WorkerCount:           1,
 		QueueSize:             1,
@@ -51,6 +51,7 @@ func TestUsageRecordWorkerPool_OverflowDrop(t *testing.T) {
 	block := make(chan struct{})
 	started := make(chan struct{})
 	secondDone := make(chan struct{})
+	var overflowExecuted atomic.Bool
 
 	require.Equal(t, UsageRecordSubmitModeEnqueued, pool.Submit(func(ctx context.Context) {
 		close(started)
@@ -61,9 +62,13 @@ func TestUsageRecordWorkerPool_OverflowDrop(t *testing.T) {
 	require.Equal(t, UsageRecordSubmitModeEnqueued, pool.Submit(func(ctx context.Context) {
 		close(secondDone)
 	}))
-	require.Equal(t, UsageRecordSubmitModeDropped, pool.Submit(func(ctx context.Context) {}))
-
+	overflowMode := pool.Submit(func(ctx context.Context) {
+		overflowExecuted.Store(true)
+	})
 	close(block)
+	require.Equal(t, UsageRecordSubmitModeSync, overflowMode)
+	require.True(t, overflowExecuted.Load(), "billable usage must never be dropped when the queue is full")
+
 	select {
 	case <-secondDone:
 	case <-time.After(time.Second):
@@ -71,7 +76,8 @@ func TestUsageRecordWorkerPool_OverflowDrop(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return pool.Stats().DroppedQueueFull >= 1
+		stats := pool.Stats()
+		return stats.SyncFallbackTasks >= 1 && stats.DroppedQueueFull == 0
 	}, time.Second, 10*time.Millisecond)
 }
 
@@ -149,10 +155,14 @@ func TestUsageRecordWorkerPool_OverflowSample(t *testing.T) {
 	require.Equal(t, UsageRecordSubmitModeSync, firstOverflow)
 	require.True(t, syncExecuted.Load())
 
-	secondOverflow := pool.Submit(func(ctx context.Context) {})
-	require.Equal(t, UsageRecordSubmitModeDropped, secondOverflow)
-
+	var secondOverflowExecuted atomic.Bool
+	secondOverflow := pool.Submit(func(ctx context.Context) {
+		secondOverflowExecuted.Store(true)
+	})
 	close(block)
+	require.Equal(t, UsageRecordSubmitModeSync, secondOverflow)
+	require.True(t, secondOverflowExecuted.Load())
+
 	select {
 	case <-secondDone:
 	case <-time.After(time.Second):
@@ -161,11 +171,11 @@ func TestUsageRecordWorkerPool_OverflowSample(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		stats := pool.Stats()
-		return stats.SyncFallbackTasks >= 1 && stats.DroppedQueueFull >= 1
+		return stats.SyncFallbackTasks >= 2 && stats.DroppedQueueFull == 0
 	}, time.Second, 10*time.Millisecond)
 }
 
-func TestUsageRecordWorkerPool_SubmitAfterStop(t *testing.T) {
+func TestUsageRecordWorkerPool_SubmitAfterStopFallsBackSynchronously(t *testing.T) {
 	pool := NewUsageRecordWorkerPoolWithOptions(UsageRecordWorkerPoolOptions{
 		WorkerCount:           1,
 		QueueSize:             1,
@@ -175,9 +185,13 @@ func TestUsageRecordWorkerPool_SubmitAfterStop(t *testing.T) {
 	})
 
 	pool.Stop()
-	mode := pool.Submit(func(ctx context.Context) {})
-	require.Equal(t, UsageRecordSubmitModeDropped, mode)
-	require.GreaterOrEqual(t, pool.Stats().DroppedPoolStopped, uint64(1))
+	var executed atomic.Bool
+	mode := pool.Submit(func(ctx context.Context) {
+		executed.Store(true)
+	})
+	require.Equal(t, UsageRecordSubmitModeSync, mode)
+	require.True(t, executed.Load(), "pool shutdown must not turn accepted usage into a free request")
+	require.Zero(t, pool.Stats().DroppedPoolStopped)
 }
 
 func TestUsageRecordWorkerPool_AutoScaleUpAndDown(t *testing.T) {
@@ -261,7 +275,11 @@ func TestUsageRecordWorkerPool_AutoScaleDownRequiresLowRunningUtilization(t *tes
 
 func TestUsageRecordWorkerPool_SubmitNilReceiverAndNilTask(t *testing.T) {
 	var nilPool *UsageRecordWorkerPool
-	require.Equal(t, UsageRecordSubmitModeDropped, nilPool.Submit(func(ctx context.Context) {}))
+	var nilPoolExecuted atomic.Bool
+	require.Equal(t, UsageRecordSubmitModeSync, nilPool.Submit(func(ctx context.Context) {
+		nilPoolExecuted.Store(true)
+	}))
+	require.True(t, nilPoolExecuted.Load())
 
 	pool := NewUsageRecordWorkerPoolWithOptions(UsageRecordWorkerPoolOptions{
 		WorkerCount:           1,
@@ -355,7 +373,7 @@ func TestUsageRecordWorkerPool_OptionsFromConfig_NilConfig(t *testing.T) {
 	require.Equal(t, defaultUsageRecordWorkerCount, opts.WorkerCount)
 	require.Equal(t, defaultUsageRecordQueueSize, opts.QueueSize)
 	require.Equal(t, time.Duration(defaultUsageRecordTaskTimeoutSeconds)*time.Second, opts.TaskTimeout)
-	require.Equal(t, defaultUsageRecordOverflowPolicy, opts.OverflowPolicy)
+	require.Equal(t, config.UsageRecordOverflowPolicySync, opts.OverflowPolicy)
 	require.Equal(t, defaultUsageRecordOverflowSampleRatio, opts.OverflowSamplePercent)
 	require.True(t, opts.AutoScaleEnabled)
 	require.Equal(t, defaultUsageRecordAutoScaleMinWorkers, opts.AutoScaleMinWorkers)
@@ -445,7 +463,7 @@ func TestUsageRecordWorkerPool_StatsAndStop_NilBranches(t *testing.T) {
 	require.NotPanics(t, func() { emptyPool.Stop() })
 }
 
-func TestUsageRecordWorkerPool_Execute_PanicAndTimeout(t *testing.T) {
+func TestUsageRecordWorkerPool_Execute_PanicAndSlowTaskIsNotCanceled(t *testing.T) {
 	pool := &UsageRecordWorkerPool{taskTimeout: 30 * time.Millisecond}
 
 	require.NotPanics(t, func() {
@@ -456,7 +474,11 @@ func TestUsageRecordWorkerPool_Execute_PanicAndTimeout(t *testing.T) {
 
 	done := make(chan struct{})
 	pool.execute(func(ctx context.Context) {
-		<-ctx.Done()
+		if _, ok := ctx.Deadline(); ok {
+			t.Error("billing task context must not have the legacy short deadline")
+		}
+		time.Sleep(60 * time.Millisecond)
+		require.NoError(t, ctx.Err())
 		close(done)
 	})
 	select {

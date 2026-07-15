@@ -88,6 +88,9 @@ func (s *ChannelMonitorService) List(ctx context.Context, params ChannelMonitorL
 	}
 	for _, it := range items {
 		s.decryptInPlace(it)
+		if err := s.openRequestPayloadInPlace(it); err != nil {
+			return nil, 0, err
+		}
 	}
 	return items, total, nil
 }
@@ -99,6 +102,9 @@ func (s *ChannelMonitorService) Get(ctx context.Context, id int64) (*ChannelMoni
 		return nil, err
 	}
 	s.decryptInPlace(m)
+	if err := s.openRequestPayloadInPlace(m); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
@@ -113,7 +119,7 @@ func (s *ChannelMonitorService) Create(ctx context.Context, p ChannelMonitorCrea
 	if err := validateExtraHeaders(p.ExtraHeaders); err != nil {
 		return nil, err
 	}
-	encrypted, err := s.encryptor.Encrypt(p.APIKey)
+	encrypted, err := EncryptForSecretDomain(s.encryptor, SecretDomainChannelMonitor, p.APIKey)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt api key: %w", err)
 	}
@@ -133,12 +139,17 @@ func (s *ChannelMonitorService) Create(ctx context.Context, p ChannelMonitorCrea
 		BodyOverrideMode: defaultBodyMode(p.BodyOverrideMode),
 		BodyOverride:     p.BodyOverride,
 	}
+	plainHeaders, plainBody := m.ExtraHeaders, m.BodyOverride
+	if err := s.sealRequestPayloadInPlace(m); err != nil {
+		return nil, err
+	}
 	if err := s.repo.Create(ctx, m); err != nil {
 		return nil, fmt.Errorf("create channel monitor: %w", err)
 	}
 	// 不再调 s.Get 重走解密链：已知刚加密的明文，直接构造响应。
 	// 这样可避免 SecretEncryptor 解密失败时 APIKey 被静默清空的问题（见 Fix 4）。
 	m.APIKey = strings.TrimSpace(p.APIKey)
+	m.ExtraHeaders, m.BodyOverride = plainHeaders, plainBody
 	if s.scheduler != nil {
 		s.scheduler.Schedule(m)
 	}
@@ -171,6 +182,9 @@ func (s *ChannelMonitorService) Update(ctx context.Context, id int64, p ChannelM
 	if err != nil {
 		return nil, err
 	}
+	if err := s.openRequestPayloadInPlace(existing); err != nil {
+		return nil, err
+	}
 	if err := applyMonitorUpdate(existing, p); err != nil {
 		return nil, err
 	}
@@ -180,9 +194,14 @@ func (s *ChannelMonitorService) Update(ctx context.Context, id int64, p ChannelM
 		return nil, err
 	}
 
+	plainHeaders, plainBody := existing.ExtraHeaders, existing.BodyOverride
+	if err := s.sealRequestPayloadInPlace(existing); err != nil {
+		return nil, err
+	}
 	if err := s.repo.Update(ctx, existing); err != nil {
 		return nil, fmt.Errorf("update channel monitor: %w", err)
 	}
+	existing.ExtraHeaders, existing.BodyOverride = plainHeaders, plainBody
 
 	// 不再调 s.Get 重走解密链：避免二次解密带来的"密文被静默清空"风险（与 Create 一致）。
 	if apiKeyUpdated {
@@ -207,7 +226,7 @@ func (s *ChannelMonitorService) applyAPIKeyUpdate(existing *ChannelMonitor, raw 
 		return "", false, nil
 	}
 	plain = strings.TrimSpace(*raw)
-	encrypted, encErr := s.encryptor.Encrypt(plain)
+	encrypted, encErr := EncryptForSecretDomain(s.encryptor, SecretDomainChannelMonitor, plain)
 	if encErr != nil {
 		return "", false, fmt.Errorf("encrypt api key: %w", encErr)
 	}
@@ -336,6 +355,9 @@ func (s *ChannelMonitorService) ListEnabledMonitors(ctx context.Context) ([]*Cha
 	}
 	for _, m := range all {
 		s.decryptInPlace(m)
+		if err := s.openRequestPayloadInPlace(m); err != nil {
+			return nil, err
+		}
 	}
 	return all, nil
 }
@@ -452,7 +474,7 @@ func (s *ChannelMonitorService) decryptInPlace(m *ChannelMonitor) {
 	if m == nil || m.APIKey == "" {
 		return
 	}
-	plain, err := s.encryptor.Decrypt(m.APIKey)
+	plain, err := DecryptForSecretDomain(s.encryptor, SecretDomainChannelMonitor, m.APIKey)
 	if err != nil {
 		slog.Warn("channel_monitor: decrypt api key failed",
 			"monitor_id", m.ID, "error", err)
@@ -461,6 +483,35 @@ func (s *ChannelMonitorService) decryptInPlace(m *ChannelMonitor) {
 		return
 	}
 	m.APIKey = plain
+}
+
+func (s *ChannelMonitorService) sealRequestPayloadInPlace(m *ChannelMonitor) error {
+	headers, err := SealChannelMonitorExtraHeaders(s.encryptor, m.ExtraHeaders)
+	if err != nil {
+		return err
+	}
+	body, err := SealChannelMonitorBodyOverride(s.encryptor, m.BodyOverride)
+	if err != nil {
+		return err
+	}
+	m.ExtraHeaders, m.BodyOverride = headers, body
+	return nil
+}
+
+func (s *ChannelMonitorService) openRequestPayloadInPlace(m *ChannelMonitor) error {
+	if m == nil {
+		return nil
+	}
+	headers, err := OpenChannelMonitorExtraHeaders(s.encryptor, m.ExtraHeaders)
+	if err != nil {
+		return fmt.Errorf("open channel monitor %d extra headers: %w", m.ID, err)
+	}
+	body, err := OpenChannelMonitorBodyOverride(s.encryptor, m.BodyOverride)
+	if err != nil {
+		return fmt.Errorf("open channel monitor %d body override: %w", m.ID, err)
+	}
+	m.ExtraHeaders, m.BodyOverride = headers, body
+	return nil
 }
 
 // applyMonitorUpdate 把 update params 中非 nil 的字段应用到 existing 上。
@@ -524,6 +575,9 @@ func applyMonitorAdvancedUpdate(existing *ChannelMonitor, p ChannelMonitorUpdate
 	newBody := existing.BodyOverride
 	if p.BodyOverrideMode != nil {
 		newMode = *p.BodyOverrideMode
+		if newMode == MonitorBodyOverrideModeOff {
+			newBody = nil
+		}
 	}
 	if p.BodyOverride != nil {
 		newBody = *p.BodyOverride

@@ -20,6 +20,14 @@ const (
 	IdempotencyStatusProcessing      = "processing"
 	IdempotencyStatusSucceeded       = "succeeded"
 	IdempotencyStatusFailedRetryable = "failed_retryable"
+
+	idempotencyScopeAdminSubscriptionsAssign     = "admin.subscriptions.assign"
+	idempotencyScopeAdminSubscriptionsBulkAssign = "admin.subscriptions.bulk_assign"
+	idempotencyScopeAdminSubscriptionsExtend     = "admin.subscriptions.extend"
+	idempotencyScopeAdminUsersBalanceUpdate      = "admin.users.balance.update"
+	idempotencyScopeAdminRedeemCodesGenerate     = "admin.redeem_codes.generate"
+	idempotencyScopeAdminRedeemCodesCreateRedeem = "admin.redeem_codes.create_and_redeem"
+	WeChatPaymentResumeIdempotencyScope          = "payment.orders.wechat_resume.create"
 )
 
 var (
@@ -28,6 +36,7 @@ var (
 	ErrIdempotencyKeyConflict    = infraerrors.Conflict("IDEMPOTENCY_KEY_CONFLICT", "idempotency key reused with different payload")
 	ErrIdempotencyInProgress     = infraerrors.Conflict("IDEMPOTENCY_IN_PROGRESS", "idempotent request is still processing")
 	ErrIdempotencyRetryBackoff   = infraerrors.Conflict("IDEMPOTENCY_RETRY_BACKOFF", "idempotent request is in retry backoff window")
+	ErrIdempotencyManualRecovery = infraerrors.Conflict("IDEMPOTENCY_MANUAL_RECOVERY_REQUIRED", "persistent idempotent request requires manual recovery")
 	ErrIdempotencyStoreUnavail   = infraerrors.ServiceUnavailable("IDEMPOTENCY_STORE_UNAVAILABLE", "idempotency store unavailable")
 	ErrIdempotencyInvalidPayload = infraerrors.BadRequest("IDEMPOTENCY_PAYLOAD_INVALID", "failed to normalize request payload")
 )
@@ -43,6 +52,7 @@ type IdempotencyRecord struct {
 	ErrorReason        *string
 	LockedUntil        *time.Time
 	ExpiresAt          time.Time
+	Persistent         bool
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -78,19 +88,74 @@ func DefaultIdempotencyConfig() IdempotencyConfig {
 }
 
 type IdempotencyExecuteOptions struct {
-	Scope          string
-	ActorScope     string
-	Method         string
-	Route          string
-	IdempotencyKey string
-	Payload        any
-	TTL            time.Duration
-	RequireKey     bool
+	Scope              string
+	ActorScope         string
+	Method             string
+	Route              string
+	IdempotencyKey     string
+	Payload            any
+	TTL                time.Duration
+	ProcessingTimeout  time.Duration
+	FailedRetryBackoff time.Duration
+	RequireKey         bool
+	// Persistent marks financial operations whose key must never become
+	// executable again after expiry. Succeeded rows always replay; incomplete
+	// rows require manual recovery.
+	Persistent bool
 }
 
 type IdempotencyExecuteResult struct {
 	Data     any
 	Replayed bool
+}
+
+// IdempotencySensitiveResponse separates the one-time response from the
+// persistence-safe replay body. It is used for generated credentials: the
+// first caller receives the secret, while the database stores only metadata.
+type IdempotencySensitiveResponse struct {
+	PublicData any
+	StoredData any
+}
+
+func NewIdempotencySensitiveResponse(publicData, storedData any) *IdempotencySensitiveResponse {
+	return &IdempotencySensitiveResponse{PublicData: publicData, StoredData: storedData}
+}
+
+func SplitIdempotencySensitiveResponse(data any) (publicData, storedData any) {
+	if split, ok := data.(*IdempotencySensitiveResponse); ok && split != nil {
+		return split.PublicData, split.StoredData
+	}
+	return data, data
+}
+
+// PersistentFinancialIdempotencyScopes returns a fresh list of entitlement or
+// balance mutations whose keys may never become executable again. The database
+// migration carries the same allowlist as a fail-closed storage invariant.
+func PersistentFinancialIdempotencyScopes() []string {
+	return []string{
+		idempotencyScopeAdminSubscriptionsAssign,
+		idempotencyScopeAdminSubscriptionsBulkAssign,
+		idempotencyScopeAdminSubscriptionsExtend,
+		idempotencyScopeAdminUsersBalanceUpdate,
+		idempotencyScopeAdminRedeemCodesGenerate,
+		idempotencyScopeAdminRedeemCodesCreateRedeem,
+		UsageBillingReconciliationIdempotencyScope,
+	}
+}
+
+func IsPersistentFinancialIdempotencyScope(scope string) bool {
+	switch scope {
+	case idempotencyScopeAdminSubscriptionsAssign,
+		idempotencyScopeAdminSubscriptionsBulkAssign,
+		idempotencyScopeAdminSubscriptionsExtend,
+		idempotencyScopeAdminUsersBalanceUpdate,
+		idempotencyScopeAdminRedeemCodesGenerate,
+		idempotencyScopeAdminRedeemCodesCreateRedeem,
+		UsageBillingReconciliationIdempotencyScope:
+		return true
+	default:
+		return false
+	}
 }
 
 type IdempotencyCoordinator struct {
@@ -204,20 +269,22 @@ func (c *IdempotencyCoordinator) Execute(
 	if execute == nil {
 		return nil, infraerrors.InternalServer("IDEMPOTENCY_EXECUTOR_NIL", "idempotency executor is nil")
 	}
+	persistent := opts.Persistent || IsPersistentFinancialIdempotencyScope(opts.Scope)
 
 	key, err := NormalizeIdempotencyKey(opts.IdempotencyKey)
 	if err != nil {
 		return nil, err
 	}
 	if key == "" {
-		if opts.RequireKey && !c.cfg.ObserveOnly {
+		if persistent || (opts.RequireKey && !c.cfg.ObserveOnly) {
 			return nil, ErrIdempotencyKeyRequired
 		}
 		data, execErr := execute(ctx)
 		if execErr != nil {
 			return nil, execErr
 		}
-		return &IdempotencyExecuteResult{Data: data}, nil
+		publicData, _ := SplitIdempotencySensitiveResponse(data)
+		return &IdempotencyExecuteResult{Data: publicData}, nil
 	}
 	if c.repo == nil {
 		RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "repo_nil")
@@ -239,7 +306,11 @@ func (c *IdempotencyCoordinator) Execute(
 	}
 	now := time.Now()
 	expiresAt := now.Add(ttl)
-	lockedUntil := now.Add(c.cfg.ProcessingTimeout)
+	processingTimeout := opts.ProcessingTimeout
+	if processingTimeout <= 0 {
+		processingTimeout = c.cfg.ProcessingTimeout
+	}
+	lockedUntil := now.Add(processingTimeout)
 	keyHash := HashIdempotencyKey(key)
 
 	record := &IdempotencyRecord{
@@ -249,6 +320,7 @@ func (c *IdempotencyCoordinator) Execute(
 		Status:             IdempotencyStatusProcessing,
 		LockedUntil:        &lockedUntil,
 		ExpiresAt:          expiresAt,
+		Persistent:         persistent,
 	}
 
 	owner, err := c.repo.CreateProcessing(ctx, record)
@@ -286,8 +358,14 @@ func (c *IdempotencyCoordinator) Execute(
 			logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "existing->fingerprint_mismatch", false, nil)
 			return nil, ErrIdempotencyKeyConflict
 		}
+		existingPersistent := persistent || existing.Persistent
 		reclaimedByExpired := false
-		if !existing.ExpiresAt.After(now) {
+		if !existing.ExpiresAt.After(now) && existingPersistent && existing.Status != IdempotencyStatusSucceeded {
+			recordIdempotencyConflict(opts.Route, opts.Scope, map[string]string{"reason": "persistent_manual_recovery"})
+			logIdempotencyAudit(opts.Route, opts.Scope, keyHash, existing.Status+"->manual_recovery", false, nil)
+			return nil, ErrIdempotencyManualRecovery
+		}
+		if !existing.ExpiresAt.After(now) && !existingPersistent {
 			taken, reclaimErr := c.repo.TryReclaim(ctx, existing.ID, existing.Status, now, lockedUntil, expiresAt)
 			if reclaimErr != nil {
 				RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "try_reclaim_expired_error")
@@ -343,10 +421,20 @@ func (c *IdempotencyCoordinator) Execute(
 				logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "succeeded->replayed", true, nil)
 				return &IdempotencyExecuteResult{Data: data, Replayed: true}, nil
 			case IdempotencyStatusProcessing:
+				if existingPersistent && (existing.LockedUntil == nil || !existing.LockedUntil.After(now)) {
+					recordIdempotencyConflict(opts.Route, opts.Scope, map[string]string{"reason": "persistent_manual_recovery"})
+					logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->manual_recovery", false, nil)
+					return nil, ErrIdempotencyManualRecovery
+				}
 				recordIdempotencyConflict(opts.Route, opts.Scope, map[string]string{"reason": "in_progress"})
 				logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->conflict", false, nil)
 				return nil, c.conflictWithRetryAfter(ErrIdempotencyInProgress, existing.LockedUntil, now)
 			case IdempotencyStatusFailedRetryable:
+				if existingPersistent {
+					recordIdempotencyConflict(opts.Route, opts.Scope, map[string]string{"reason": "persistent_manual_recovery"})
+					logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "failed_retryable->manual_recovery", false, nil)
+					return nil, ErrIdempotencyManualRecovery
+				}
 				if existing.LockedUntil != nil && existing.LockedUntil.After(now) {
 					recordIdempotencyConflict(opts.Route, opts.Scope, map[string]string{"reason": "retry_backoff"})
 					recordIdempotencyRetryBackoff(opts.Route, opts.Scope, nil)
@@ -398,7 +486,11 @@ func (c *IdempotencyCoordinator) Execute(
 
 	data, execErr := execute(ctx)
 	if execErr != nil {
-		backoffUntil := time.Now().Add(c.cfg.FailedRetryBackoff)
+		failedRetryBackoff := opts.FailedRetryBackoff
+		if failedRetryBackoff <= 0 {
+			failedRetryBackoff = c.cfg.FailedRetryBackoff
+		}
+		backoffUntil := time.Now().Add(failedRetryBackoff)
 		reason := infraerrors.Reason(execErr)
 		if reason == "" {
 			reason = "EXECUTION_FAILED"
@@ -416,7 +508,8 @@ func (c *IdempotencyCoordinator) Execute(
 		return nil, execErr
 	}
 
-	storedBody, marshalErr := c.marshalStoredResponse(data)
+	publicData, storedData := SplitIdempotencySensitiveResponse(data)
+	storedBody, marshalErr := c.marshalStoredResponse(storedData)
 	if marshalErr != nil {
 		RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "marshal_response_error")
 		logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->store_unavailable", false, map[string]string{
@@ -433,7 +526,7 @@ func (c *IdempotencyCoordinator) Execute(
 	}
 	logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->succeeded", false, nil)
 
-	return &IdempotencyExecuteResult{Data: data}, nil
+	return &IdempotencyExecuteResult{Data: publicData}, nil
 }
 
 func (c *IdempotencyCoordinator) conflictWithRetryAfter(base *infraerrors.ApplicationError, lockedUntil *time.Time, now time.Time) error {

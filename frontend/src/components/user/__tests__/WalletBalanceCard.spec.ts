@@ -15,6 +15,8 @@ vi.mock('vue-i18n', async (importOriginal) => {
           'userSubscriptions.wallet.usedPercent': 'Used',
           'userSubscriptions.wallet.lowWarning': `Only ${params?.amount} left`,
           'userSubscriptions.wallet.exhausted': 'Wallet exhausted',
+          'userSubscriptions.wallet.debtToCover': 'Debt to cover',
+          'userSubscriptions.wallet.debtWarning': `Outstanding debt $${params?.amount}`,
           'userSubscriptions.status.active': 'Active',
           'userSubscriptions.expires': 'Expires',
           'payment.renewNow': 'Renew'
@@ -63,5 +65,14 @@ describe('WalletBalanceCard', () => {
 
     expect(wrapper.get('[data-hfc-renew-entry="wallet"]').text()).toBe('Renew')
     expect(wrapper.text()).toContain('Only 100.00 left')
+  })
+
+  it('shows negative balance as debt and clamps progress to 100 percent', () => {
+    const wrapper = mountWalletCard(-25.5)
+
+    expect(wrapper.text()).toContain('Debt to cover')
+    expect(wrapper.text()).toContain('Outstanding debt $25.50')
+    expect(wrapper.text()).not.toContain('Wallet exhausted')
+    expect(wrapper.get('[data-hfc-wallet-progress]').attributes('style')).toContain('width: 100%')
   })
 })

@@ -301,8 +301,6 @@ func (r *usageLogRepository) CreateBestEffort(ctx context.Context, log *service.
 	case r.bestEffortBatchCh <- req:
 	case <-ctx.Done():
 		return service.MarkUsageLogCreateDropped(ctx.Err())
-	default:
-		return service.MarkUsageLogCreateDropped(errors.New("usage log best-effort queue full"))
 	}
 
 	select {
@@ -422,8 +420,6 @@ func (r *usageLogRepository) createBatched(ctx context.Context, log *service.Usa
 	case r.createBatchCh <- req:
 	case <-ctx.Done():
 		return false, service.MarkUsageLogCreateNotPersisted(ctx.Err())
-	default:
-		return false, service.MarkUsageLogCreateNotPersisted(errors.New("usage log create batch queue full"))
 	}
 
 	select {
@@ -445,22 +441,26 @@ func (r *usageLogRepository) createBatched(ctx context.Context, log *service.Usa
 }
 
 func (r *usageLogRepository) ensureCreateBatcher() {
-	if r == nil || r.db == nil || r.createBatchCh != nil {
+	if r == nil || r.db == nil {
 		return
 	}
 	r.createBatchOnce.Do(func() {
-		r.createBatchCh = make(chan usageLogCreateRequest, usageLogCreateBatchQueueCap)
-		go r.runCreateBatcher(r.db)
+		if r.createBatchCh == nil {
+			r.createBatchCh = make(chan usageLogCreateRequest, usageLogCreateBatchQueueCap)
+			go r.runCreateBatcher(r.db)
+		}
 	})
 }
 
 func (r *usageLogRepository) ensureBestEffortBatcher() {
-	if r == nil || r.db == nil || r.bestEffortBatchCh != nil {
+	if r == nil || r.db == nil {
 		return
 	}
 	r.bestEffortBatchOnce.Do(func() {
-		r.bestEffortBatchCh = make(chan usageLogBestEffortRequest, usageLogBestEffortBatchQueueCap)
-		go r.runBestEffortBatcher(r.db)
+		if r.bestEffortBatchCh == nil {
+			r.bestEffortBatchCh = make(chan usageLogBestEffortRequest, usageLogBestEffortBatchQueueCap)
+			go r.runBestEffortBatcher(r.db)
+		}
 	})
 }
 
@@ -1371,7 +1371,16 @@ func (r *usageLogRepository) bestEffortRecentKey(requestID string, apiKeyID int6
 
 func (r *usageLogRepository) GetByID(ctx context.Context, id int64) (log *service.UsageLog, err error) {
 	query := "SELECT " + usageLogSelectColumns + " FROM usage_logs WHERE id = $1"
-	rows, err := r.sql.QueryContext(ctx, query, id)
+	return r.getOneUsageLog(ctx, query, id)
+}
+
+func (r *usageLogRepository) GetByIDForUser(ctx context.Context, id, userID int64) (log *service.UsageLog, err error) {
+	query := "SELECT " + usageLogSelectColumns + " FROM usage_logs WHERE id = $1 AND user_id = $2"
+	return r.getOneUsageLog(ctx, query, id, userID)
+}
+
+func (r *usageLogRepository) getOneUsageLog(ctx context.Context, query string, args ...any) (log *service.UsageLog, err error) {
+	rows, err := r.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2744,11 +2753,7 @@ func (r *usageLogRepository) ListWithFilters(ctx context.Context, params paginat
 }
 
 func shouldUseFastUsageLogTotal(filters UsageLogFilters) bool {
-	if filters.ExactTotal {
-		return false
-	}
-	// 强选择过滤下记录集通常较小，保留精确总数。
-	return filters.UserID == 0 && filters.APIKeyID == 0 && filters.AccountID == 0
+	return !filters.ExactTotal
 }
 
 // UsageStats represents usage statistics

@@ -36,21 +36,36 @@ func executeAdminIdempotent(
 		}
 		return &service.IdempotencyExecuteResult{Data: data}, nil
 	}
+	return executeAdminIdempotentWithCoordinator(c.Request.Context(), c, coordinator, scope, payload, ttl, c.GetHeader("Idempotency-Key"), false, execute)
+}
+
+func executeAdminIdempotentWithCoordinator(
+	ctx context.Context,
+	c *gin.Context,
+	coordinator *service.IdempotencyCoordinator,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	idempotencyKey string,
+	persistent bool,
+	execute func(context.Context) (any, error),
+) (*service.IdempotencyExecuteResult, error) {
 
 	actorScope := "admin:0"
 	if subject, ok := middleware2.GetAuthSubjectFromContext(c); ok {
 		actorScope = "admin:" + strconv.FormatInt(subject.UserID, 10)
 	}
 
-	return coordinator.Execute(c.Request.Context(), service.IdempotencyExecuteOptions{
+	return coordinator.Execute(ctx, service.IdempotencyExecuteOptions{
 		Scope:          scope,
 		ActorScope:     actorScope,
 		Method:         c.Request.Method,
 		Route:          c.FullPath(),
-		IdempotencyKey: c.GetHeader("Idempotency-Key"),
+		IdempotencyKey: idempotencyKey,
 		Payload:        payload,
 		RequireKey:     true,
 		TTL:            ttl,
+		Persistent:     persistent,
 	}, execute)
 }
 
@@ -62,6 +77,128 @@ func executeAdminIdempotentJSON(
 	execute func(context.Context) (any, error),
 ) {
 	executeAdminIdempotentJSONWithMode(c, scope, payload, ttl, idempotencyStoreUnavailableFailClose, execute)
+}
+
+// executeAdminStrictIdempotentJSON is the fail-closed variant for financial
+// writes. It does not honor the global observe-only bypass: callers must send
+// a valid Idempotency-Key and the coordinator must be available before any
+// business side effect can run.
+func executeAdminStrictIdempotentJSON(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	runInTransaction func(context.Context, func(context.Context) error) error,
+	execute func(context.Context) (any, error),
+) {
+	executeAdminStrictIdempotentJSONWithPostCommit(c, scope, payload, ttl, runInTransaction, nil, execute)
+}
+
+// executeAdminStrictIdempotentJSONWithPostCommit runs postCommit only after
+// the business mutation and its persistent idempotency result have committed.
+// A post-commit cache failure must not turn an already committed financial
+// mutation into an API failure, so it is logged and the committed response is
+// still returned.
+func executeAdminStrictIdempotentJSONWithPostCommit(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	runInTransaction func(context.Context, func(context.Context) error) error,
+	postCommit func(context.Context) error,
+	execute func(context.Context) (any, error),
+) {
+	key, err := service.NormalizeIdempotencyKey(c.GetHeader("Idempotency-Key"))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if key == "" {
+		response.ErrorFrom(c, service.ErrIdempotencyKeyRequired)
+		return
+	}
+	coordinator := service.DefaultIdempotencyCoordinator()
+	if coordinator == nil {
+		service.RecordIdempotencyStoreUnavailable(c.FullPath(), scope, "coordinator_nil")
+		response.ErrorFrom(c, service.ErrIdempotencyStoreUnavail)
+		return
+	}
+	if runInTransaction == nil {
+		response.ErrorFrom(c, infraerrors.ServiceUnavailable("ASSIGNMENT_TRANSACTION_UNAVAILABLE", "assignment transaction is unavailable"))
+		return
+	}
+	var result *service.IdempotencyExecuteResult
+	err = runInTransaction(c.Request.Context(), func(txCtx context.Context) error {
+		var executeErr error
+		result, executeErr = executeAdminIdempotentWithCoordinator(txCtx, c, coordinator, scope, payload, ttl, key, true, execute)
+		return executeErr
+	})
+	if err == nil && postCommit != nil {
+		postCommitCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
+		if postCommitErr := postCommit(postCommitCtx); postCommitErr != nil {
+			logger.LegacyPrintf("handler.idempotency", "[Idempotency] post-commit hook failed: method=%s route=%s scope=%s error=%v", c.Request.Method, c.FullPath(), scope, postCommitErr)
+		}
+		cancel()
+	}
+	writeAdminIdempotentJSONResult(c, scope, idempotencyStoreUnavailableFailClose, execute, result, err)
+}
+
+// executeAdminStrictIdempotentJSONNonTransactional protects independently
+// atomic financial operations and partial batches that cannot share one outer
+// transaction. A crash after the business commit leaves the persistent claim
+// in manual-recovery state instead of ever executing it again.
+func executeAdminStrictIdempotentJSONNonTransactional(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	execute func(context.Context) (any, error),
+) {
+	executeAdminStrictIdempotentJSONNonTransactionalWithKey(
+		c,
+		scope,
+		payload,
+		ttl,
+		c.GetHeader("Idempotency-Key"),
+		execute,
+	)
+}
+
+func executeAdminStrictIdempotentJSONNonTransactionalWithKey(
+	c *gin.Context,
+	scope string,
+	payload any,
+	ttl time.Duration,
+	rawKey string,
+	execute func(context.Context) (any, error),
+) {
+	key, err := service.NormalizeIdempotencyKey(rawKey)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if key == "" {
+		response.ErrorFrom(c, service.ErrIdempotencyKeyRequired)
+		return
+	}
+	coordinator := service.DefaultIdempotencyCoordinator()
+	if coordinator == nil {
+		service.RecordIdempotencyStoreUnavailable(c.FullPath(), scope, "coordinator_nil")
+		response.ErrorFrom(c, service.ErrIdempotencyStoreUnavail)
+		return
+	}
+	result, err := executeAdminIdempotentWithCoordinator(
+		c.Request.Context(),
+		c,
+		coordinator,
+		scope,
+		payload,
+		ttl,
+		key,
+		true,
+		execute,
+	)
+	writeAdminIdempotentJSONResult(c, scope, idempotencyStoreUnavailableFailClose, execute, result, err)
 }
 
 func executeAdminIdempotentJSONFailOpenOnStoreUnavailable(
@@ -83,6 +220,17 @@ func executeAdminIdempotentJSONWithMode(
 	execute func(context.Context) (any, error),
 ) {
 	result, err := executeAdminIdempotent(c, scope, payload, ttl, execute)
+	writeAdminIdempotentJSONResult(c, scope, mode, execute, result, err)
+}
+
+func writeAdminIdempotentJSONResult(
+	c *gin.Context,
+	scope string,
+	mode idempotencyStoreUnavailableMode,
+	execute func(context.Context) (any, error),
+	result *service.IdempotencyExecuteResult,
+	err error,
+) {
 	if err != nil {
 		if infraerrors.Code(err) == infraerrors.Code(service.ErrIdempotencyStoreUnavail) {
 			strategy := "fail_close"

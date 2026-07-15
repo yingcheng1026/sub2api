@@ -30,6 +30,7 @@ const (
 // ErrWalletNegativeDelta DeductBalance 入参 costUSD ≤ 0；防止误把扣费当退款。
 var (
 	ErrWalletInsufficient  = infraerrors.New(http.StatusPaymentRequired, "WALLET_INSUFFICIENT", "wallet balance insufficient, please renew at /dashboard")
+	ErrWalletAdmissionBusy = infraerrors.TooManyRequests("WALLET_ADMISSION_BUSY", "another wallet request is still being settled; please retry shortly")
 	ErrWalletNotFound      = infraerrors.NotFound("WALLET_NOT_FOUND", "wallet subscription not found or not wallet-mode")
 	ErrWalletNegativeDelta = infraerrors.BadRequest("WALLET_NEGATIVE_DELTA", "deduct/credit amount must be > 0")
 )
@@ -41,6 +42,7 @@ type WalletLedgerEntry struct {
 	DeltaUSD       float64
 	BalanceAfter   float64
 	Reason         string
+	PaymentOrderID *int64
 	UsageLogID     *int64
 	OperatorID     *int64
 	Notes          string
@@ -50,13 +52,18 @@ type WalletLedgerEntry struct {
 //
 // 在事务中执行：
 //  1. SELECT wallet_balance_usd FROM user_subscriptions WHERE id=$1 FOR UPDATE
-//  2. 如 balance < CostUSD → 回滚返 ErrWalletInsufficient
-//  3. UPDATE wallet_balance_usd -= CostUSD
-//  4. INSERT subscription_wallet_ledger(reason='usage', delta=-CostUSD, usage_log_id=UsageLogID)
+//  2. UsageLogID 非空且已有 usage 流水时返回原流水，不重复扣款
+//  3. 如 balance < CostUSD → 回滚返 ErrWalletInsufficient
+//  4. UPDATE wallet_balance_usd -= CostUSD
+//  5. INSERT subscription_wallet_ledger(reason='usage', delta=-CostUSD, usage_log_id=UsageLogID)
 type WalletDeductCommand struct {
 	SubscriptionID int64
 	CostUSD        float64
 	UsageLogID     *int64
+	// PostpaidSettlement is set only after an upstream response has already been
+	// delivered. In that case the full actual cost must be ledgered even when it
+	// takes the wallet negative; ordinary/preflight deductions still fail closed.
+	PostpaidSettlement bool
 }
 
 // WalletAdjustCommand admin 调整钱包余额（手动退款 / 补偿 / 补充）。
@@ -66,6 +73,17 @@ type WalletAdjustCommand struct {
 	SubscriptionID int64
 	DeltaUSD       float64
 	Reason         string
+	OperatorID     *int64
+	Notes          string
+}
+
+// WalletActivationCommand records the opening balance of a newly created
+// wallet. The subscription row already contains that balance, so activation
+// appends the authoritative ledger entry without updating the balance again.
+type WalletActivationCommand struct {
+	SubscriptionID int64
+	InitialUSD     float64
+	PaymentOrderID *int64
 	OperatorID     *int64
 	Notes          string
 }
@@ -83,6 +101,7 @@ type WalletAdjustCommand struct {
 type WalletTopupCommand struct {
 	SubscriptionID int64
 	DeltaUSD       float64
+	PaymentOrderID *int64
 	OperatorID     *int64
 	Notes          string
 }
@@ -101,10 +120,18 @@ type WalletReconcileDrift struct {
 //   - 所有方法都在自己开的事务里跑，调用方不需要事先 BeginTx。
 //   - Deduct 必须使用 SELECT ... FOR UPDATE 锁住 user_subscriptions 行，
 //     防止同 user 多 key 并发把余额扣穿。
-//   - 余额永远不允许变成 < -0.01（DB 端 CHECK 约束兜底，应用层提前拦截）。
+//   - 同一个非空 UsageLogID 只能产生一条 reason=usage 流水；重放必须返回
+//     首次已提交的流水，且不能再次修改余额。UsageLogID=nil 保留逐次扣款语义。
+//   - Usage settlement may take the wallet negative after an already delivered
+//     response. Pre-upstream admission limits that exposure to one in-flight
+//     request per wallet; subsequent requests fail closed until settlement.
 type WalletRepository interface {
 	// Deduct 钱包扣款。余额不足返 ErrWalletInsufficient。
 	Deduct(ctx context.Context, cmd WalletDeductCommand) (WalletLedgerEntry, error)
+
+	// RecordActivation appends exactly one reason=activation entry and must not
+	// add InitialUSD to wallet_balance_usd a second time.
+	RecordActivation(ctx context.Context, cmd WalletActivationCommand) (WalletLedgerEntry, error)
 
 	// Adjust 余额调整（含初始充值）。
 	Adjust(ctx context.Context, cmd WalletAdjustCommand) (WalletLedgerEntry, error)

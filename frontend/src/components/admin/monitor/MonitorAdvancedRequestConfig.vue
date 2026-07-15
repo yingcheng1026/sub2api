@@ -294,8 +294,8 @@ const bodyModeHint = computed(() => {
 
 const bodyPlaceholder = computed(() => {
   if (props.bodyOverrideMode === 'merge') {
-    return '{\n  "system": "You are Claude Code..."\n}'
+    return '{\n  "system": "health check"\n}'
   }
-  return '{\n  "model": "claude-x",\n  "messages": [{"role":"user","content":"hi"}],\n  "max_tokens": 10\n}'
+  return '{\n  "model": "provider-model",\n  "messages": [{"role":"user","content":"health check"}],\n  "max_tokens": 10\n}'
 })
 </script>

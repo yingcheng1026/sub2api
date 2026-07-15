@@ -15,10 +15,13 @@ import (
 )
 
 const (
-	defaultUsageRecordWorkerCount          = 128
-	defaultUsageRecordQueueSize            = 16384
-	defaultUsageRecordTaskTimeoutSeconds   = 5
-	defaultUsageRecordOverflowPolicy       = config.UsageRecordOverflowPolicySample
+	defaultUsageRecordWorkerCount        = 128
+	defaultUsageRecordQueueSize          = 16384
+	defaultUsageRecordTaskTimeoutSeconds = 5
+	// Billable usage must never be sampled or dropped. Queue overflow is handled
+	// by synchronous backpressure so the caller cannot turn a successful request
+	// into free usage merely by saturating this in-memory pool.
+	defaultUsageRecordOverflowPolicy       = config.UsageRecordOverflowPolicySync
 	defaultUsageRecordOverflowSampleRatio  = 10
 	defaultUsageRecordAutoScaleEnabled     = true
 	defaultUsageRecordAutoScaleMinWorkers  = 128
@@ -141,15 +144,20 @@ func NewUsageRecordWorkerPoolWithOptions(opts UsageRecordWorkerPoolOptions) *Usa
 }
 
 // Submit 提交一个使用量记录任务。
-// 提交失败（队列满）时按 overflowPolicy 执行降级策略：drop/sample/sync。
+// 队列满或池已停止时同步执行，保证已接收的计费任务不会静默丢失。
+// overflowPolicy 只为旧配置兼容保留，不再允许削弱该完整性边界。
 func (p *UsageRecordWorkerPool) Submit(task UsageRecordTask) UsageRecordSubmitMode {
-	if p == nil || task == nil {
+	if task == nil {
 		return UsageRecordSubmitModeDropped
 	}
+	if p == nil {
+		executeUsageRecordTask(task)
+		return UsageRecordSubmitModeSync
+	}
 	if p.pool == nil || p.pool.Stopped() {
-		p.droppedPoolStopped.Add(1)
-		p.logDrop("stopped")
-		return UsageRecordSubmitModeDropped
+		p.syncFallback.Add(1)
+		p.execute(task)
+		return UsageRecordSubmitModeSync
 	}
 
 	_, ok := p.pool.TrySubmit(func() {
@@ -160,27 +168,14 @@ func (p *UsageRecordWorkerPool) Submit(task UsageRecordTask) UsageRecordSubmitMo
 	}
 
 	if p.pool.Stopped() {
-		p.droppedPoolStopped.Add(1)
-		p.logDrop("stopped")
-		return UsageRecordSubmitModeDropped
-	}
-
-	switch p.overflowPolicy {
-	case config.UsageRecordOverflowPolicySync:
 		p.syncFallback.Add(1)
 		p.execute(task)
 		return UsageRecordSubmitModeSync
-	case config.UsageRecordOverflowPolicySample:
-		if p.shouldSyncFallback() {
-			p.syncFallback.Add(1)
-			p.execute(task)
-			return UsageRecordSubmitModeSync
-		}
 	}
 
-	p.droppedQueueFull.Add(1)
-	p.logDrop("full")
-	return UsageRecordSubmitModeDropped
+	p.syncFallback.Add(1)
+	p.execute(task)
+	return UsageRecordSubmitModeSync
 }
 
 // Stats 返回当前池状态与计数器。
@@ -315,9 +310,10 @@ func (p *UsageRecordWorkerPool) shouldSyncFallback() bool {
 }
 
 func (p *UsageRecordWorkerPool) execute(task UsageRecordTask) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.taskTimeout)
-	defer cancel()
+	executeUsageRecordTask(task)
+}
 
+func executeUsageRecordTask(task UsageRecordTask) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			logger.L().With(
@@ -327,7 +323,11 @@ func (p *UsageRecordWorkerPool) execute(task UsageRecordTask) {
 		}
 	}()
 
-	task(ctx)
+	// A short in-memory worker deadline is unsafe for billing: a slow database
+	// would cancel RecordUsage after the upstream response already succeeded.
+	// Backpressure is intentional here; durable producers apply their own retry
+	// semantics after the billing fact has been constructed.
+	task(context.Background())
 }
 
 func (p *UsageRecordWorkerPool) logDrop(reason string) {

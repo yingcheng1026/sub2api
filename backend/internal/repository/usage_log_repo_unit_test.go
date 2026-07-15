@@ -69,6 +69,33 @@ func TestBuildUsageLogBatchInsertQuery_UsesConflictDoNothing(t *testing.T) {
 	require.NotContains(t, strings.ToUpper(query), "DO UPDATE")
 }
 
+func TestUsageLogRepositoryCreateBestEffort_QueuePressureWaitsForDrain(t *testing.T) {
+	db, _, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := newUsageLogRepositoryWithSQL(nil, db)
+	repo.bestEffortBatchCh = make(chan usageLogBestEffortRequest, 1)
+	repo.bestEffortBatchCh <- usageLogBestEffortRequest{}
+
+	drainStarted := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(drainStarted)
+		<-repo.bestEffortBatchCh
+		req := <-repo.bestEffortBatchCh
+		sendUsageLogBestEffortResult(req.resultCh, nil)
+	}()
+
+	startedAt := time.Now()
+	err = repo.CreateBestEffort(context.Background(), &service.UsageLog{
+		UserID: 1, APIKeyID: 2, AccountID: 3, RequestID: "queue-pressure", Model: "gpt-5.6-sol",
+		InputTokens: 1, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	<-drainStarted
+	require.GreaterOrEqual(t, time.Since(startedAt), 40*time.Millisecond)
+}
+
 func TestUsageLogRepositoryBillingModelPersistenceContract(t *testing.T) {
 	billingModel := "gpt-5.4"
 	log := &service.UsageLog{

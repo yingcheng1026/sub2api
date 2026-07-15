@@ -35,6 +35,18 @@ func (p *Proxy) URL() string {
 	return u.String()
 }
 
+// LogURL returns only the non-secret proxy endpoint. Authentication material
+// must remain available to transports but must never be written to logs.
+func (p *Proxy) LogURL() string {
+	if p == nil {
+		return ""
+	}
+	return (&url.URL{
+		Scheme: p.Protocol,
+		Host:   net.JoinHostPort(p.Host, strconv.Itoa(p.Port)),
+	}).String()
+}
+
 type ProxyWithAccountCount struct {
 	Proxy
 	AccountCount   int64

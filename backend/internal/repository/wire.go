@@ -48,7 +48,7 @@ func ProvideSessionLimitCache(rdb *redis.Client, cfg *config.Config) service.Ses
 }
 
 // ProvideSchedulerCache 创建调度快照缓存，并注入快照分块参数。
-func ProvideSchedulerCache(rdb *redis.Client, cfg *config.Config) service.SchedulerCache {
+func ProvideSchedulerCache(rdb *redis.Client, cfg *config.Config, encryptor service.SecretEncryptor) (service.SchedulerCache, error) {
 	mgetChunkSize := defaultSchedulerSnapshotMGetChunkSize
 	writeChunkSize := defaultSchedulerSnapshotWriteChunkSize
 	if cfg != nil {
@@ -59,7 +59,7 @@ func ProvideSchedulerCache(rdb *redis.Client, cfg *config.Config) service.Schedu
 			writeChunkSize = cfg.Gateway.Scheduling.SnapshotWriteChunkSize
 		}
 	}
-	return newSchedulerCacheWithChunkSizes(rdb, mgetChunkSize, writeChunkSize)
+	return newSchedulerCacheWithChunkSizes(rdb, encryptor, mgetChunkSize, writeChunkSize)
 }
 
 // ProviderSet is the Wire provider set for all repositories
@@ -77,9 +77,11 @@ var ProviderSet = wire.NewSet(
 	NewAnnouncementReadRepository,
 	NewUsageLogRepository,
 	NewUsageBillingRepository,
-	NewUsageBillingOutboxRepository,
-	wire.Bind(new(service.UsageBillingOutboxRepository), new(*usageBillingOutboxRepository)),
-	wire.Bind(new(service.UsageBillingBindingValidator), new(*usageBillingOutboxRepository)),
+	NewDurableUsageBillingOutboxRepository,
+	wire.Bind(new(service.UsageBillingOutboxRepository), new(*durableUsageBillingOutboxRepository)),
+	wire.Bind(new(service.UsageBillingBindingValidator), new(*durableUsageBillingOutboxRepository)),
+	wire.Bind(new(service.UsageBillingAdmissionRepository), new(*durableUsageBillingOutboxRepository)),
+	wire.Bind(new(service.UsageBillingReconciliationRepository), new(*durableUsageBillingOutboxRepository)),
 	NewIdempotencyRepository,
 	NewUsageCleanupRepository,
 	NewDashboardAggregationRepository,
@@ -129,6 +131,7 @@ var ProviderSet = wire.NewSet(
 
 	// Encryptors
 	NewAESEncryptor,
+	NewAPIKeyProtector,
 
 	// Backup infrastructure
 	NewPgDumper,

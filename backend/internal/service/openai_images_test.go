@@ -859,6 +859,61 @@ func TestOpenAIGatewayServiceHandleImagesStream_TerminalZeroImagesIsAuthoritativ
 	require.Zero(t, imageCount)
 }
 
+func TestOpenAIGatewayServiceHandleImagesStream_RejectsOversizedSSELine(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interval int
+	}{{name: "synchronous"}, {name: "timed reader", interval: 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.UpstreamResponseReadMaxBytes = 64
+			cfg.Gateway.ImageStreamDataIntervalTimeout = tc.interval
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", 65) + "\n")),
+			}
+
+			_, _, _, err := (&OpenAIGatewayService{cfg: cfg}).
+				handleOpenAIImagesStreamingResponse(resp, c, time.Now())
+
+			require.Error(t, err)
+			require.True(t, errors.Is(err, ErrUpstreamResponseBodyTooLarge))
+			require.Empty(t, rec.Body.Bytes())
+		})
+	}
+}
+
+func TestOpenAIGatewayServiceHandleImagesOAuthStream_RejectsOversizedSSELine(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interval int
+	}{{name: "synchronous"}, {name: "timed reader", interval: 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.UpstreamResponseReadMaxBytes = 64
+			cfg.Gateway.ImageStreamDataIntervalTimeout = tc.interval
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", 65) + "\n")),
+			}
+
+			_, _, _, err := (&OpenAIGatewayService{cfg: cfg}).
+				handleOpenAIImagesOAuthStreamingResponse(resp, c, time.Now(), "b64_json", "image_generation", "gpt-image-2")
+
+			require.Error(t, err)
+			require.True(t, errors.Is(err, ErrUpstreamResponseBodyTooLarge))
+			require.Contains(t, rec.Body.String(), "event: error")
+			require.NotContains(t, rec.Body.String(), strings.Repeat("x", 65))
+		})
+	}
+}
+
 func TestOpenAIGatewayServiceForwardImages_APIKeyOutputAuditBlocksBeforeWrite(t *testing.T) {
 	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","response_format":"b64_json"}`)
 

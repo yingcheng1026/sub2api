@@ -54,6 +54,15 @@ func makeInstance(id int64, providerKey, supportedTypes, limits string) *dbent.P
 	}
 }
 
+func mustAggregateMethodLimits(t *testing.T, paymentType string, instances []*dbent.PaymentProviderInstance) MethodLimits {
+	t.Helper()
+	ml, err := pcAggregateMethodLimits(paymentType, instances)
+	if err != nil {
+		t.Fatalf("pcAggregateMethodLimits returned error: %v", err)
+	}
+	return ml
+}
+
 func TestPcAggregateMethodLimits(t *testing.T) {
 	t.Parallel()
 
@@ -61,7 +70,7 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay,wxpay",
 			`{"alipay":{"singleMin":2,"singleMax":14},"wxpay":{"singleMin":1,"singleMax":12}}`)
-		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst})
+		ml := mustAggregateMethodLimits(t, "alipay", []*dbent.PaymentProviderInstance{inst})
 		if ml.SingleMin != 2 || ml.SingleMax != 14 {
 			t.Fatalf("alipay limits = min:%v max:%v, want min:2 max:14", ml.SingleMin, ml.SingleMax)
 		}
@@ -73,7 +82,7 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 			`{"alipay":{"singleMin":5,"singleMax":100}}`)
 		inst2 := makeInstance(2, "easypay", "alipay,wxpay",
 			`{"alipay":{"singleMin":2,"singleMax":200}}`)
-		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst1, inst2})
+		ml := mustAggregateMethodLimits(t, "alipay", []*dbent.PaymentProviderInstance{inst1, inst2})
 		if ml.SingleMin != 2 {
 			t.Fatalf("SingleMin = %v, want 2 (lowest floor)", ml.SingleMin)
 		}
@@ -87,7 +96,7 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 		inst1 := makeInstance(1, "easypay", "wxpay",
 			`{"wxpay":{"singleMin":3,"singleMax":10}}`)
 		inst2 := makeInstance(2, "easypay", "wxpay", "") // no limits = unlimited
-		ml := pcAggregateMethodLimits("wxpay", []*dbent.PaymentProviderInstance{inst1, inst2})
+		ml := mustAggregateMethodLimits(t, "wxpay", []*dbent.PaymentProviderInstance{inst1, inst2})
 		if ml.SingleMin != 0 || ml.SingleMax != 0 {
 			t.Fatalf("limits = min:%v max:%v, want min:0 max:0 (unlimited)", ml.SingleMin, ml.SingleMax)
 		}
@@ -99,7 +108,7 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 			`{"alipay":{"singleMin":5,"singleMax":100}}`)
 		inst2 := makeInstance(2, "easypay", "alipay",
 			`{"alipay":{"singleMin":3,"singleMax":0}}`) // singleMax=0 = unlimited
-		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst1, inst2})
+		ml := mustAggregateMethodLimits(t, "alipay", []*dbent.PaymentProviderInstance{inst1, inst2})
 		if ml.SingleMin != 3 {
 			t.Fatalf("SingleMin = %v, want 3 (lowest floor)", ml.SingleMin)
 		}
@@ -110,18 +119,17 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 
 	t.Run("empty instances returns zeros", func(t *testing.T) {
 		t.Parallel()
-		ml := pcAggregateMethodLimits("alipay", nil)
+		ml := mustAggregateMethodLimits(t, "alipay", nil)
 		if ml.SingleMin != 0 || ml.SingleMax != 0 || ml.DailyLimit != 0 {
 			t.Fatalf("empty instances should return all zeros, got %+v", ml)
 		}
 	})
 
-	t.Run("invalid JSON treated as unlimited", func(t *testing.T) {
+	t.Run("invalid JSON fails closed", func(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay", `{invalid json}`)
-		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst})
-		if ml.SingleMin != 0 || ml.SingleMax != 0 {
-			t.Fatalf("invalid JSON should be treated as unlimited, got %+v", ml)
+		if _, err := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst}); err == nil {
+			t.Fatal("invalid JSON should return a fail-closed error")
 		}
 	})
 
@@ -129,7 +137,7 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay,wxpay",
 			`{"wxpay":{"singleMin":1,"singleMax":10}}`) // only wxpay, no alipay
-		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst})
+		ml := mustAggregateMethodLimits(t, "alipay", []*dbent.PaymentProviderInstance{inst})
 		if ml.SingleMin != 0 || ml.SingleMax != 0 {
 			t.Fatalf("missing type should be treated as unlimited, got %+v", ml)
 		}
@@ -141,7 +149,7 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 			`{"alipay":{"singleMin":1,"singleMax":100,"dailyLimit":500}}`)
 		inst2 := makeInstance(2, "easypay", "alipay",
 			`{"alipay":{"singleMin":2,"singleMax":200,"dailyLimit":1000}}`)
-		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst1, inst2})
+		ml := mustAggregateMethodLimits(t, "alipay", []*dbent.PaymentProviderInstance{inst1, inst2})
 		if ml.DailyLimit != 1000 {
 			t.Fatalf("DailyLimit = %v, want 1000 (highest cap)", ml.DailyLimit)
 		}
@@ -263,7 +271,10 @@ func TestPcInstanceTypeLimits(t *testing.T) {
 	t.Run("empty limits string returns false", func(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay", "")
-		_, ok := pcInstanceTypeLimits(inst, "alipay")
+		_, ok, err := pcInstanceTypeLimits(inst, "alipay")
+		if err != nil {
+			t.Fatalf("pcInstanceTypeLimits returned error: %v", err)
+		}
 		if ok {
 			t.Fatal("expected ok=false for empty limits")
 		}
@@ -273,7 +284,10 @@ func TestPcInstanceTypeLimits(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay",
 			`{"alipay":{"singleMin":2,"singleMax":14,"dailyLimit":500}}`)
-		cl, ok := pcInstanceTypeLimits(inst, "alipay")
+		cl, ok, err := pcInstanceTypeLimits(inst, "alipay")
+		if err != nil {
+			t.Fatalf("pcInstanceTypeLimits returned error: %v", err)
+		}
 		if !ok {
 			t.Fatal("expected ok=true")
 		}
@@ -286,18 +300,21 @@ func TestPcInstanceTypeLimits(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay",
 			`{"wxpay":{"singleMin":1}}`)
-		_, ok := pcInstanceTypeLimits(inst, "alipay")
+		_, ok, err := pcInstanceTypeLimits(inst, "alipay")
+		if err != nil {
+			t.Fatalf("pcInstanceTypeLimits returned error: %v", err)
+		}
 		if ok {
 			t.Fatal("expected ok=false for missing type")
 		}
 	})
 
-	t.Run("invalid JSON returns false", func(t *testing.T) {
+	t.Run("invalid JSON returns error", func(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay", `{bad json}`)
-		_, ok := pcInstanceTypeLimits(inst, "alipay")
-		if ok {
-			t.Fatal("expected ok=false for invalid JSON")
+		_, _, err := pcInstanceTypeLimits(inst, "alipay")
+		if err == nil {
+			t.Fatal("expected fail-closed error for invalid JSON")
 		}
 	})
 }
@@ -372,7 +389,9 @@ func TestGetAvailableMethodLimitsUsesConfiguredVisibleMethodSource(t *testing.T)
 				entClient: client,
 				settingRepo: &paymentConfigSettingRepoStub{
 					values: map[string]string{
-						SettingPaymentVisibleMethodAlipaySource: tt.sourceSetting,
+						SettingPaymentVisibleMethodAlipaySource:  tt.sourceSetting,
+						SettingPaymentVisibleMethodAlipayEnabled: "true",
+						SettingPaymentVisibleMethodWxpayEnabled:  "true",
 					},
 				},
 			}
@@ -439,8 +458,11 @@ func TestGetAvailableMethodLimitsPreservesLegacyCrossProviderBehaviorWhenVisible
 	require.NoError(t, err)
 
 	svc := &PaymentConfigService{
-		entClient:   client,
-		settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{}},
+		entClient: client,
+		settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{
+			SettingPaymentVisibleMethodAlipayEnabled: "true",
+			SettingPaymentVisibleMethodWxpayEnabled:  "true",
+		}},
 	}
 
 	resp, err := svc.GetAvailableMethodLimits(ctx)

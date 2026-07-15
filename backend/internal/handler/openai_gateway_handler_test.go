@@ -861,11 +861,12 @@ func newOpenAIPreflightHandlerTestFixtureWithMapping(
 	cfg.Default.RateMultiplier = 1
 	cfg.Security.URLAllowlist.Enabled = false
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Security.URLAllowlist.AllowPrivateHosts = true
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg)
 	gateway := service.NewOpenAIGatewayService(
 		accountRepo, nil, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCache, openAIPreflightHTTPUpstream{}, &service.DeferredService{},
-		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 	cache := &concurrencyCacheMock{
 		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
@@ -1074,12 +1075,12 @@ func TestOpenAIResponsesWebSocket_RejectsMessageIDAsPreviousResponseID(t *testin
 	require.Contains(t, strings.ToLower(closeErr.Reason), "previous_response_id")
 }
 
-func TestOpenAIResponsesWebSocket_PreviousResponseIDKindLoggedBeforeAcquireFailure(t *testing.T) {
+func TestOpenAIResponsesWebSocketAcquiresUserSlotBeforeUpgrade(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cache := &concurrencyCacheMock{
-		acquireUserSlotFn: func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
-			return false, errors.New("user slot unavailable")
+		acquireUserSlotFn: func(context.Context, int64, int, string) (bool, error) {
+			return false, errors.New("concurrency backend unavailable")
 		},
 	}
 	h := newOpenAIHandlerForPreviousResponseIDValidation(t, cache)
@@ -1087,28 +1088,30 @@ func TestOpenAIResponsesWebSocket_PreviousResponseIDKindLoggedBeforeAcquireFailu
 	defer wsServer.Close()
 
 	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
-	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http")+"/openai/v1/responses", nil)
+	clientConn, response, err := coderws.Dial(
+		dialCtx,
+		"ws"+strings.TrimPrefix(wsServer.URL, "http")+"/openai/v1/responses",
+		nil,
+	)
 	cancelDial()
-	require.NoError(t, err)
-	defer func() {
+	if clientConn != nil {
 		_ = clientConn.CloseNow()
-	}()
-
-	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
-	err = clientConn.Write(writeCtx, coderws.MessageText, []byte(
-		`{"type":"response.create","model":"gpt-5.1","stream":false,"previous_response_id":"resp_prev_123"}`,
-	))
-	cancelWrite()
-	require.NoError(t, err)
-
-	readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
-	_, _, err = clientConn.Read(readCtx)
-	cancelRead()
+	}
 	require.Error(t, err)
-	var closeErr coderws.CloseError
-	require.ErrorAs(t, err, &closeErr)
-	require.Equal(t, coderws.StatusInternalError, closeErr.Code)
-	require.Contains(t, strings.ToLower(closeErr.Reason), "failed to acquire user concurrency slot")
+	require.NotNil(t, response)
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+}
+
+func TestOpenAIWSIngressReadLimitHonorsSmallerConfiguredBodyLimit(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, openAIWSIngressMaxMessageBytes, openAIWSIngressReadLimit(nil))
+	require.Equal(t, int64(1024*1024), openAIWSIngressReadLimit(&config.Config{
+		Gateway: config.GatewayConfig{MaxBodySize: 1024 * 1024},
+	}))
+	require.Equal(t, openAIWSIngressMaxMessageBytes, openAIWSIngressReadLimit(&config.Config{
+		Gateway: config.GatewayConfig{MaxBodySize: 256 * 1024 * 1024},
+	}))
 }
 
 type contentModerationHandlerSettingRepo struct {
@@ -1174,6 +1177,27 @@ type contentModerationHandlerTestRepo struct {
 	logs []service.ContentModerationLog
 }
 
+type contentModerationHandlerTestEncryptor struct{}
+
+func (contentModerationHandlerTestEncryptor) Encrypt(plaintext string) (string, error) {
+	return "test:" + plaintext, nil
+}
+
+func (contentModerationHandlerTestEncryptor) Decrypt(ciphertext string) (string, error) {
+	return "", errors.New("legacy decrypt is disabled")
+}
+
+func (contentModerationHandlerTestEncryptor) EncryptForDomain(_ string, plaintext string) (string, error) {
+	return "test:" + plaintext, nil
+}
+
+func (contentModerationHandlerTestEncryptor) DecryptForDomain(_ string, ciphertext string) (string, error) {
+	if !strings.HasPrefix(ciphertext, "test:") {
+		return "", errors.New("invalid test ciphertext")
+	}
+	return strings.TrimPrefix(ciphertext, "test:"), nil
+}
+
 func (r *contentModerationHandlerTestRepo) CreateLog(ctx context.Context, log *service.ContentModerationLog) error {
 	if log != nil {
 		r.logs = append(r.logs, *log)
@@ -1203,14 +1227,14 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 	defer moderationServer.Close()
 
 	cfg := &service.ContentModerationConfig{
-		Enabled:      true,
-		Mode:         service.ContentModerationModePreBlock,
-		BaseURL:      moderationServer.URL,
-		Model:        "omni-moderation-latest",
-		APIKeys:      []string{"sk-test"},
-		SampleRate:   100,
-		AllGroups:    true,
-		BlockMessage: "内容审计测试阻断",
+		Enabled:          true,
+		Mode:             service.ContentModerationModePreBlock,
+		BaseURL:          moderationServer.URL,
+		Model:            "omni-moderation-latest",
+		EncryptedAPIKeys: []string{"test:sk-test"},
+		SampleRate:       100,
+		AllGroups:        true,
+		BlockMessage:     "内容审计测试阻断",
 	}
 	rawCfg, err := json.Marshal(cfg)
 	require.NoError(t, err)
@@ -1220,7 +1244,7 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 		service.SettingKeyRiskControlEnabled:      "true",
 		service.SettingKeyContentModerationConfig: string(rawCfg),
 	}}
-	moderationSvc := service.NewContentModerationService(
+	moderationSvc := service.NewContentModerationServiceWithEncryptor(
 		settingRepo,
 		repo,
 		nil,
@@ -1228,6 +1252,7 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 		nil,
 		nil,
 		nil,
+		contentModerationHandlerTestEncryptor{},
 	)
 	decision, err := moderationSvc.Check(context.Background(), service.ContentModerationCheckInput{
 		UserID:   1,
@@ -1245,7 +1270,11 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 		billingCacheService:      &service.BillingCacheService{},
 		apiKeyService:            &service.APIKeyService{},
 		contentModerationService: moderationSvc,
-		concurrencyHelper:        NewConcurrencyHelper(service.NewConcurrencyService(&concurrencyCacheMock{}), SSEPingFormatNone, time.Second),
+		concurrencyHelper: NewConcurrencyHelper(service.NewConcurrencyService(&concurrencyCacheMock{
+			acquireUserSlotFn: func(context.Context, int64, int, string) (bool, error) {
+				return true, nil
+			},
+		}), SSEPingFormatNone, time.Second),
 	}
 	wsServer := newOpenAIWSHandlerTestServer(t, h, middleware.AuthSubject{UserID: 1, Concurrency: 1})
 	defer wsServer.Close()
@@ -1619,6 +1648,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	cfg.Default.RateMultiplier = 1
 	cfg.Security.URLAllowlist.Enabled = false
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Security.URLAllowlist.AllowPrivateHosts = true
 	cfg.Gateway.OpenAIWS.Enabled = true
 	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
 	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
@@ -1665,6 +1695,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		nil,
 		nil,
 		channelSvc,
+		nil,
 		nil,
 		nil,
 		nil,

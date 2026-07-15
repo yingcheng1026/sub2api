@@ -77,7 +77,7 @@
             </p>
             <p class="mt-1 text-xs text-gray-400">
               {{ t('admin.channelMonitor.template.headersSummary', {
-                n: Object.keys(tpl.extra_headers || {}).length,
+                n: tpl.extra_header_count,
               }) }}
             </p>
           </div>
@@ -149,7 +149,19 @@
         />
       </div>
 
+      <div
+        v-if="editing !== 'new'"
+        class="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+      >
+        <p>{{ t('admin.channelMonitor.advanced.writeOnlyNotice') }}</p>
+        <label class="mt-2 flex cursor-pointer items-center gap-2 font-medium">
+          <input v-model="form.replace_request_customization" type="checkbox" />
+          {{ t('admin.channelMonitor.advanced.replaceExisting') }}
+        </label>
+      </div>
+
       <MonitorAdvancedRequestConfig
+        v-if="editing === 'new' || form.replace_request_customization"
         :extra-headers="form.extra_headers"
         :body-override-mode="form.body_override_mode"
         :body-override="form.body_override"
@@ -206,6 +218,8 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { adminAPI } from '@/api/admin'
+import { applyWriteOnlyTemplateCustomization } from '@/api/admin/channelMonitorWriteOnly'
+import type { UpdateParams as TemplateUpdateParams } from '@/api/admin/channelMonitorTemplate'
 import type {
   BodyOverrideMode,
   Provider,
@@ -267,6 +281,7 @@ interface TemplateForm {
   extra_headers: Record<string, string>
   body_override_mode: BodyOverrideMode
   body_override: Record<string, unknown> | null
+  replace_request_customization: boolean
 }
 
 const editing = ref<null | 'new' | number>(null) // null = list view; 'new' = create; <id> = edit
@@ -282,6 +297,7 @@ function emptyForm(provider: Provider): TemplateForm {
     extra_headers: {},
     body_override_mode: 'off',
     body_override: null,
+    replace_request_customization: false,
   }
 }
 
@@ -290,13 +306,16 @@ function loadForm(tpl: ChannelMonitorTemplate) {
   form.name = tpl.name
   form.provider = tpl.provider
   form.description = tpl.description
-  form.extra_headers = { ...(tpl.extra_headers || {}) }
-  form.body_override_mode = tpl.body_override_mode
-  form.body_override = tpl.body_override ? { ...tpl.body_override } : null
+  // 请求自定义字段不从 API 回显；默认保留原配置。
+  form.extra_headers = {}
+  form.body_override_mode = 'off'
+  form.body_override = null
+  form.replace_request_customization = false
 }
 
 function openCreateForm() {
   Object.assign(form, emptyForm(activeProvider.value))
+  form.replace_request_customization = true
   editing.value = 'new'
 }
 
@@ -353,13 +372,17 @@ async function handleSubmit() {
       })
       appStore.showSuccess(t('admin.channelMonitor.template.createSuccess'))
     } else if (typeof editing.value === 'number') {
-      await adminAPI.channelMonitorTemplate.update(editing.value, {
+      const baseUpdate: TemplateUpdateParams = {
         name: form.name.trim(),
         description: form.description.trim(),
-        extra_headers: form.extra_headers,
-        body_override_mode: form.body_override_mode,
-        body_override: form.body_override,
+      }
+      const update = applyWriteOnlyTemplateCustomization(baseUpdate, {
+        replace: form.replace_request_customization,
+        extraHeaders: form.extra_headers,
+        bodyOverrideMode: form.body_override_mode,
+        bodyOverride: form.body_override,
       })
+      await adminAPI.channelMonitorTemplate.update(editing.value, update)
       appStore.showSuccess(t('admin.channelMonitor.template.updateSuccess'))
     }
     await fetchTemplates()

@@ -21,11 +21,15 @@ import (
 )
 
 var (
-	ErrRedeemCodeNotFound  = infraerrors.NotFound("REDEEM_CODE_NOT_FOUND", "redeem code not found")
-	ErrRedeemCodeUsed      = infraerrors.Conflict("REDEEM_CODE_USED", "redeem code already used")
-	ErrInsufficientBalance = infraerrors.BadRequest("INSUFFICIENT_BALANCE", "insufficient balance")
-	ErrRedeemRateLimited   = infraerrors.TooManyRequests("REDEEM_RATE_LIMITED", "too many failed attempts, please try again later")
-	ErrRedeemCodeLocked    = infraerrors.Conflict("REDEEM_CODE_LOCKED", "redeem code is being processed, please try again")
+	ErrRedeemCodeNotFound    = infraerrors.NotFound("REDEEM_CODE_NOT_FOUND", "redeem code not found")
+	ErrRedeemCodeUsed        = infraerrors.Conflict("REDEEM_CODE_USED", "redeem code already used")
+	ErrInsufficientBalance   = infraerrors.BadRequest("INSUFFICIENT_BALANCE", "insufficient balance")
+	ErrRedeemRateLimited     = infraerrors.TooManyRequests("REDEEM_RATE_LIMITED", "too many failed attempts, please try again later")
+	ErrRedeemCodeLocked      = infraerrors.Conflict("REDEEM_CODE_LOCKED", "redeem code is being processed, please try again")
+	ErrRedeemCodeDeleteUsed  = infraerrors.Conflict("REDEEM_CODE_DELETE_USED", "cannot delete used redeem code")
+	ErrRedeemCodeDeleteState = infraerrors.Conflict("REDEEM_CODE_DELETE_INVALID_STATE", "redeem code cannot be deleted in its current state")
+	ErrRedeemCodeExpireUsed  = infraerrors.Conflict("REDEEM_CODE_EXPIRE_USED", "cannot expire used redeem code")
+	ErrRedeemCodeExpireState = infraerrors.Conflict("REDEEM_CODE_EXPIRE_INVALID_STATE", "redeem code cannot be expired in its current state")
 )
 
 const (
@@ -33,6 +37,13 @@ const (
 	redeemRateLimitDuration = time.Hour
 	redeemLockDuration      = 10 * time.Second // 锁超时时间，防止死锁
 )
+
+func validateNewRedeemCodeType(codeType string) error {
+	if codeType == RedeemTypeSubscription {
+		return infraerrors.BadRequest("MONTHLY_PLANS_RETIRED", "monthly redeem codes can no longer be created; use wallet credits instead")
+	}
+	return nil
+}
 
 type ctxKeySkipRedeemAffiliate struct{}
 
@@ -58,7 +69,8 @@ type RedeemCodeRepository interface {
 	GetByID(ctx context.Context, id int64) (*RedeemCode, error)
 	GetByCode(ctx context.Context, code string) (*RedeemCode, error)
 	Update(ctx context.Context, code *RedeemCode) error
-	Delete(ctx context.Context, id int64) error
+	DeleteIfUnused(ctx context.Context, id int64) (bool, error)
+	ExpireIfUnused(ctx context.Context, id int64) (bool, error)
 	Use(ctx context.Context, id, userID int64) error
 
 	List(ctx context.Context, params pagination.PaginationParams) ([]RedeemCode, *pagination.PaginationResult, error)
@@ -162,6 +174,9 @@ func (s *RedeemService) GenerateCodes(ctx context.Context, req GenerateCodesRequ
 	if codeType == "" {
 		codeType = RedeemTypeBalance
 	}
+	if err := validateNewRedeemCodeType(codeType); err != nil {
+		return nil, err
+	}
 
 	// 邀请码类型的 value 设为 0
 	value := req.Value
@@ -205,6 +220,9 @@ func (s *RedeemService) CreateCode(ctx context.Context, code *RedeemCode) error 
 	}
 	if code.Type == "" {
 		code.Type = RedeemTypeBalance
+	}
+	if err := validateNewRedeemCodeType(code.Type); err != nil {
+		return err
 	}
 	if code.Type != RedeemTypeInvitation && code.Value == 0 {
 		return errors.New("value must not be zero")
@@ -525,11 +543,9 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 		if s.billingCacheService == nil {
 			return
 		}
-		go func() {
-			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.billingCacheService.InvalidateUserBalance(cacheCtx, userID)
-		}()
+		invalidateBillingCacheAfterCommit(ctx, "redeem balance", func(cacheCtx context.Context) error {
+			return s.billingCacheService.InvalidateUserBalance(cacheCtx, userID)
+		})
 	case RedeemTypeConcurrency:
 		if s.authCacheInvalidator != nil {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
@@ -546,11 +562,9 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 		}
 		if redeemCode.GroupID != nil {
 			groupID := *redeemCode.GroupID
-			go func() {
-				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-			}()
+			invalidateBillingCacheAfterCommit(ctx, "redeem subscription", func(cacheCtx context.Context) error {
+				return s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
+			})
 		}
 	}
 }
@@ -657,22 +671,31 @@ func (s *RedeemService) List(ctx context.Context, params pagination.PaginationPa
 
 // Delete 删除兑换码（管理员功能）
 func (s *RedeemService) Delete(ctx context.Context, id int64) error {
-	// 检查兑换码是否存在
-	code, err := s.redeemRepo.GetByID(ctx, id)
-	if err != nil {
-		return fmt.Errorf("get redeem code: %w", err)
-	}
-
-	// 不允许删除已使用的兑换码
-	if code.IsUsed() {
-		return infraerrors.Conflict("REDEEM_CODE_DELETE_USED", "cannot delete used redeem code")
-	}
-
-	if err := s.redeemRepo.Delete(ctx, id); err != nil {
+	if _, err := deleteRedeemCodeIfUnused(ctx, s.redeemRepo, id); err != nil {
 		return fmt.Errorf("delete redeem code: %w", err)
 	}
-
 	return nil
+}
+
+func deleteRedeemCodeIfUnused(ctx context.Context, repo RedeemCodeRepository, id int64) (bool, error) {
+	deleted, err := repo.DeleteIfUnused(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if deleted {
+		return true, nil
+	}
+	current, err := repo.GetByID(ctx, id)
+	if errors.Is(err, ErrRedeemCodeNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.IsUsed() {
+		return false, ErrRedeemCodeDeleteUsed
+	}
+	return false, ErrRedeemCodeDeleteState
 }
 
 // GetStats 获取兑换码统计信息

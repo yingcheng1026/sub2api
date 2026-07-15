@@ -203,10 +203,12 @@ func ProvideUsageBillingOutboxProcessor(
 	return NewUsageBillingOutboxProcessor(outboxRepo, bindingValidator, billingRepo, replayWriter, replayFinalizer)
 }
 
-func ProvideUsageBillingOutboxWorker(processor *UsageBillingOutboxProcessor) *UsageBillingOutboxWorker {
+func ProvideUsageBillingOutboxWorker(processor *UsageBillingOutboxProcessor) (*UsageBillingOutboxWorker, error) {
 	worker := NewUsageBillingOutboxWorker(processor)
-	worker.Start()
-	return worker
+	if err := worker.Start(); err != nil {
+		return nil, err
+	}
+	return worker, nil
 }
 
 func ProvideModelRouterGroupRepository(groupRepo GroupRepository) ModelRouterGroupRepository {
@@ -495,9 +497,10 @@ func ProvideContentModerationService(
 	userRepo UserRepository,
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	emailService *EmailService,
+	secretEncryptor SecretEncryptor,
 	abuseRiskService *HFCAbuseRiskService,
 ) *ContentModerationService {
-	svc := NewContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService)
+	svc := NewContentModerationServiceWithEncryptor(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, secretEncryptor)
 	svc.SetHFCAbuseRiskRecorder(abuseRiskService)
 	return svc
 }
@@ -545,6 +548,7 @@ var ProviderSet = wire.NewSet(
 	NewUsageBillingReplayFinalizer,
 	ProvideUsageBillingOutboxProcessor,
 	ProvideUsageBillingOutboxWorker,
+	NewUsageBillingReconciliationService,
 	NewAnnouncementService,
 	NewAdminService,
 	NewGatewayService,
@@ -586,7 +590,6 @@ var ProviderSet = wire.NewSet(
 	ProvideUserMessageQueueService,
 	NewUsageRecordWorkerPool,
 	ProvideSchedulerSnapshotService,
-	NewIdentityService,
 	NewCRSSyncService,
 	ProvideUpdateService,
 	ProvideTokenRefreshService,

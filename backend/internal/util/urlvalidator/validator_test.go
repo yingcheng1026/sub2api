@@ -1,6 +1,11 @@
 package urlvalidator
 
-import "testing"
+import (
+	"context"
+	"net"
+	"strings"
+	"testing"
+)
 
 func TestValidateURLFormat(t *testing.T) {
 	if _, err := ValidateURLFormat("", false); err == nil {
@@ -71,5 +76,41 @@ func TestValidateHTTPURL(t *testing.T) {
 	}
 	if _, err := ValidateHTTPURL("https://localhost", false, ValidationOptions{AllowPrivate: false}); err == nil {
 		t.Fatalf("expected localhost to be blocked when allow_private_hosts is false")
+	}
+	if _, err := ValidateHTTPURL("https://user:secret@example.com", false, ValidationOptions{}); err == nil {
+		t.Fatal("expected URL userinfo to be rejected")
+	} else if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("userinfo secret leaked in validation error: %v", err)
+	}
+	if _, err := ValidateHTTPURL("https://user:secret@%zz", false, ValidationOptions{}); err == nil {
+		t.Fatal("expected malformed URL to be rejected")
+	} else if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("malformed URL secret leaked in validation error: %v", err)
+	}
+}
+
+func TestValidateResolvedAddressesRejectsNonPublicNetworks(t *testing.T) {
+	for _, raw := range []string{
+		"127.0.0.1", "10.0.0.1", "169.254.169.254", "100.64.0.1",
+		"198.18.0.1", "192.0.2.1", "0.0.0.0", "::1", "fc00::1", "2001:db8::1",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if err := validateResolvedAddresses([]net.IP{net.ParseIP(raw)}); err == nil {
+				t.Fatalf("non-public address %s was accepted", raw)
+			}
+		})
+	}
+	if err := validateResolvedAddresses([]net.IP{net.ParseIP("8.8.8.8"), net.ParseIP("2606:4700:4700::1111")}); err != nil {
+		t.Fatalf("public addresses rejected: %v", err)
+	}
+	if err := validateResolvedAddresses([]net.IP{net.ParseIP("8.8.8.8"), net.ParseIP("127.0.0.1")}); err == nil {
+		t.Fatal("mixed public/private DNS answer was accepted")
+	}
+}
+
+func TestSafeDialContextRejectsLoopbackBeforeConnect(t *testing.T) {
+	_, err := NewSafeDialContext(false)(context.Background(), "tcp", "127.0.0.1:1")
+	if err == nil || !strings.Contains(err.Error(), "not publicly routable") {
+		t.Fatalf("safe dial error = %v", err)
 	}
 }

@@ -2,15 +2,19 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/group"
+	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplangroup"
+	entuser "github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 type userSubscriptionRepository struct {
@@ -91,6 +95,18 @@ func (r *userSubscriptionRepository) GetByUserIDAndGroupID(ctx context.Context, 
 	return userSubscriptionEntityToService(m), nil
 }
 
+// LockUserForSubscriptionAssignment serializes all subscription entitlement
+// mutations for one user. The caller must already be in a transaction; the
+// service only invokes this method when an ent transaction is present.
+func (r *userSubscriptionRepository) LockUserForSubscriptionAssignment(ctx context.Context, userID int64) error {
+	client := clientFromContext(ctx, r.client)
+	_, err := client.User.Query().
+		Where(entuser.IDEQ(userID)).
+		ForUpdate().
+		OnlyID(ctx)
+	return err
+}
+
 func (r *userSubscriptionRepository) GetActiveByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
 	client := clientFromContext(ctx, r.client)
 	m, err := client.UserSubscription.Query().
@@ -116,11 +132,32 @@ func (r *userSubscriptionRepository) GetActiveWalletByUserID(ctx context.Context
 	m, err := client.UserSubscription.Query().
 		Where(
 			usersubscription.UserIDEQ(userID),
+			usersubscription.GroupIDIsNil(),
 			usersubscription.WalletBalanceUsdNotNil(),
 			usersubscription.StatusEQ(service.SubscriptionStatusActive),
 			usersubscription.ExpiresAtGT(time.Now()),
 		).
 		Order(dbent.Asc(usersubscription.FieldExpiresAt), dbent.Asc(usersubscription.FieldID)).
+		WithGroup().
+		First(ctx)
+	if err != nil {
+		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
+	}
+	return userSubscriptionEntityToService(m), nil
+}
+
+func (r *userSubscriptionRepository) GetActiveCreditsWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
+	client := clientFromContext(ctx, r.client)
+	creditsThreshold := service.MaxExpiresAt.Add(-24 * time.Hour)
+	m, err := client.UserSubscription.Query().
+		Where(
+			usersubscription.UserIDEQ(userID),
+			usersubscription.GroupIDIsNil(),
+			usersubscription.WalletBalanceUsdNotNil(),
+			usersubscription.StatusEQ(service.SubscriptionStatusActive),
+			usersubscription.ExpiresAtGTE(creditsThreshold),
+		).
+		Order(dbent.Asc(usersubscription.FieldID)).
 		WithGroup().
 		First(ctx)
 	if err != nil {
@@ -137,6 +174,11 @@ func (r *userSubscriptionRepository) GetActiveWalletByUserID(ctx context.Context
 // 见 docs/plans/2026-05-16-wallet-v4-group-switch-billing-fix.md §4.1。
 func (r *userSubscriptionRepository) GetActiveByPlanCoveringGroup(ctx context.Context, userID, targetGroupID int64) (*service.UserSubscription, error) {
 	client := clientFromContext(ctx, r.client)
+	if snapshotted, err := r.getActiveSnapshotGrantCoveringGroup(ctx, client, userID, targetGroupID); err != nil {
+		return nil, err
+	} else if snapshotted != nil {
+		return snapshotted, nil
+	}
 
 	primaryGroupIDs, err := r.coveringSubscriptionGroupIDs(ctx, client, targetGroupID)
 	if err != nil {
@@ -146,7 +188,7 @@ func (r *userSubscriptionRepository) GetActiveByPlanCoveringGroup(ctx context.Co
 		return nil, service.ErrSubscriptionNotFound
 	}
 
-	m, err := client.UserSubscription.Query().
+	models, err := client.UserSubscription.Query().
 		Where(
 			usersubscription.UserIDEQ(userID),
 			usersubscription.StatusEQ(service.SubscriptionStatusActive),
@@ -156,11 +198,161 @@ func (r *userSubscriptionRepository) GetActiveByPlanCoveringGroup(ctx context.Co
 		).
 		WithGroup().
 		Order(dbent.Desc(usersubscription.FieldExpiresAt)).
-		First(ctx)
+		All(ctx)
+	if err != nil {
+		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
+	}
+	for _, model := range models {
+		hasGrant, grantErr := userSubscriptionHasAttachedSnapshotGrant(ctx, client, model.ID)
+		if grantErr != nil {
+			return nil, grantErr
+		}
+		if hasGrant {
+			continue
+		}
+		if model.GroupID == nil {
+			continue
+		}
+		covered, coverageErr := legacySubscriptionAnchorCoversGroupUnambiguously(ctx, client, *model.GroupID, targetGroupID)
+		if coverageErr != nil {
+			return nil, coverageErr
+		}
+		if !covered {
+			continue
+		}
+		return userSubscriptionEntityToService(model), nil
+	}
+	return nil, service.ErrSubscriptionNotFound
+}
+
+// legacySubscriptionAnchorCoversGroupUnambiguously grants an unsnapshotted
+// subscription only when every currently identifiable subscription plan using
+// the same anchor covers the requested group. A missing plan or divergent
+// shared-anchor coverage is ambiguous historical evidence and fails closed.
+func legacySubscriptionAnchorCoversGroupUnambiguously(ctx context.Context, client *dbent.Client, anchorGroupID, targetGroupID int64) (bool, error) {
+	rows, err := client.QueryContext(ctx, `
+		WITH anchor_plans AS (
+			SELECT plan.id
+			FROM subscription_plans plan
+			JOIN groups anchor_group
+			  ON anchor_group.id = plan.group_id
+			 AND anchor_group.subscription_type = $3
+			 AND anchor_group.deleted_at IS NULL
+			WHERE plan.plan_type = $4
+			  AND plan.group_id = $1
+
+			UNION
+
+			SELECT plan.id
+			FROM subscription_plans plan
+			JOIN subscription_plan_groups anchor
+			  ON anchor.plan_id = plan.id
+			 AND anchor.group_id = $1
+			JOIN groups anchor_group
+			  ON anchor_group.id = anchor.group_id
+			 AND anchor_group.subscription_type = $3
+			 AND anchor_group.deleted_at IS NULL
+			WHERE plan.plan_type = $4
+			  AND plan.group_id IS NULL
+		)
+		SELECT EXISTS (SELECT 1 FROM anchor_plans)
+		   AND NOT EXISTS (
+			SELECT 1
+			FROM anchor_plans plan
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM subscription_plan_groups target
+				WHERE target.plan_id = plan.id
+				  AND target.group_id = $2
+			)
+		   )
+	`, anchorGroupID, targetGroupID, service.SubscriptionTypeSubscription, service.PlanTypeSubscription)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return false, err
+		}
+		return false, errors.New("legacy subscription anchor coverage query returned no row")
+	}
+	var covered bool
+	if err := rows.Scan(&covered); err != nil {
+		return false, err
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return covered, nil
+}
+
+func (r *userSubscriptionRepository) getActiveSnapshotGrantCoveringGroup(ctx context.Context, client *dbent.Client, userID, targetGroupID int64) (*service.UserSubscription, error) {
+	var subscriptionID int64
+	rows, err := client.QueryContext(ctx, `
+		SELECT us.id
+		FROM user_subscriptions us
+		JOIN subscription_plan_fulfillment_snapshots grant_snapshot
+		  ON grant_snapshot.user_subscription_id = us.id
+		WHERE us.user_id = $1
+		  AND us.deleted_at IS NULL
+		  AND us.status = $2
+		  AND us.expires_at > NOW()
+		  AND us.wallet_balance_usd IS NULL
+		  AND grant_snapshot.grant_starts_at <= NOW()
+		  AND grant_snapshot.grant_expires_at > NOW()
+		  AND grant_snapshot.snapshot->'covered_group_ids' @> jsonb_build_array($3::bigint)
+		ORDER BY grant_snapshot.grant_expires_at DESC, grant_snapshot.payment_order_id DESC
+		LIMIT 1
+	`, userID, service.SubscriptionStatusActive, targetGroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
+	}
+	if err := rows.Scan(&subscriptionID); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	m, err := client.UserSubscription.Query().
+		Where(usersubscription.IDEQ(subscriptionID)).
+		WithGroup().
+		Only(ctx)
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
 	}
 	return userSubscriptionEntityToService(m), nil
+}
+
+func userSubscriptionHasAttachedSnapshotGrant(ctx context.Context, client *dbent.Client, subscriptionID int64) (bool, error) {
+	var exists bool
+	rows, err := client.QueryContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM subscription_plan_fulfillment_snapshots
+			WHERE user_subscription_id = $1
+			  AND grant_starts_at IS NOT NULL
+			  AND grant_expires_at IS NOT NULL
+		)
+	`, subscriptionID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return false, nil
+	}
+	if err := rows.Scan(&exists); err != nil {
+		return false, err
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func (r *userSubscriptionRepository) coveringSubscriptionGroupIDs(ctx context.Context, client *dbent.Client, targetGroupID int64) ([]int64, error) {
@@ -282,6 +474,18 @@ func (r *userSubscriptionRepository) Delete(ctx context.Context, id int64) error
 	// Match GORM semantics: deleting a missing row is not an error.
 	client := clientFromContext(ctx, r.client)
 	_, err := client.UserSubscription.Delete().Where(usersubscription.IDEQ(id)).Exec(ctx)
+	return translateWalletSubscriptionDeleteError(err)
+}
+
+func translateWalletSubscriptionDeleteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pq.Error
+	if errors.As(err, &pgErr) && pgErr != nil && pgErr.Code == "23514" &&
+		pgErr.Constraint == "hfc_wallet_open_admission_revoke" {
+		return service.ErrSubscriptionUsageBillingInFlight.WithCause(err)
+	}
 	return err
 }
 
@@ -454,6 +658,51 @@ func (r *userSubscriptionRepository) ActivateWindows(ctx context.Context, id int
 		SetMonthlyWindowStart(start).
 		Save(ctx)
 	return translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
+}
+
+func (r *userSubscriptionRepository) AdvanceUsageWindow(ctx context.Context, id int64, advance service.SubscriptionUsageWindowAdvance) (bool, error) {
+	client := clientFromContext(ctx, r.client)
+	update := client.UserSubscription.Update().Where(
+		usersubscription.IDEQ(id),
+		usersubscription.DeletedAtIsNil(),
+	)
+
+	switch advance.Window {
+	case service.SubscriptionUsageWindowDaily:
+		update.Where(subscriptionWindowStartPredicate(advance.ExpectedStart, usersubscription.DailyWindowStartIsNil, usersubscription.DailyWindowStartEQ)).
+			SetDailyWindowStart(advance.NewStart)
+		if advance.ResetUsage {
+			update.SetDailyUsageUsd(0)
+		}
+	case service.SubscriptionUsageWindowWeekly:
+		update.Where(subscriptionWindowStartPredicate(advance.ExpectedStart, usersubscription.WeeklyWindowStartIsNil, usersubscription.WeeklyWindowStartEQ)).
+			SetWeeklyWindowStart(advance.NewStart)
+		if advance.ResetUsage {
+			update.SetWeeklyUsageUsd(0)
+		}
+	case service.SubscriptionUsageWindowMonthly:
+		update.Where(subscriptionWindowStartPredicate(advance.ExpectedStart, usersubscription.MonthlyWindowStartIsNil, usersubscription.MonthlyWindowStartEQ)).
+			SetMonthlyWindowStart(advance.NewStart)
+		if advance.ResetUsage {
+			update.SetMonthlyUsageUsd(0)
+		}
+	default:
+		return false, service.ErrInvalidInput
+	}
+
+	affected, err := update.Save(ctx)
+	return affected == 1, err
+}
+
+func subscriptionWindowStartPredicate(
+	expected *time.Time,
+	isNil func() predicate.UserSubscription,
+	equals func(time.Time) predicate.UserSubscription,
+) predicate.UserSubscription {
+	if expected == nil {
+		return isNil()
+	}
+	return equals(*expected)
 }
 
 func (r *userSubscriptionRepository) ResetDailyUsage(ctx context.Context, id int64, newWindowStart time.Time) error {

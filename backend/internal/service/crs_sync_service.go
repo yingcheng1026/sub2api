@@ -198,26 +198,27 @@ func (s *CRSSyncService) fetchCRSExport(ctx context.Context, baseURL, username, 
 		return nil, errors.New("config is not available")
 	}
 	normalizedURL := strings.TrimSpace(baseURL)
+	allowedHosts := []string(nil)
 	if s.cfg.Security.URLAllowlist.Enabled {
-		normalized, err := normalizeBaseURL(normalizedURL, s.cfg.Security.URLAllowlist.CRSHosts, s.cfg.Security.URLAllowlist.AllowPrivateHosts)
-		if err != nil {
-			return nil, err
-		}
-		normalizedURL = normalized
-	} else {
-		normalized, err := urlvalidator.ValidateURLFormat(normalizedURL, s.cfg.Security.URLAllowlist.AllowInsecureHTTP)
-		if err != nil {
-			return nil, fmt.Errorf("invalid base_url: %w", err)
-		}
-		normalizedURL = normalized
+		allowedHosts = s.cfg.Security.URLAllowlist.CRSHosts
 	}
+	normalized, err := normalizeBaseURL(
+		normalizedURL,
+		allowedHosts,
+		s.cfg.Security.URLAllowlist.Enabled,
+		s.cfg.Security.URLAllowlist.AllowPrivateHosts,
+	)
+	if err != nil {
+		return nil, err
+	}
+	normalizedURL = normalized
 	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
 		return nil, errors.New("username and password are required")
 	}
 
 	client, err := httpclient.GetClient(httpclient.Options{
 		Timeout:            20 * time.Second,
-		ValidateResolvedIP: s.cfg.Security.URLAllowlist.Enabled,
+		ValidateResolvedIP: true,
 		AllowPrivateHosts:  s.cfg.Security.URLAllowlist.AllowPrivateHosts,
 	})
 	if err != nil {
@@ -1119,9 +1120,7 @@ func mapCRSStatus(isActive bool, status string) string {
 	return "active"
 }
 
-func normalizeBaseURL(raw string, allowlist []string, allowPrivate bool) (string, error) {
-	// 当 allowlist 为空时，不强制要求白名单（只进行基本的 URL 和 SSRF 验证）
-	requireAllowlist := len(allowlist) > 0
+func normalizeBaseURL(raw string, allowlist []string, requireAllowlist, allowPrivate bool) (string, error) {
 	normalized, err := urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
 		AllowedHosts:     allowlist,
 		RequireAllowlist: requireAllowlist,

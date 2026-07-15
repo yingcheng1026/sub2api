@@ -262,6 +262,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropicWithOptions(
 	if err != nil {
 		return nil, err
 	}
+	setOpenAIUsageBillingReservationBody(opts.UsageBilling, responsesBody)
+	if err := s.prepareOpenAIForwardUsageBilling(ctx, account, billingIdentity, opts); err != nil {
+		return nil, err
+	}
 
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
@@ -681,10 +685,7 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	streamInterval := time.Duration(0)
@@ -785,7 +786,13 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 				continue
 			}
 
-			acc.ProcessEvent(&event)
+			if err := acc.ProcessEvent(&event); err != nil {
+				logger.L().Warn(logPrefix+": compatibility response limit exceeded",
+					zap.Error(err),
+					zap.String("request_id", requestID),
+				)
+				return nil, usage, acc, err
+			}
 
 			if isOpenAICompatResponsesTerminalEvent(event.Type) && event.Response != nil {
 				if event.Response.Usage != nil {
@@ -849,10 +856,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	const precommitMaxBytes = 64 * 1024
 
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	streamInterval := time.Duration(0)

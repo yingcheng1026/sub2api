@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"testing"
 
@@ -19,6 +20,8 @@ type userGroupRateRepoStubForGroupRate struct {
 
 	deletedGroupIDs  []int64
 	deleteByGroupErr error
+	clearRPMGroupIDs []int64
+	clearRPMErr      error
 
 	syncedGroupID int64
 	syncedEntries []GroupRateMultiplierInput
@@ -27,6 +30,11 @@ type userGroupRateRepoStubForGroupRate struct {
 	rpmSyncedGroupID int64
 	rpmSyncedEntries []GroupRPMOverrideInput
 	rpmSyncErr       error
+
+	userRatesSynced bool
+	userRateUserID  int64
+	userRates       map[int64]*float64
+	userRateErr     error
 }
 
 func (s *userGroupRateRepoStubForGroupRate) GetByUserID(_ context.Context, _ int64) (map[int64]float64, error) {
@@ -48,8 +56,11 @@ func (s *userGroupRateRepoStubForGroupRate) GetByGroupID(_ context.Context, grou
 	return s.getByGroupIDData[groupID], nil
 }
 
-func (s *userGroupRateRepoStubForGroupRate) SyncUserGroupRates(_ context.Context, _ int64, _ map[int64]*float64) error {
-	panic("unexpected SyncUserGroupRates call")
+func (s *userGroupRateRepoStubForGroupRate) SyncUserGroupRates(_ context.Context, userID int64, rates map[int64]*float64) error {
+	s.userRatesSynced = true
+	s.userRateUserID = userID
+	s.userRates = rates
+	return s.userRateErr
 }
 
 func (s *userGroupRateRepoStubForGroupRate) SyncGroupRateMultipliers(_ context.Context, groupID int64, entries []GroupRateMultiplierInput) error {
@@ -64,8 +75,9 @@ func (s *userGroupRateRepoStubForGroupRate) SyncGroupRPMOverrides(_ context.Cont
 	return s.rpmSyncErr
 }
 
-func (s *userGroupRateRepoStubForGroupRate) ClearGroupRPMOverrides(_ context.Context, _ int64) error {
-	panic("unexpected ClearGroupRPMOverrides call")
+func (s *userGroupRateRepoStubForGroupRate) ClearGroupRPMOverrides(_ context.Context, groupID int64) error {
+	s.clearRPMGroupIDs = append(s.clearRPMGroupIDs, groupID)
+	return s.clearRPMErr
 }
 
 func (s *userGroupRateRepoStubForGroupRate) DeleteByGroupID(_ context.Context, groupID int64) error {
@@ -133,31 +145,33 @@ func TestAdminService_GetGroupRateMultipliers(t *testing.T) {
 }
 
 func TestAdminService_ClearGroupRateMultipliers(t *testing.T) {
-	t.Run("deletes by group ID", func(t *testing.T) {
+	t.Run("clears only rate entries through the atomic sync path", func(t *testing.T) {
 		repo := &userGroupRateRepoStubForGroupRate{}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
 
 		err := svc.ClearGroupRateMultipliers(context.Background(), 42)
 		require.NoError(t, err)
-		require.Equal(t, []int64{42}, repo.deletedGroupIDs)
+		require.Equal(t, int64(42), repo.syncedGroupID)
+		require.Empty(t, repo.syncedEntries)
+		require.Empty(t, repo.deletedGroupIDs, "clearing rates must preserve RPM overrides")
 	})
 
-	t.Run("returns nil when repo is nil", func(t *testing.T) {
+	t.Run("fails closed when repo is nil", func(t *testing.T) {
 		svc := &adminServiceImpl{userGroupRateRepo: nil}
 
 		err := svc.ClearGroupRateMultipliers(context.Background(), 42)
-		require.NoError(t, err)
+		require.Error(t, err)
 	})
 
 	t.Run("propagates repo error", func(t *testing.T) {
 		repo := &userGroupRateRepoStubForGroupRate{
-			deleteByGroupErr: errors.New("delete failed"),
+			syncGroupErr: errors.New("clear failed"),
 		}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
 
 		err := svc.ClearGroupRateMultipliers(context.Background(), 42)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "delete failed")
+		require.Contains(t, err.Error(), "clear failed")
 	})
 }
 
@@ -176,11 +190,11 @@ func TestAdminService_BatchSetGroupRateMultipliers(t *testing.T) {
 		require.Equal(t, entries, repo.syncedEntries)
 	})
 
-	t.Run("returns nil when repo is nil", func(t *testing.T) {
+	t.Run("fails closed when repo is nil", func(t *testing.T) {
 		svc := &adminServiceImpl{userGroupRateRepo: nil}
 
 		err := svc.BatchSetGroupRateMultipliers(context.Background(), 10, nil)
-		require.NoError(t, err)
+		require.Error(t, err)
 	})
 
 	t.Run("propagates repo error", func(t *testing.T) {
@@ -210,6 +224,16 @@ func TestAdminService_BatchSetGroupRPMOverrides(t *testing.T) {
 		require.Equal(t, entries, repo.rpmSyncedEntries)
 	})
 
+	t.Run("fails closed when repo is nil", func(t *testing.T) {
+		override := 20
+		svc := &adminServiceImpl{}
+
+		err := svc.BatchSetGroupRPMOverrides(context.Background(), 10, []GroupRPMOverrideInput{
+			{UserID: 2, RPMOverride: &override},
+		})
+		require.Error(t, err)
+	})
+
 	t.Run("rejects negative override as bad request", func(t *testing.T) {
 		repo := &userGroupRateRepoStubForGroupRate{}
 		svc := &adminServiceImpl{userGroupRateRepo: repo}
@@ -221,5 +245,36 @@ func TestAdminService_BatchSetGroupRPMOverrides(t *testing.T) {
 		require.Error(t, err)
 		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
 		require.Zero(t, repo.rpmSyncedGroupID)
+	})
+
+	t.Run("rejects override that cannot fit PostgreSQL integer", func(t *testing.T) {
+		repo := &userGroupRateRepoStubForGroupRate{}
+		svc := &adminServiceImpl{userGroupRateRepo: repo}
+		tooLarge := int(math.MaxInt32) + 1
+
+		err := svc.BatchSetGroupRPMOverrides(context.Background(), 10, []GroupRPMOverrideInput{
+			{UserID: 2, RPMOverride: &tooLarge},
+		})
+		require.Error(t, err)
+		require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+		require.Zero(t, repo.rpmSyncedGroupID)
+	})
+}
+
+func TestAdminService_ClearGroupRPMOverrides(t *testing.T) {
+	t.Run("clears through repository", func(t *testing.T) {
+		repo := &userGroupRateRepoStubForGroupRate{}
+		svc := &adminServiceImpl{userGroupRateRepo: repo}
+
+		err := svc.ClearGroupRPMOverrides(context.Background(), 10)
+		require.NoError(t, err)
+		require.Equal(t, []int64{10}, repo.clearRPMGroupIDs)
+	})
+
+	t.Run("fails closed when repo is nil", func(t *testing.T) {
+		svc := &adminServiceImpl{}
+
+		err := svc.ClearGroupRPMOverrides(context.Background(), 10)
+		require.Error(t, err)
 	})
 }

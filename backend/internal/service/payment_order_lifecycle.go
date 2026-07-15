@@ -25,6 +25,7 @@ const (
 	rateLimitUnitHour          = "hour"
 	rateLimitModeFixed         = "fixed"
 	checkPaidResultAlreadyPaid = "already_paid"
+	checkPaidResultNotPaid     = "not_paid"
 	checkPaidResultCancelled   = "cancelled"
 )
 
@@ -117,25 +118,49 @@ func (s *PaymentService) AdminCancelOrder(ctx context.Context, orderID int64) (s
 
 func (s *PaymentService) cancelCore(ctx context.Context, o *dbent.PaymentOrder, fs, op, ad string) (string, error) {
 	if o.PaymentTradeNo != "" || o.PaymentType != "" {
-		if s.checkPaid(ctx, o) == checkPaidResultAlreadyPaid {
+		paymentStatus := s.queryAndFulfillPaidOrder(ctx, o)
+		if paymentStatus == checkPaidResultAlreadyPaid {
 			return checkPaidResultAlreadyPaid, nil
+		}
+		if paymentStatus != checkPaidResultNotPaid {
+			return "", infraerrors.ServiceUnavailable(
+				"PAYMENT_STATUS_UNAVAILABLE",
+				"payment status could not be confirmed; please retry before cancelling",
+			)
+		}
+		if err := s.cancelProviderPayment(ctx, o); err != nil {
+			return "", err
 		}
 	}
 	c, err := s.entClient.PaymentOrder.Update().Where(paymentorder.IDEQ(o.ID), paymentorder.StatusEQ(OrderStatusPending)).SetStatus(fs).Save(ctx)
 	if err != nil {
 		return "", fmt.Errorf("update order status: %w", err)
 	}
-	if c > 0 {
-		auditAction := "ORDER_CANCELLED"
-		if fs == OrderStatusExpired {
-			auditAction = "ORDER_EXPIRED"
+	if c == 0 {
+		current, reloadErr := s.entClient.PaymentOrder.Get(ctx, o.ID)
+		if reloadErr != nil {
+			return "", fmt.Errorf("reload order after cancellation race: %w", reloadErr)
 		}
-		s.writeAuditLog(ctx, o.ID, auditAction, op, map[string]any{"detail": ad})
+		if current.PaidAt != nil || current.Status == OrderStatusPaid || current.Status == OrderStatusRecharging || current.Status == OrderStatusCompleted {
+			return checkPaidResultAlreadyPaid, nil
+		}
+		if current.Status == OrderStatusCancelled || current.Status == OrderStatusExpired || current.Status == fs {
+			return checkPaidResultCancelled, nil
+		}
+		return "", infraerrors.Conflict("PAYMENT_ORDER_STATE_CHANGED", "payment order state changed while cancelling; reload and retry")
 	}
+	auditAction := "ORDER_CANCELLED"
+	if fs == OrderStatusExpired {
+		auditAction = "ORDER_EXPIRED"
+	}
+	s.writeAuditLog(ctx, o.ID, auditAction, op, map[string]any{"detail": ad})
 	return checkPaidResultCancelled, nil
 }
 
-func (s *PaymentService) checkPaid(ctx context.Context, o *dbent.PaymentOrder) string {
+// queryAndFulfillPaidOrder is a read/reconciliation path. It must never cancel
+// an upstream payment: status polling happens while the customer may still be
+// completing the provider flow.
+func (s *PaymentService) queryAndFulfillPaidOrder(ctx context.Context, o *dbent.PaymentOrder) string {
 	prov, err := s.getOrderProvider(ctx, o)
 	if err != nil {
 		return ""
@@ -147,6 +172,10 @@ func (s *PaymentService) checkPaid(ctx context.Context, o *dbent.PaymentOrder) s
 	resp, err := prov.QueryOrder(ctx, queryRef)
 	if err != nil {
 		slog.Warn("query upstream failed", "orderID", o.ID, "error", err)
+		return ""
+	}
+	if resp == nil {
+		slog.Warn("query upstream returned empty response", "orderID", o.ID)
 		return ""
 	}
 	if resp.Status == payment.ProviderStatusPaid {
@@ -182,10 +211,69 @@ func (s *PaymentService) checkPaid(ctx context.Context, o *dbent.PaymentOrder) s
 		}
 		return checkPaidResultAlreadyPaid
 	}
-	if cp, ok := prov.(payment.CancelableProvider); ok {
-		_ = cp.CancelPayment(ctx, queryRef)
+	return checkPaidResultNotPaid
+}
+
+func (s *PaymentService) claimPaymentStatusQuery(orderID int64, now time.Time) bool {
+	if s == nil || orderID <= 0 {
+		return false
 	}
-	return ""
+	s.statusQueryMu.Lock()
+	defer s.statusQueryMu.Unlock()
+	if last, ok := s.lastStatusQuery[orderID]; ok && now.Sub(last) < paymentStatusQueryCooldown {
+		return false
+	}
+	if s.lastStatusQuery == nil {
+		s.lastStatusQuery = make(map[int64]time.Time)
+	}
+	if len(s.lastStatusQuery) > 4096 {
+		cutoff := now.Add(-2 * paymentStatusQueryCooldown)
+		for id, queriedAt := range s.lastStatusQuery {
+			if queriedAt.Before(cutoff) {
+				delete(s.lastStatusQuery, id)
+			}
+		}
+	}
+	s.lastStatusQuery[orderID] = now
+	return true
+}
+
+func (s *PaymentService) reconcileVisiblePaymentOrder(ctx context.Context, order *dbent.PaymentOrder) (*dbent.PaymentOrder, error) {
+	if order == nil || (order.Status != OrderStatusPending && order.Status != OrderStatusExpired) {
+		return order, nil
+	}
+	if !s.claimPaymentStatusQuery(order.ID, time.Now()) {
+		return order, nil
+	}
+	if s.queryAndFulfillPaidOrder(ctx, order) != checkPaidResultAlreadyPaid {
+		return order, nil
+	}
+	reloaded, err := s.entClient.PaymentOrder.Get(ctx, order.ID)
+	if err != nil {
+		return nil, fmt.Errorf("reload reconciled order: %w", err)
+	}
+	return reloaded, nil
+}
+
+func (s *PaymentService) cancelProviderPayment(ctx context.Context, o *dbent.PaymentOrder) error {
+	prov, err := s.getOrderProvider(ctx, o)
+	if err != nil {
+		slog.Warn("load upstream provider for cancellation failed", "orderID", o.ID, "error", err)
+		return infraerrors.ServiceUnavailable("PAYMENT_PROVIDER_CANCEL_UNAVAILABLE", "payment provider cancellation is unavailable").WithCause(err)
+	}
+	queryRef := paymentOrderQueryReference(o, prov)
+	if queryRef == "" {
+		return infraerrors.ServiceUnavailable("PAYMENT_PROVIDER_CANCEL_UNAVAILABLE", "payment provider cancellation reference is unavailable")
+	}
+	cp, ok := prov.(payment.CancelableProvider)
+	if !ok {
+		return nil
+	}
+	if err := cp.CancelPayment(ctx, queryRef); err != nil {
+		slog.Warn("cancel upstream payment failed", "orderID", o.ID, "error", err)
+		return infraerrors.ServiceUnavailable("PAYMENT_PROVIDER_CANCEL_FAILED", "payment provider cancellation failed; please retry").WithCause(err)
+	}
+	return nil
 }
 
 func requeryPaidOrderOnce(ctx context.Context, prov payment.Provider, queryRef string) (*payment.QueryOrderResponse, bool) {
@@ -268,7 +356,7 @@ func (s *PaymentService) VerifyOrderByOutTradeNo(ctx context.Context, outTradeNo
 	}
 	// Only verify orders that are still pending or recently expired
 	if o.Status == OrderStatusPending || o.Status == OrderStatusExpired {
-		result := s.checkPaid(ctx, o)
+		result := s.queryAndFulfillPaidOrder(ctx, o)
 		if result == checkPaidResultAlreadyPaid {
 			// Reload order to get updated status
 			o, err = s.entClient.PaymentOrder.Get(ctx, o.ID)
@@ -276,23 +364,6 @@ func (s *PaymentService) VerifyOrderByOutTradeNo(ctx context.Context, outTradeNo
 				return nil, fmt.Errorf("reload order: %w", err)
 			}
 		}
-	}
-	return o, nil
-}
-
-// VerifyOrderPublic returns the currently persisted public order state without
-// triggering any upstream reconciliation. Signed resume-token recovery is the
-// only public recovery path allowed to query upstream state.
-func (s *PaymentService) VerifyOrderPublic(ctx context.Context, outTradeNo string) (*dbent.PaymentOrder, error) {
-	outTradeNo, err := normalizeOrderLookupOutTradeNo(outTradeNo)
-	if err != nil {
-		return nil, err
-	}
-	o, err := s.entClient.PaymentOrder.Query().
-		Where(paymentorder.OutTradeNo(outTradeNo)).
-		Only(ctx)
-	if err != nil {
-		return nil, infraerrors.NotFound("NOT_FOUND", "order not found")
 	}
 	return o, nil
 }

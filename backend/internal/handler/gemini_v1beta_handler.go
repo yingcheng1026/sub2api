@@ -61,13 +61,13 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 			c.JSON(http.StatusOK, gemini.FallbackModelsList())
 			return
 		}
-		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
+		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
 		return
 	}
 
 	res, err := h.geminiCompatService.ForwardAIStudioGET(c.Request.Context(), account, "/v1beta/models")
 	if err != nil {
-		googleError(c, http.StatusBadGateway, err.Error())
+		googleError(c, http.StatusBadGateway, "Upstream request failed")
 		return
 	}
 	if shouldFallbackGeminiModels(res) {
@@ -113,13 +113,13 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 			c.JSON(http.StatusOK, gemini.FallbackModel(modelName))
 			return
 		}
-		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
+		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
 		return
 	}
 
 	res, err := h.geminiCompatService.ForwardAIStudioGET(c.Request.Context(), account, "/v1beta/models/"+modelName)
 	if err != nil {
-		googleError(c, http.StatusBadGateway, err.Error())
+		googleError(c, http.StatusBadGateway, "Upstream request failed")
 		return
 	}
 	if shouldFallbackGeminiModel(modelName, res) {
@@ -161,7 +161,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 	modelName, action, err := parseGeminiModelAction(strings.TrimPrefix(c.Param("modelAction"), "/"))
 	if err != nil {
-		googleError(c, http.StatusNotFound, err.Error())
+		googleError(c, http.StatusNotFound, "Invalid model action path")
 		return
 	}
 
@@ -199,6 +199,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 	// Get subscription (may be nil)
 	subscription, _ := middleware.GetSubscriptionFromContext(c)
+	billingRequestCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+	if err != nil {
+		googleError(c, http.StatusServiceUnavailable, "Billing service temporarily unavailable")
+		return
+	}
+	c.Request = c.Request.WithContext(billingRequestCtx)
 
 	// For Gemini native API, do not send Claude-style ping frames.
 	geminiConcurrency := NewConcurrencyHelper(h.concurrencyHelper.concurrencyService, SSEPingFormatNone, 0)
@@ -231,7 +237,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	userReleaseFunc, err := geminiConcurrency.AcquireUserSlotWithWait(c, authSubject.UserID, authSubject.Concurrency, stream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
-		googleError(c, http.StatusTooManyRequests, err.Error())
+		googleError(c, http.StatusTooManyRequests, "Concurrency limit exceeded, please retry later")
 		return
 	}
 	if waitCounted {
@@ -372,7 +378,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 		if err != nil {
 			if len(fs.FailedAccountIDs) == 0 {
-				googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
+				googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
 				return
 			}
 			action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -453,7 +459,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			)
 			if err != nil {
 				reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				googleError(c, http.StatusTooManyRequests, err.Error())
+				googleError(c, http.StatusTooManyRequests, "Concurrency limit exceeded, please retry later")
 				return
 			}
 			if accountWaitCounted {
@@ -473,6 +479,41 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if fs.SwitchCount > 0 {
 			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 		}
+		var usageBillingIdentity *service.GatewayUsageBillingIdentity
+		if subscription != nil && subscription.IsWalletMode() {
+			usageBillingIdentity, err = h.gatewayService.PrepareGatewayWalletUsageBillingAdmission(
+				requestCtx, apiKey, apiKey.User, account, subscription, &service.ParsedRequest{
+					Body: body, Model: modelName, GroupID: apiKey.GroupID,
+				},
+			)
+			if err != nil {
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				status := http.StatusServiceUnavailable
+				message := "Billing service temporarily unavailable"
+				if errors.Is(err, service.ErrWalletInsufficient) {
+					status, _, message, _ = billingErrorDetails(err)
+				}
+				googleError(c, status, message)
+				return
+			}
+		}
+		markBillingAttemptFailed := func() {
+			if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingAttemptFailed(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gemini.billing_attempt_fail_mark_failed", zap.Error(lifecycleErr))
+			}
+		}
+		markBillingOrphaned := func() {
+			if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gemini.billing_attempt_orphan_mark_failed", zap.Error(lifecycleErr))
+			}
+		}
+		abandonBilling := func() {
+			if lifecycleErr := h.gatewayService.AbandonGatewayUsageBilling(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gemini.billing_attempt_abandon_failed", zap.Error(lifecycleErr))
+			}
+		}
 		if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
 			result, err = h.antigravityGatewayService.ForwardGemini(requestCtx, c, account, modelName, action, stream, body, hasBoundSession)
 		} else {
@@ -484,20 +525,27 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				markBillingAttemptFailed()
 				failoverAction := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, failoverErr)
 				switch failoverAction {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
+					abandonBilling()
 					h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
 					return
 				case FailoverCanceled:
+					abandonBilling()
 					return
 				}
 			}
+			markBillingOrphaned()
 			// ForwardNative already wrote the response
 			reqLog.Error("gemini.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			return
+		}
+		if result != nil {
+			result.UsageBillingIdentity = usageBillingIdentity
 		}
 
 		// 捕获请求信息（用于异步记录，避免在 goroutine 中访问 gin.Context）
@@ -523,7 +571,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		requestPayloadHash := service.HashUsageRequestPayload(body)
 		inboundEndpoint := GetInboundEndpoint(c)
 		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
-		h.submitUsageRecordTask(func(ctx context.Context) {
+		h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsageWithLongContext(ctx, &service.RecordUsageLongContextInput{
 				Result:                result,
 				APIKey:                apiKey,
@@ -541,6 +589,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				APIKeyService:         h.apiKeyService,
 				ChannelUsageFields:    channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 			}); err != nil {
+				if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(ctx, result.UsageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gemini.billing_result_orphan_mark_failed", zap.Error(lifecycleErr))
+				}
 				logger.L().With(
 					zap.String("component", "handler.gemini_v1beta.models"),
 					zap.Int64("user_id", authSubject.UserID),
@@ -596,11 +647,7 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 				respCode = *rule.ResponseCode
 			}
 
-			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
-			if !rule.PassthroughBody && rule.CustomMessage != nil {
-				msg = *rule.CustomMessage
-			}
+			msg := service.ErrorPassthroughClientMessage(rule, "Upstream request failed")
 
 			if rule.SkipMonitoring {
 				c.Set(service.OpsSkipPassthroughKey, true)

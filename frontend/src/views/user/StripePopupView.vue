@@ -58,6 +58,13 @@ import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { isMobileDevice } from '@/utils/device'
+import { getSessionAccessToken } from '@/auth/browserSession'
+import {
+  isPaymentCompleted,
+  isPaymentFulfillmentFailed,
+  isPaymentLateSettlementRecoverable,
+  isPaymentTerminalFailure,
+} from '@/components/payment/paymentFlow'
 
 interface StripeWithWechatPay {
   confirmWechatPayPayment(clientSecret: string, options: Record<string, unknown>): Promise<{ error?: { message?: string }; paymentIntent?: { status: string } }>
@@ -80,9 +87,14 @@ const methodColor = computed(() => METHOD_COLORS[method] || DEFAULT_METHOD_COLOR
 
 const error = ref('')
 const success = ref(false)
+const waitingForFulfillment = ref(false)
 const hint = ref(t('payment.stripePopup.redirecting'))
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let initTimer: ReturnType<typeof setTimeout> | null = null
+let pollRequest: Promise<void> | null = null
+let pollingSettled = false
+let disposed = false
 
 function closeWindow() { window.close() }
 
@@ -91,6 +103,7 @@ onMounted(() => {
     if (event.origin !== window.location.origin) return
     if (event.data?.type !== 'STRIPE_POPUP_INIT') return
     window.removeEventListener('message', handler)
+    clearInitTimer()
     initStripe(event.data.clientSecret, event.data.publishableKey)
   }
   window.addEventListener('message', handler)
@@ -99,16 +112,25 @@ onMounted(() => {
     window.opener.postMessage({ type: 'STRIPE_POPUP_READY' }, window.location.origin)
   }
 
-  setTimeout(() => {
-    if (!error.value && !success.value) {
+  initTimer = setTimeout(() => {
+    if (!error.value && !success.value && !waitingForFulfillment.value) {
       error.value = t('payment.stripePopup.timeout')
     }
   }, 15000)
 })
 
 onUnmounted(() => {
+  disposed = true
+  clearInitTimer()
   if (pollTimer) clearInterval(pollTimer)
 })
+
+function clearInitTimer() {
+  if (initTimer) {
+    clearTimeout(initTimer)
+    initTimer = null
+  }
+}
 
 async function initStripe(clientSecret: string, publishableKey: string) {
   if (!clientSecret || !publishableKey) {
@@ -135,8 +157,8 @@ async function initStripe(clientSecret: string, publishableKey: string) {
       if (result.error) {
         error.value = result.error.message || t('payment.result.failed')
       } else if (result.paymentIntent?.status === 'succeeded') {
-        success.value = true
-        setTimeout(closeWindow, 2000)
+        hint.value = t('payment.result.processing')
+        startPolling()
       } else {
         // Payment not completed (user closed QR dialog)
         startPolling()
@@ -148,10 +170,19 @@ async function initStripe(clientSecret: string, publishableKey: string) {
 }
 
 function startPolling() {
-  pollTimer = setInterval(async () => {
+  if (pollTimer || pollingSettled) return
+  error.value = ''
+  waitingForFulfillment.value = true
+  hint.value = t('payment.result.processing')
+  pollTimer = setInterval(() => { void pollStatusOnce() }, 3000)
+}
+
+async function pollStatusOnce(): Promise<void> {
+  if (pollRequest || pollingSettled || disposed) return pollRequest ?? Promise.resolve()
+
+  pollRequest = (async () => {
     try {
-      const token = document.cookie.split('; ').find(c => c.startsWith('token='))?.split('=')[1]
-        || localStorage.getItem('token') || ''
+      const token = getSessionAccessToken() || ''
       const res = await fetch('/api/v1/payment/orders/' + orderId, {
         headers: token ? { Authorization: 'Bearer ' + token } : {},
         credentials: 'include',
@@ -159,12 +190,33 @@ function startPolling() {
       if (!res.ok) return
       const data = await res.json()
       const status = data?.data?.status
-      if (status === 'COMPLETED' || status === 'PAID') {
+      const paidAt = data?.data?.paid_at
+      const expiresAt = data?.data?.expires_at
+      if (disposed || pollingSettled) return
+      if (isPaymentCompleted(status)) {
+        pollingSettled = true
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+        waitingForFulfillment.value = false
         success.value = true
         setTimeout(closeWindow, 2000)
+      } else if (isPaymentFulfillmentFailed(status, paidAt)) {
+        hint.value = t('payment.result.fulfillmentFailedHint')
+      } else if (
+        isPaymentTerminalFailure(status, paidAt)
+        && !isPaymentLateSettlementRecoverable(status, paidAt, expiresAt)
+      ) {
+        pollingSettled = true
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+        waitingForFulfillment.value = false
+        error.value = t('payment.result.failed')
       }
     } catch { /* ignore */ }
-  }, 3000)
+  })()
+
+  try {
+    await pollRequest
+  } finally {
+    pollRequest = null
+  }
 }
 </script>

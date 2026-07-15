@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +87,7 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 	if account == nil {
 		return service.ErrAccountNilInput
 	}
+	service.AdvanceOAuthTokenVersion(account)
 
 	credentials, err := r.encryptCredentials(normalizeJSONMap(account.Credentials))
 	if err != nil {
@@ -193,7 +195,8 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 		return []*service.Account{}, nil
 	}
 
-	entAccounts, err := r.client.Account.
+	client := clientFromContext(ctx, r.client)
+	entAccounts, err := client.Account.
 		Query().
 		Where(dbaccount.IDIn(uniqueIDs...)).
 		WithProxy().
@@ -229,7 +232,10 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 
 		// Prefer the preloaded proxy edge when available.
 		if entAcc.Edges.Proxy != nil {
-			out.Proxy = proxyEntityToService(entAcc.Edges.Proxy)
+			out.Proxy, err = proxyEntityToService(entAcc.Edges.Proxy, r.credentialEncryptor)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if groups, ok := groupsByAccount[entAcc.ID]; ok {
@@ -331,6 +337,7 @@ func (r *accountRepository) Update(ctx context.Context, account *service.Account
 	if account == nil {
 		return nil
 	}
+	service.AdvanceOAuthTokenVersion(account)
 
 	credentials, err := r.encryptCredentials(normalizeJSONMap(account.Credentials))
 	if err != nil {
@@ -1446,7 +1453,11 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	}
 	// JSONB 需要合并而非覆盖，使用 raw SQL 保持旧行为。
 	if len(updates.Credentials) > 0 {
-		encryptedCredentials, err := r.encryptCredentials(normalizeJSONMap(updates.Credentials))
+		credentialPatch := maps.Clone(updates.Credentials)
+		// _token_version is a repository-managed generation. Never allow a
+		// caller-provided bulk patch to choose or roll it back.
+		delete(credentialPatch, "_token_version")
+		encryptedCredentials, err := r.encryptCredentials(normalizeJSONMap(credentialPatch))
 		if err != nil {
 			return 0, err
 		}
@@ -1454,9 +1465,23 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		if err != nil {
 			return 0, err
 		}
-		setClauses = append(setClauses, "credentials = COALESCE(credentials, '{}'::jsonb) || $"+itoa(idx)+"::jsonb")
+		credentialPatchArg := idx
 		args = append(args, payload)
 		idx++
+		versionFloorArg := idx
+		args = append(args, time.Now().UnixMilli())
+		idx++
+		currentVersionSQL := "CASE " +
+			"WHEN jsonb_typeof(COALESCE(credentials, '{}'::jsonb)->'_token_version') = 'number' " +
+			"THEN ((credentials->>'_token_version')::numeric)::bigint " +
+			"WHEN COALESCE(credentials->>'_token_version', '') ~ '^[0-9]+$' " +
+			"THEN (credentials->>'_token_version')::bigint " +
+			"ELSE 0 END"
+		nextVersionSQL := "GREATEST((" + currentVersionSQL + ") + 1, $" + itoa(versionFloorArg) + "::bigint)"
+		setClauses = append(setClauses,
+			"credentials = COALESCE(credentials, '{}'::jsonb) || $"+itoa(credentialPatchArg)+"::jsonb || "+
+				"CASE WHEN type = 'oauth' THEN jsonb_build_object('_token_version', "+nextVersionSQL+") ELSE '{}'::jsonb END",
+		)
 	}
 	if len(updates.Extra) > 0 {
 		payload, err := json.Marshal(updates.Extra)
@@ -1648,13 +1673,18 @@ func (r *accountRepository) loadProxies(ctx context.Context, proxyIDs []int64) (
 		return proxyMap, nil
 	}
 
-	proxies, err := r.client.Proxy.Query().Where(dbproxy.IDIn(proxyIDs...)).All(ctx)
+	client := clientFromContext(ctx, r.client)
+	proxies, err := client.Proxy.Query().Where(dbproxy.IDIn(proxyIDs...)).All(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, p := range proxies {
-		proxyMap[p.ID] = proxyEntityToService(p)
+		mapped, err := proxyEntityToService(p, r.credentialEncryptor)
+		if err != nil {
+			return nil, err
+		}
+		proxyMap[p.ID] = mapped
 	}
 	return proxyMap, nil
 }
@@ -1668,7 +1698,8 @@ func (r *accountRepository) loadAccountGroups(ctx context.Context, accountIDs []
 		return groupsByAccount, groupIDsByAccount, accountGroupsByAccount, nil
 	}
 
-	entries, err := r.client.AccountGroup.Query().
+	client := clientFromContext(ctx, r.client)
+	entries, err := client.AccountGroup.Query().
 		Where(dbaccountgroup.AccountIDIn(accountIDs...)).
 		WithGroup().
 		Order(dbaccountgroup.ByAccountID(), dbaccountgroup.ByPriority()).

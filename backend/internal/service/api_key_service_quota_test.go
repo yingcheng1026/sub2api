@@ -128,11 +128,11 @@ func (s *quotaBaseAPIKeyRepoStub) UpdateGroupIDByUserAndGroup(context.Context, i
 func (s *quotaBaseAPIKeyRepoStub) CountByGroupID(context.Context, int64) (int64, error) {
 	panic("unexpected CountByGroupID call")
 }
-func (s *quotaBaseAPIKeyRepoStub) ListKeysByUserID(context.Context, int64) ([]string, error) {
-	panic("unexpected ListKeysByUserID call")
+func (s *quotaBaseAPIKeyRepoStub) ListAuthCacheLocatorsByUserID(context.Context, int64) ([]string, error) {
+	panic("unexpected ListAuthCacheLocatorsByUserID call")
 }
-func (s *quotaBaseAPIKeyRepoStub) ListKeysByGroupID(context.Context, int64) ([]string, error) {
-	panic("unexpected ListKeysByGroupID call")
+func (s *quotaBaseAPIKeyRepoStub) ListAuthCacheLocatorsByGroupID(context.Context, int64) ([]string, error) {
+	panic("unexpected ListAuthCacheLocatorsByGroupID call")
 }
 func (s *quotaBaseAPIKeyRepoStub) IncrementQuotaUsed(context.Context, int64, float64) (float64, error) {
 	panic("unexpected IncrementQuotaUsed call")
@@ -153,10 +153,10 @@ func (s *quotaBaseAPIKeyRepoStub) GetRateLimitData(context.Context, int64) (*API
 func TestAPIKeyService_UpdateQuotaUsed_UsesAtomicStatePath(t *testing.T) {
 	repo := &quotaStateRepoStub{
 		state: &APIKeyQuotaUsageState{
-			QuotaUsed: 12,
-			Quota:     10,
-			Key:       "sk-test-quota",
-			Status:    StatusAPIKeyQuotaExhausted,
+			QuotaUsed:        12,
+			Quota:            10,
+			AuthCacheLocator: APIKeyAuthCacheLocator("sk-test-quota"),
+			Status:           StatusAPIKeyQuotaExhausted,
 		},
 	}
 	cache := &quotaStateCacheStub{}
@@ -169,5 +169,5 @@ func TestAPIKeyService_UpdateQuotaUsed_UsesAtomicStatePath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, repo.stateCalls)
 	require.Equal(t, 0, repo.getByIDCalls, "fast path should not re-read API key by id")
-	require.Equal(t, []string{svc.authCacheKey("sk-test-quota")}, cache.deleteAuthKeys)
+	require.Equal(t, []string{APIKeyAuthCacheLocator("sk-test-quota")}, cache.deleteAuthKeys)
 }

@@ -5,10 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
-const usageBillingOutboxMaxRetryBackoff = 5 * time.Minute
+const (
+	usageBillingOutboxMaxRetryBackoff          = 5 * time.Minute
+	usageBillingPreparedReconcileGrace         = 5 * time.Minute
+	usageBillingDispatchedOrphanReconcileGrace = 24 * time.Hour
+	usageBillingAdmissionReconcileInterval     = time.Minute
+	usageBillingAdmissionReconcileBatchSize    = 16
+)
 
 // UsageBillingOutboxProcessor replays durable billing facts through the
 // existing atomic UsageBillingRepository. It never invokes postUsageBilling.
@@ -19,6 +26,8 @@ type UsageBillingOutboxProcessor struct {
 	replayWriter     UsageBillingReplayWriter
 	replayFinalizer  UsageBillingReplayFinalizer
 	now              func() time.Time
+	reconcileMu      sync.Mutex
+	nextReconcileAt  time.Time
 }
 
 func NewUsageBillingOutboxProcessor(
@@ -56,7 +65,38 @@ func (p *UsageBillingOutboxProcessor) ProcessBatch(ctx context.Context, owner st
 			processErrors = append(processErrors, fmt.Errorf("event %d: %w", events[i].ID, err))
 		}
 	}
-	return len(events), errors.Join(processErrors...)
+	processed := len(events)
+	if reconciler, ok := p.outboxRepo.(UsageBillingAdmissionReconciler); ok && p.claimUsageBillingReconcileSlot() {
+		reconciled, reconcileErr := reconciler.ReconcileStaleAdmissions(
+			ctx,
+			usageBillingPreparedReconcileGrace,
+			usageBillingDispatchedOrphanReconcileGrace,
+			usageBillingAdmissionReconcileBatchSize,
+		)
+		if reconcileErr != nil {
+			processErrors = append(processErrors, fmt.Errorf("reconcile stale admissions: %w", reconcileErr))
+		} else {
+			processed += reconciled.Total()
+		}
+	}
+	return processed, errors.Join(processErrors...)
+}
+
+func (p *UsageBillingOutboxProcessor) claimUsageBillingReconcileSlot() bool {
+	if p == nil {
+		return false
+	}
+	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
+	p.reconcileMu.Lock()
+	defer p.reconcileMu.Unlock()
+	if !p.nextReconcileAt.IsZero() && now.Before(p.nextReconcileAt) {
+		return false
+	}
+	p.nextReconcileAt = now.Add(usageBillingAdmissionReconcileInterval)
+	return true
 }
 
 func (p *UsageBillingOutboxProcessor) ProcessEvent(ctx context.Context, event UsageBillingOutboxEvent) error {
@@ -129,9 +169,6 @@ func (p *UsageBillingOutboxProcessor) ProcessEvent(ctx context.Context, event Us
 }
 
 func (p *UsageBillingOutboxProcessor) retry(ctx context.Context, event UsageBillingOutboxEvent, code string, cause error) error {
-	if event.AttemptCount >= event.MaxAttempts {
-		return p.deadLetter(ctx, event, "max_attempts", cause)
-	}
 	now := time.Now()
 	if p.now != nil {
 		now = p.now()

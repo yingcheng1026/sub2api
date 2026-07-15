@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -535,6 +536,10 @@ type adminServiceImpl struct {
 	privacyClientFactory PrivacyClientFactory
 }
 
+type adminBalanceAdjustmentRepository interface {
+	AdjustAdminBalance(context.Context, int64, float64, string) (*User, float64, error)
+}
+
 type userGroupRateBatchReader interface {
 	GetByUserIDs(ctx context.Context, userIDs []int64) (map[int64]map[int64]float64, error)
 }
@@ -703,23 +708,87 @@ func (s *adminServiceImpl) assignDefaultSubscriptions(ctx context.Context, userI
 }
 
 func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *UpdateUserInput) (*User, error) {
+	if input == nil {
+		return nil, infraerrors.BadRequest("INVALID_INPUT", "update user input is required")
+	}
+	if s.userRepo == nil {
+		return nil, errors.New("user repository is not configured")
+	}
+	if input.GroupRates != nil && s.userGroupRateRepo == nil {
+		return nil, errors.New("user group rate repository is not configured")
+	}
+	if input.GroupRates != nil && dbent.TxFromContext(ctx) == nil && s.entClient == nil {
+		return nil, errors.New("atomic user group policy transaction is not configured")
+	}
+
 	// 校验用户专属分组倍率：必须 > 0（nil 合法，表示清除专属倍率）
 	if input.GroupRates != nil {
 		for groupID, rate := range input.GroupRates {
+			if groupID <= 0 {
+				return nil, fmt.Errorf("group_id must be > 0 (group_id=%d)", groupID)
+			}
 			if rate != nil && *rate <= 0 {
 				return nil, fmt.Errorf("rate_multiplier must be > 0 (group_id=%d)", groupID)
 			}
 		}
 	}
 
+	var (
+		user             *User
+		oldConcurrency   int
+		shouldInvalidate bool
+	)
+	apply := func(txCtx context.Context) error {
+		var err error
+		user, oldConcurrency, shouldInvalidate, err = s.updateUserPolicy(txCtx, id, input)
+		return err
+	}
+
+	existingTx := dbent.TxFromContext(ctx)
+	if existingTx != nil {
+		if err := apply(ctx); err != nil {
+			return nil, err
+		}
+		if shouldInvalidate {
+			s.invalidateUserAuthCacheAfterCommit(existingTx, ctx, user.ID)
+		}
+	} else if s.entClient != nil {
+		tx, err := s.entClient.Tx(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin admin user update transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := apply(dbent.NewTxContext(ctx, tx)); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit admin user update transaction: %w", err)
+		}
+		if shouldInvalidate && s.authCacheInvalidator != nil {
+			s.authCacheInvalidator.InvalidateAuthCacheByUserID(context.WithoutCancel(ctx), user.ID)
+		}
+	} else {
+		if err := apply(ctx); err != nil {
+			return nil, err
+		}
+		if shouldInvalidate && s.authCacheInvalidator != nil {
+			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, user.ID)
+		}
+	}
+
+	s.recordAdminConcurrencyAdjustment(ctx, user, oldConcurrency)
+	return user, nil
+}
+
+func (s *adminServiceImpl) updateUserPolicy(ctx context.Context, id int64, input *UpdateUserInput) (*User, int, bool, error) {
 	user, err := s.userRepo.GetByID(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 
 	// Protect admin users: cannot disable admin accounts
 	if user.Role == "admin" && input.Status == "disabled" {
-		return nil, errors.New("cannot disable admin user")
+		return nil, 0, false, errors.New("cannot disable admin user")
 	}
 
 	oldConcurrency := user.Concurrency
@@ -732,7 +801,7 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	}
 	if input.Password != "" {
 		if err := user.SetPassword(input.Password); err != nil {
-			return nil, err
+			return nil, 0, false, err
 		}
 	}
 
@@ -760,30 +829,34 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	}
 
 	if err := s.userRepo.Update(ctx, user); err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 
-	// 同步用户专属分组倍率
-	if input.GroupRates != nil && s.userGroupRateRepo != nil {
+	// 必须与 users/user_allowed_groups 位于同一事务；任何同步错误直接向上返回，
+	// 由调用方回滚，禁止留下“权限已改、倍率未改”的半成功状态。
+	if input.GroupRates != nil {
 		if err := s.userGroupRateRepo.SyncUserGroupRates(ctx, user.ID, input.GroupRates); err != nil {
-			logger.LegacyPrintf("service.admin", "failed to sync user group rates: user_id=%d err=%v", user.ID, err)
+			return nil, 0, false, fmt.Errorf("sync user group rates: %w", err)
 		}
 	}
 
-	if s.authCacheInvalidator != nil {
-		// RPMLimit 直接参与 billing_cache_service.checkRPM 的三级级联，
-		// 不失效缓存会让修改在一个 L2 TTL 内失去效果。
-		if user.Concurrency != oldConcurrency || user.Status != oldStatus || user.Role != oldRole || user.RPMLimit != oldRPMLimit {
-			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, user.ID)
-		}
-	}
+	// AllowedGroups、专属倍率与 RPMLimit 都嵌入认证/计费快照，提交后统一失效。
+	shouldInvalidate := input.AllowedGroups != nil || input.GroupRates != nil ||
+		user.Concurrency != oldConcurrency || user.Status != oldStatus ||
+		user.Role != oldRole || user.RPMLimit != oldRPMLimit
+	return user, oldConcurrency, shouldInvalidate, nil
+}
 
+func (s *adminServiceImpl) recordAdminConcurrencyAdjustment(ctx context.Context, user *User, oldConcurrency int) {
+	if user == nil {
+		return
+	}
 	concurrencyDiff := user.Concurrency - oldConcurrency
 	if concurrencyDiff != 0 {
 		code, err := GenerateRedeemCode()
 		if err != nil {
 			logger.LegacyPrintf("service.admin", "failed to generate adjustment redeem code: %v", err)
-			return user, nil
+			return
 		}
 		adjustmentRecord := &RedeemCode{
 			Code:   code,
@@ -794,12 +867,29 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 		}
 		now := time.Now()
 		adjustmentRecord.UsedAt = &now
+		if s.redeemCodeRepo == nil {
+			logger.LegacyPrintf("service.admin", "failed to create concurrency adjustment redeem code: repository is not configured")
+			return
+		}
 		if err := s.redeemCodeRepo.Create(ctx, adjustmentRecord); err != nil {
 			logger.LegacyPrintf("service.admin", "failed to create concurrency adjustment redeem code: %v", err)
 		}
 	}
+}
 
-	return user, nil
+func (s *adminServiceImpl) invalidateUserAuthCacheAfterCommit(tx *dbent.Tx, ctx context.Context, userID int64) {
+	if tx == nil || s.authCacheInvalidator == nil {
+		return
+	}
+	tx.OnCommit(func(next dbent.Committer) dbent.Committer {
+		return dbent.CommitFunc(func(commitCtx context.Context, committedTx *dbent.Tx) error {
+			if err := next.Commit(commitCtx, committedTx); err != nil {
+				return err
+			}
+			s.authCacheInvalidator.InvalidateAuthCacheByUserID(context.WithoutCancel(ctx), userID)
+			return nil
+		})
+	})
 }
 
 func (s *adminServiceImpl) DeleteUser(ctx context.Context, id int64) error {
@@ -855,68 +945,94 @@ func (s *adminServiceImpl) BatchUpdateConcurrency(ctx context.Context, userIDs [
 }
 
 func (s *adminServiceImpl) UpdateUserBalance(ctx context.Context, userID int64, balance float64, operation string, notes string) (*User, error) {
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return nil, err
+	if userID <= 0 {
+		return nil, infraerrors.BadRequest("INVALID_USER_ID", "user_id must be > 0")
+	}
+	if balance <= 0 || math.IsNaN(balance) || math.IsInf(balance, 0) {
+		return nil, infraerrors.BadRequest("INVALID_BALANCE", "balance amount must be finite and > 0")
+	}
+	if operation != "set" && operation != "add" && operation != "subtract" {
+		return nil, infraerrors.BadRequest("INVALID_BALANCE_OPERATION", "balance operation must be set, add, or subtract")
+	}
+	adjuster, ok := s.userRepo.(adminBalanceAdjustmentRepository)
+	if !ok || adjuster == nil {
+		return nil, infraerrors.ServiceUnavailable("ADMIN_BALANCE_ATOMICITY_UNAVAILABLE", "atomic admin balance adjustment is unavailable")
+	}
+	if s.redeemCodeRepo == nil {
+		return nil, infraerrors.ServiceUnavailable("ADMIN_BALANCE_AUDIT_UNAVAILABLE", "admin balance audit repository is unavailable")
 	}
 
-	oldBalance := user.Balance
-
-	switch operation {
-	case "set":
-		user.Balance = balance
-	case "add":
-		user.Balance += balance
-	case "subtract":
-		user.Balance -= balance
-	}
-
-	if user.Balance < 0 {
-		return nil, fmt.Errorf("balance cannot be negative, current balance: %.2f, requested operation would result in: %.2f", oldBalance, user.Balance)
-	}
-
-	if err := s.userRepo.Update(ctx, user); err != nil {
-		return nil, err
-	}
-	balanceDiff := user.Balance - oldBalance
-	if s.authCacheInvalidator != nil && balanceDiff != 0 {
-		s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
-	}
-
-	if s.billingCacheService != nil {
-		go func() {
-			cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.billingCacheService.InvalidateUserBalance(cacheCtx, userID); err != nil {
-				logger.LegacyPrintf("service.admin", "invalidate user balance cache failed: user_id=%d err=%v", userID, err)
-			}
-		}()
-	}
-
-	if balanceDiff != 0 {
+	var (
+		user        *User
+		balanceDiff float64
+	)
+	apply := func(txCtx context.Context) error {
+		var err error
+		user, balanceDiff, err = adjuster.AdjustAdminBalance(txCtx, userID, balance, operation)
+		if err != nil || balanceDiff == 0 {
+			return err
+		}
 		code, err := GenerateRedeemCode()
 		if err != nil {
-			logger.LegacyPrintf("service.admin", "failed to generate adjustment redeem code: %v", err)
-			return user, nil
+			return fmt.Errorf("generate admin balance adjustment code: %w", err)
 		}
-
-		adjustmentRecord := &RedeemCode{
+		now := time.Now()
+		return s.redeemCodeRepo.Create(txCtx, &RedeemCode{
 			Code:   code,
 			Type:   AdjustmentTypeAdminBalance,
 			Value:  balanceDiff,
 			Status: StatusUsed,
 			UsedBy: &user.ID,
+			UsedAt: &now,
 			Notes:  notes,
-		}
-		now := time.Now()
-		adjustmentRecord.UsedAt = &now
-
-		if err := s.redeemCodeRepo.Create(ctx, adjustmentRecord); err != nil {
-			logger.LegacyPrintf("service.admin", "failed to create balance adjustment redeem code: %v", err)
-		}
+		})
 	}
 
+	if err := s.runAdminBalanceTransaction(ctx, apply); err != nil {
+		return nil, err
+	}
+	if balanceDiff != 0 {
+		s.invalidateAdminBalanceCaches(context.WithoutCancel(ctx), userID)
+	}
 	return user, nil
+}
+
+func (s *adminServiceImpl) runAdminBalanceTransaction(ctx context.Context, execute func(context.Context) error) error {
+	if execute == nil {
+		return errors.New("admin balance transaction executor is nil")
+	}
+	if dbent.TxFromContext(ctx) != nil {
+		return execute(ctx)
+	}
+	if s.entClient == nil {
+		return infraerrors.ServiceUnavailable("ADMIN_BALANCE_TRANSACTION_UNAVAILABLE", "admin balance transaction is unavailable")
+	}
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin admin balance transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := execute(dbent.NewTxContext(ctx, tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit admin balance transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *adminServiceImpl) invalidateAdminBalanceCaches(ctx context.Context, userID int64) {
+	if s.authCacheInvalidator != nil {
+		s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
+	}
+	if s.billingCacheService == nil {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := s.billingCacheService.InvalidateUserBalance(cacheCtx, userID); err != nil {
+		logger.LegacyPrintf("service.admin", "invalidate user balance cache failed: user_id=%d err=%v", userID, err)
+	}
 }
 
 func (s *adminServiceImpl) GetUserAPIKeys(ctx context.Context, userID int64, page, pageSize int, sortBy, sortOrder string) ([]APIKey, int64, error) {
@@ -1577,6 +1693,19 @@ func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, erro
 }
 
 func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupInput) (*Group, error) {
+	var created *Group
+	err := s.runGroupWriteTransaction(ctx, func(txCtx context.Context) error {
+		var err error
+		created, err = s.createGroup(txCtx, input)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func (s *adminServiceImpl) createGroup(ctx context.Context, input *CreateGroupInput) (*Group, error) {
 	if input.RateMultiplier <= 0 {
 		return nil, errors.New("rate_multiplier must be > 0")
 	}
@@ -1607,16 +1736,28 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		}
 		imageRateMultiplier = *input.ImageRateMultiplier
 	}
+	fallbackOnInvalidRequest := input.FallbackGroupIDOnInvalidRequest
+	if fallbackOnInvalidRequest != nil && *fallbackOnInvalidRequest <= 0 {
+		fallbackOnInvalidRequest = nil
+	}
+	if err := validateReservedBusinessGroupCreate(&Group{
+		Name:                            input.Name,
+		Platform:                        platform,
+		IsExclusive:                     input.IsExclusive,
+		Status:                          StatusActive,
+		SubscriptionType:                subscriptionType,
+		ClaudeCodeOnly:                  input.ClaudeCodeOnly,
+		FallbackGroupID:                 input.FallbackGroupID,
+		FallbackGroupIDOnInvalidRequest: fallbackOnInvalidRequest,
+	}); err != nil {
+		return nil, err
+	}
 
 	// 校验降级分组
 	if input.FallbackGroupID != nil {
 		if err := s.validateFallbackGroup(ctx, 0, *input.FallbackGroupID); err != nil {
 			return nil, err
 		}
-	}
-	fallbackOnInvalidRequest := input.FallbackGroupIDOnInvalidRequest
-	if fallbackOnInvalidRequest != nil && *fallbackOnInvalidRequest <= 0 {
-		fallbackOnInvalidRequest = nil
 	}
 	// 校验无效请求兜底分组
 	if fallbackOnInvalidRequest != nil {
@@ -1816,8 +1957,72 @@ func (s *adminServiceImpl) validateFallbackGroupOnInvalidRequest(ctx context.Con
 }
 
 func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *UpdateGroupInput) (*Group, error) {
+	if input != nil && len(input.CopyAccountsFromGroupIDs) > 0 && dbent.TxFromContext(ctx) == nil && s.entClient == nil {
+		return nil, errors.New("atomic group account binding transaction is not configured")
+	}
+	if existingTx := dbent.TxFromContext(ctx); existingTx != nil {
+		updated, err := s.updateGroup(ctx, id, input)
+		if err != nil {
+			return nil, err
+		}
+		s.invalidateGroupAuthCacheAfterCommit(existingTx, ctx, id)
+		return updated, nil
+	}
+
+	var updated *Group
+	err := s.runGroupWriteTransaction(ctx, func(txCtx context.Context) error {
+		var err error
+		updated, err = s.updateGroup(txCtx, id, input)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if s.authCacheInvalidator != nil {
+		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(context.WithoutCancel(ctx), id)
+	}
+	return updated, nil
+}
+
+func (s *adminServiceImpl) updateGroup(ctx context.Context, id int64, input *UpdateGroupInput) (*Group, error) {
 	group, err := s.groupRepo.GetByID(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	candidate := *group
+	if input.Name != "" {
+		candidate.Name = input.Name
+	}
+	if input.Platform != "" {
+		candidate.Platform = input.Platform
+	}
+	if input.IsExclusive != nil {
+		candidate.IsExclusive = *input.IsExclusive
+	}
+	if input.Status != "" {
+		candidate.Status = input.Status
+	}
+	if input.SubscriptionType != "" {
+		candidate.SubscriptionType = input.SubscriptionType
+	}
+	if input.ClaudeCodeOnly != nil {
+		candidate.ClaudeCodeOnly = *input.ClaudeCodeOnly
+	}
+	if input.FallbackGroupID != nil {
+		if *input.FallbackGroupID > 0 {
+			candidate.FallbackGroupID = input.FallbackGroupID
+		} else {
+			candidate.FallbackGroupID = nil
+		}
+	}
+	if input.FallbackGroupIDOnInvalidRequest != nil {
+		if *input.FallbackGroupIDOnInvalidRequest > 0 {
+			candidate.FallbackGroupIDOnInvalidRequest = input.FallbackGroupIDOnInvalidRequest
+		} else {
+			candidate.FallbackGroupIDOnInvalidRequest = nil
+		}
+	}
+	if err := validateReservedBusinessGroupUpdate(group, &candidate); err != nil {
 		return nil, err
 	}
 
@@ -1847,11 +2052,17 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	if input.SubscriptionType != "" {
 		group.SubscriptionType = input.SubscriptionType
 	}
-	// 限额字段：nil/负数 表示"无限制"，0 表示"不允许用量"，正数表示具体限额
-	// 前端始终发送这三个字段，无需 nil 守卫
-	group.DailyLimitUSD = normalizeLimit(input.DailyLimitUSD)
-	group.WeeklyLimitUSD = normalizeLimit(input.WeeklyLimitUSD)
-	group.MonthlyLimitUSD = normalizeLimit(input.MonthlyLimitUSD)
+	// 限额字段：nil 表示未提供、不改动；负数显式清除为"无限制"；
+	// 0 表示"不允许用量"，正数表示具体限额。
+	if input.DailyLimitUSD != nil {
+		group.DailyLimitUSD = normalizeLimit(input.DailyLimitUSD)
+	}
+	if input.WeeklyLimitUSD != nil {
+		group.WeeklyLimitUSD = normalizeLimit(input.WeeklyLimitUSD)
+	}
+	if input.MonthlyLimitUSD != nil {
+		group.MonthlyLimitUSD = normalizeLimit(input.MonthlyLimitUSD)
+	}
 	// 图片生成计费配置：负数表示清除（使用默认价格）
 	if input.AllowImageGeneration != nil {
 		group.AllowImageGeneration = *input.AllowImageGeneration
@@ -1947,10 +2158,6 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 		return nil, err
 	}
 
-	if s.authCacheInvalidator != nil {
-		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(ctx, id)
-	}
-
 	// 如果指定了复制账号的源分组，同步绑定（替换当前分组的账号）
 	if len(input.CopyAccountsFromGroupIDs) > 0 {
 		// 去重源分组 IDs
@@ -2022,10 +2229,57 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	return group, nil
 }
 
+func (s *adminServiceImpl) runGroupWriteTransaction(ctx context.Context, execute func(context.Context) error) error {
+	if execute == nil {
+		return errors.New("group write transaction executor is nil")
+	}
+	if dbent.TxFromContext(ctx) != nil || s.entClient == nil {
+		return execute(ctx)
+	}
+
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin group write transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	txCtx := dbent.NewTxContext(ctx, tx)
+	if err := execute(txCtx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit group write transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *adminServiceImpl) invalidateGroupAuthCacheAfterCommit(tx *dbent.Tx, ctx context.Context, groupID int64) {
+	if tx == nil || s.authCacheInvalidator == nil {
+		return
+	}
+	tx.OnCommit(func(next dbent.Committer) dbent.Committer {
+		return dbent.CommitFunc(func(commitCtx context.Context, committedTx *dbent.Tx) error {
+			if err := next.Commit(commitCtx, committedTx); err != nil {
+				return err
+			}
+			s.authCacheInvalidator.InvalidateAuthCacheByGroupID(context.WithoutCancel(ctx), groupID)
+			return nil
+		})
+	})
+}
+
 func (s *adminServiceImpl) DeleteGroup(ctx context.Context, id int64) error {
+	group, err := s.groupRepo.GetByIDLite(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := rejectReservedBusinessGroupDelete(group); err != nil {
+		return err
+	}
+
 	var groupKeys []string
 	if s.authCacheInvalidator != nil {
-		keys, err := s.apiKeyRepo.ListKeysByGroupID(ctx, id)
+		keys, err := s.apiKeyRepo.ListAuthCacheLocatorsByGroupID(ctx, id)
 		if err == nil {
 			groupKeys = keys
 		}
@@ -2051,8 +2305,12 @@ func (s *adminServiceImpl) DeleteGroup(ctx context.Context, id int64) error {
 		}()
 	}
 	if s.authCacheInvalidator != nil {
-		for _, key := range groupKeys {
-			s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, key)
+		if locatorInvalidator, ok := s.authCacheInvalidator.(interface {
+			InvalidateAuthCacheByLocatorReliable(context.Context, string) error
+		}); ok {
+			for _, locator := range groupKeys {
+				_ = locatorInvalidator.InvalidateAuthCacheByLocatorReliable(ctx, locator)
+			}
 		}
 	}
 
@@ -2077,52 +2335,83 @@ func (s *adminServiceImpl) GetGroupRateMultipliers(ctx context.Context, groupID 
 
 func (s *adminServiceImpl) ClearGroupRateMultipliers(ctx context.Context, groupID int64) error {
 	if s.userGroupRateRepo == nil {
-		return nil
+		return errors.New("user group rate repository is not configured")
 	}
-	return s.userGroupRateRepo.DeleteByGroupID(ctx, groupID)
+	return s.runAdminGroupPolicyMutation(ctx, groupID, func(txCtx context.Context) error {
+		// 清空 rate 部分但保留同一行上的 rpm_override。
+		return s.userGroupRateRepo.SyncGroupRateMultipliers(txCtx, groupID, nil)
+	})
 }
 
 func (s *adminServiceImpl) BatchSetGroupRateMultipliers(ctx context.Context, groupID int64, entries []GroupRateMultiplierInput) error {
 	if s.userGroupRateRepo == nil {
-		return nil
+		return errors.New("user group rate repository is not configured")
+	}
+	if groupID <= 0 {
+		return infraerrors.BadRequest("INVALID_GROUP_ID", "group_id must be > 0")
 	}
 	for _, e := range entries {
+		if e.UserID <= 0 {
+			return infraerrors.BadRequest("INVALID_USER_ID", "user_id must be > 0")
+		}
 		if e.RateMultiplier <= 0 {
 			return fmt.Errorf("rate_multiplier must be > 0 (user_id=%d)", e.UserID)
 		}
 	}
-	return s.userGroupRateRepo.SyncGroupRateMultipliers(ctx, groupID, entries)
+	return s.runAdminGroupPolicyMutation(ctx, groupID, func(txCtx context.Context) error {
+		return s.userGroupRateRepo.SyncGroupRateMultipliers(txCtx, groupID, entries)
+	})
 }
 
 func (s *adminServiceImpl) ClearGroupRPMOverrides(ctx context.Context, groupID int64) error {
 	if s.userGroupRateRepo == nil {
-		return nil
+		return errors.New("user group rate repository is not configured")
 	}
-	if err := s.userGroupRateRepo.ClearGroupRPMOverrides(ctx, groupID); err != nil {
-		return err
-	}
-	// RPM override 已嵌入 auth cache snapshot (v7)，变更后必须失效相关缓存。
-	if s.authCacheInvalidator != nil {
-		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(ctx, groupID)
-	}
-	return nil
+	return s.runAdminGroupPolicyMutation(ctx, groupID, func(txCtx context.Context) error {
+		return s.userGroupRateRepo.ClearGroupRPMOverrides(txCtx, groupID)
+	})
 }
 
 func (s *adminServiceImpl) BatchSetGroupRPMOverrides(ctx context.Context, groupID int64, entries []GroupRPMOverrideInput) error {
 	if s.userGroupRateRepo == nil {
-		return nil
+		return errors.New("user group rate repository is not configured")
+	}
+	if groupID <= 0 {
+		return infraerrors.BadRequest("INVALID_GROUP_ID", "group_id must be > 0")
 	}
 	for _, e := range entries {
-		if e.RPMOverride != nil && *e.RPMOverride < 0 {
-			return infraerrors.BadRequest("INVALID_RPM_OVERRIDE", fmt.Sprintf("rpm_override must be >= 0 (user_id=%d)", e.UserID))
+		if e.UserID <= 0 {
+			return infraerrors.BadRequest("INVALID_USER_ID", "user_id must be > 0")
+		}
+		if e.RPMOverride != nil && (*e.RPMOverride < 0 || *e.RPMOverride > math.MaxInt32) {
+			return infraerrors.BadRequest(
+				"INVALID_RPM_OVERRIDE",
+				fmt.Sprintf("rpm_override must be between 0 and %d (user_id=%d)", math.MaxInt32, e.UserID),
+			)
 		}
 	}
-	if err := s.userGroupRateRepo.SyncGroupRPMOverrides(ctx, groupID, entries); err != nil {
+	return s.runAdminGroupPolicyMutation(ctx, groupID, func(txCtx context.Context) error {
+		return s.userGroupRateRepo.SyncGroupRPMOverrides(txCtx, groupID, entries)
+	})
+}
+
+func (s *adminServiceImpl) runAdminGroupPolicyMutation(ctx context.Context, groupID int64, mutate func(context.Context) error) error {
+	if mutate == nil {
+		return errors.New("admin group policy mutation is nil")
+	}
+	if existingTx := dbent.TxFromContext(ctx); existingTx != nil {
+		if err := mutate(ctx); err != nil {
+			return err
+		}
+		s.invalidateGroupAuthCacheAfterCommit(existingTx, ctx, groupID)
+		return nil
+	}
+	if err := s.runGroupWriteTransaction(ctx, mutate); err != nil {
 		return err
 	}
-	// RPM override 已嵌入 auth cache snapshot (v7)，变更后必须失效相关缓存。
+	// Rate multiplier 与 RPM override 都嵌入认证/计费快照，只能在提交成功后失效。
 	if s.authCacheInvalidator != nil {
-		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(ctx, groupID)
+		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(context.WithoutCancel(ctx), groupID)
 	}
 	return nil
 }
@@ -2137,6 +2426,11 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 	apiKey, err := s.apiKeyRepo.GetByID(ctx, keyID)
 	if err != nil {
 		return nil, err
+	}
+	if apiKey.IsWalletUniversal() {
+		if !apiKey.HasValidWalletUniversalShape() || groupID != nil {
+			return nil, ErrWalletUniversalKeyImmutable
+		}
 	}
 
 	if groupID == nil {
@@ -2183,15 +2477,18 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 		// 专属标准分组：使用事务保证「添加分组权限」与「更新 API Key」的原子性
 		if group.IsExclusive && !group.IsSubscriptionType() {
 			opCtx := ctx
-			var tx *dbent.Tx
-			if s.entClient == nil {
-				logger.LegacyPrintf("service.admin", "Warning: entClient is nil, skipping transaction protection for exclusive group binding")
-			} else {
+			tx := dbent.TxFromContext(ctx)
+			ownsTx := false
+			if tx == nil {
+				if s.entClient == nil {
+					return nil, errors.New("atomic exclusive group binding transaction is not configured")
+				}
 				var txErr error
 				tx, txErr = s.entClient.Tx(ctx)
 				if txErr != nil {
 					return nil, fmt.Errorf("begin transaction: %w", txErr)
 				}
+				ownsTx = true
 				defer func() { _ = tx.Rollback() }()
 				opCtx = dbent.NewTxContext(ctx, tx)
 			}
@@ -2202,7 +2499,7 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 			if err := s.apiKeyRepo.Update(opCtx, apiKey); err != nil {
 				return nil, fmt.Errorf("update api key: %w", err)
 			}
-			if tx != nil {
+			if ownsTx {
 				if err := tx.Commit(); err != nil {
 					return nil, fmt.Errorf("commit transaction: %w", err)
 				}
@@ -2212,9 +2509,19 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 			result.GrantedGroupID = &gid
 			result.GrantedGroupName = group.Name
 
-			// 失效认证缓存（在事务提交后执行）
-			if s.authCacheInvalidator != nil {
+			// 自建事务提交后立即失效；外层事务则挂到提交钩子，避免提前放行未提交状态。
+			if ownsTx && s.authCacheInvalidator != nil {
 				s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.Key)
+			} else if tx != nil && s.authCacheInvalidator != nil {
+				tx.OnCommit(func(next dbent.Committer) dbent.Committer {
+					return dbent.CommitFunc(func(commitCtx context.Context, committedTx *dbent.Tx) error {
+						if err := next.Commit(commitCtx, committedTx); err != nil {
+							return err
+						}
+						s.authCacheInvalidator.InvalidateAuthCacheByKey(context.WithoutCancel(ctx), apiKey.Key)
+						return nil
+					})
+				})
 			}
 
 			result.APIKey = apiKey
@@ -2314,12 +2621,7 @@ func (s *adminServiceImpl) ReplaceUserGroup(ctx context.Context, userID, oldGrou
 
 	// 失效该用户所有 Key 的认证缓存
 	if s.authCacheInvalidator != nil {
-		keys, keyErr := s.apiKeyRepo.ListKeysByUserID(ctx, userID)
-		if keyErr == nil {
-			for _, k := range keys {
-				s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, k)
-			}
-		}
+		s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
 	}
 
 	return &ReplaceUserGroupResult{MigratedKeys: migrated}, nil
@@ -2357,6 +2659,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		return nil, err
 	}
 	if err := validateCursorAccountType(input.Platform, input.Type); err != nil {
+		return nil, err
+	}
+	if err := validateBedrockAccountCredentials(input.Type, input.Credentials); err != nil {
 		return nil, err
 	}
 
@@ -2495,6 +2800,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if len(input.Credentials) > 0 {
 		account.Credentials = input.Credentials
 	}
+	if err := validateBedrockAccountCredentials(account.Type, account.Credentials); err != nil {
+		return nil, err
+	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。
 	if input.Extra != nil {
@@ -2611,6 +2919,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 // BulkUpdateAccounts updates multiple accounts in one request.
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
+	if _, updatesRegion := input.Credentials["aws_region"]; updatesRegion {
+		if err := validateBedrockAccountCredentials(AccountTypeBedrock, input.Credentials); err != nil {
+			return nil, err
+		}
+	}
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)
 		if err != nil {
@@ -3011,6 +3324,9 @@ func (s *adminServiceImpl) GetRedeemCode(ctx context.Context, id int64) (*Redeem
 }
 
 func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *GenerateRedeemCodesInput) ([]RedeemCode, error) {
+	if err := validateNewRedeemCodeType(input.Type); err != nil {
+		return nil, err
+	}
 	// 如果是订阅类型，验证必须有 GroupID
 	if input.Type == RedeemTypeSubscription {
 		if input.GroupID == nil {
@@ -3082,13 +3398,15 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 }
 
 func (s *adminServiceImpl) DeleteRedeemCode(ctx context.Context, id int64) error {
-	return s.redeemCodeRepo.Delete(ctx, id)
+	_, err := deleteRedeemCodeIfUnused(ctx, s.redeemCodeRepo, id)
+	return err
 }
 
 func (s *adminServiceImpl) BatchDeleteRedeemCodes(ctx context.Context, ids []int64) (int64, error) {
 	var deleted int64
 	for _, id := range ids {
-		if err := s.redeemCodeRepo.Delete(ctx, id); err == nil {
+		wasDeleted, err := deleteRedeemCodeIfUnused(ctx, s.redeemCodeRepo, id)
+		if err == nil && wasDeleted {
 			deleted++
 		}
 	}
@@ -3096,15 +3414,21 @@ func (s *adminServiceImpl) BatchDeleteRedeemCodes(ctx context.Context, ids []int
 }
 
 func (s *adminServiceImpl) ExpireRedeemCode(ctx context.Context, id int64) (*RedeemCode, error) {
+	expired, err := s.redeemCodeRepo.ExpireIfUnused(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	code, err := s.redeemCodeRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	code.Status = StatusExpired
-	if err := s.redeemCodeRepo.Update(ctx, code); err != nil {
-		return nil, err
+	if expired || code.Status == StatusExpired {
+		return code, nil
 	}
-	return code, nil
+	if code.Status == StatusUsed {
+		return nil, ErrRedeemCodeExpireUsed
+	}
+	return nil, ErrRedeemCodeExpireState
 }
 
 func (s *adminServiceImpl) TestProxy(ctx context.Context, id int64) (*ProxyTestResult, error) {

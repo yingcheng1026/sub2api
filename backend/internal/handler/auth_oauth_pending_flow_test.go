@@ -1123,6 +1123,52 @@ func TestCreateOIDCOAuthAccountExistingEmailReturnsChoicePendingSessionState(t *
 	require.Zero(t, identityCount)
 }
 
+func TestCreateOIDCOAuthAccountExistingEmailRequiresVerifiedMailboxBeforeChoice(t *testing.T) {
+	handler, client := newOAuthPendingFlowTestHandlerWithEmailVerification(t, false, "owner@example.com", "135790")
+	ctx := context.Background()
+
+	existingUser, err := client.User.Create().
+		SetEmail("owner@example.com").
+		SetUsername("owner-user").
+		SetPasswordHash("hash").
+		SetRole(service.RoleUser).
+		SetStatus(service.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	session, err := client.PendingAuthSession.Create().
+		SetSessionToken("existing-email-unverified-session-token").
+		SetIntent("login").
+		SetProviderType("oidc").
+		SetProviderKey("https://issuer.example").
+		SetProviderSubject("oidc-existing-unverified-123").
+		SetBrowserSessionKey("existing-email-unverified-browser-session-key").
+		SetRedirectTo("/dashboard").
+		SetExpiresAt(time.Now().UTC().Add(10 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	body := bytes.NewBufferString(`{"email":"owner@example.com","password":"secret-123"}`)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/oidc/create-account", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: oauthPendingSessionCookieName, Value: encodeCookieValue(session.SessionToken)})
+	req.AddCookie(&http.Cookie{Name: oauthPendingBrowserCookieName, Value: encodeCookieValue("existing-email-unverified-browser-session-key")})
+	ginCtx.Request = req
+
+	handler.CreateOIDCOAuthAccount(ginCtx)
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	payload := decodeJSONBody(t, recorder)
+	require.Equal(t, "EMAIL_VERIFY_REQUIRED", payload["reason"])
+
+	storedSession, err := client.PendingAuthSession.Get(ctx, session.ID)
+	require.NoError(t, err)
+	require.Nil(t, storedSession.TargetUserID)
+	require.NotEqual(t, existingUser.ID, 0)
+}
+
 func TestCreateOIDCOAuthAccountExistingEmailNormalizesLegacySpacingAndCase(t *testing.T) {
 	handler, client := newOAuthPendingFlowTestHandlerWithEmailVerification(t, false, "owner@example.com", "135790")
 	ctx := context.Background()
@@ -1178,7 +1224,7 @@ func TestCreateOIDCOAuthAccountExistingEmailNormalizesLegacySpacingAndCase(t *te
 	require.Equal(t, "owner@example.com", storedSession.ResolvedEmail)
 }
 
-func TestSendPendingOAuthVerifyCodeExistingEmailReturnsBindLoginState(t *testing.T) {
+func TestSendPendingOAuthVerifyCodeExistingEmailDoesNotRevealAccountState(t *testing.T) {
 	handler, client := newOAuthPendingFlowTestHandlerWithEmailVerification(t, false, "owner@example.com", "135790")
 	ctx := context.Background()
 
@@ -1219,20 +1265,18 @@ func TestSendPendingOAuthVerifyCodeExistingEmailReturnsBindLoginState(t *testing
 
 	handler.SendPendingOAuthVerifyCode(ginCtx)
 
-	require.Equal(t, http.StatusOK, recorder.Code)
-
-	var payload map[string]any
-	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &payload))
-	require.Equal(t, "pending_session", payload["auth_result"])
-	require.Equal(t, oauthPendingChoiceStep, payload["step"])
-	require.Equal(t, "owner@example.com", payload["email"])
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	payload := decodeJSONBody(t, recorder)
+	require.Equal(t, "VERIFY_CODE_TOO_FREQUENT", payload["reason"])
+	require.NotContains(t, payload, "step")
+	require.NotContains(t, payload, "existing_account_bindable")
 
 	storedSession, err := client.PendingAuthSession.Get(ctx, session.ID)
 	require.NoError(t, err)
 	require.Equal(t, oauthIntentLogin, storedSession.Intent)
-	require.NotNil(t, storedSession.TargetUserID)
-	require.Equal(t, existingUser.ID, *storedSession.TargetUserID)
-	require.Equal(t, "owner@example.com", storedSession.ResolvedEmail)
+	require.Nil(t, storedSession.TargetUserID)
+	require.Empty(t, storedSession.ResolvedEmail)
+	_ = existingUser
 }
 
 func TestCreateOIDCOAuthAccountBlocksBackendModeBeforeCreatingUser(t *testing.T) {
@@ -2387,6 +2431,10 @@ func (s *oauthPendingFlowRefreshTokenCacheStub) GetRefreshToken(context.Context,
 	return nil, service.ErrRefreshTokenNotFound
 }
 
+func (s *oauthPendingFlowRefreshTokenCacheStub) ConsumeRefreshToken(context.Context, string) (*service.RefreshTokenData, error) {
+	return nil, service.ErrRefreshTokenNotFound
+}
+
 func (s *oauthPendingFlowRefreshTokenCacheStub) DeleteRefreshToken(context.Context, string) error {
 	return nil
 }
@@ -2494,6 +2542,14 @@ func (r *oauthPendingFlowRedeemCodeRepo) Update(ctx context.Context, code *servi
 
 func (r *oauthPendingFlowRedeemCodeRepo) Delete(context.Context, int64) error {
 	panic("unexpected Delete call")
+}
+
+func (r *oauthPendingFlowRedeemCodeRepo) DeleteIfUnused(context.Context, int64) (bool, error) {
+	panic("unexpected DeleteIfUnused call")
+}
+
+func (r *oauthPendingFlowRedeemCodeRepo) ExpireIfUnused(context.Context, int64) (bool, error) {
+	panic("unexpected ExpireIfUnused call")
 }
 
 func (r *oauthPendingFlowRedeemCodeRepo) Use(ctx context.Context, id, userID int64) error {
@@ -2995,6 +3051,15 @@ func (s *oauthPendingFlowTotpCacheStub) DeleteLoginSession(_ context.Context, te
 	return nil
 }
 
+func (s *oauthPendingFlowTotpCacheStub) ConsumeLoginSession(_ context.Context, tempToken string) (*service.TotpLoginSession, error) {
+	if s == nil || s.loginSessions == nil {
+		return nil, nil
+	}
+	session := s.loginSessions[tempToken]
+	delete(s.loginSessions, tempToken)
+	return session, nil
+}
+
 func (s *oauthPendingFlowTotpCacheStub) IncrementVerifyAttempts(_ context.Context, userID int64) (int, error) {
 	if s.verifyAttempts == nil {
 		s.verifyAttempts = map[int64]int{}
@@ -3022,5 +3087,13 @@ func (oauthPendingFlowTotpEncryptorStub) Encrypt(plaintext string) (string, erro
 }
 
 func (oauthPendingFlowTotpEncryptorStub) Decrypt(ciphertext string) (string, error) {
+	return ciphertext, nil
+}
+
+func (oauthPendingFlowTotpEncryptorStub) EncryptForDomain(_ string, plaintext string) (string, error) {
+	return plaintext, nil
+}
+
+func (oauthPendingFlowTotpEncryptorStub) DecryptForDomain(_ string, ciphertext string) (string, error) {
 	return ciphertext, nil
 }

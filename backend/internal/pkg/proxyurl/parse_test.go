@@ -133,6 +133,20 @@ func TestParse_含密码URL脱敏(t *testing.T) {
 	}
 }
 
+func TestParse_MalformedCredentialURLDoesNotLeakUserinfo(t *testing.T) {
+	const secret = "proxy-password-must-not-leak"
+	_, _, err := Parse("http://user:" + secret + "@%zz")
+	if err == nil {
+		t.Fatal("malformed credential URL should fail")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "user") {
+		t.Fatalf("parse error leaked proxy userinfo: %q", err.Error())
+	}
+	if err.Error() != "invalid proxy URL" {
+		t.Fatalf("unexpected safe error: %q", err.Error())
+	}
+}
+
 func TestParse_带空白的有效URL(t *testing.T) {
 	trimmed, parsed, err := Parse("  http://proxy.example.com:8080  ")
 	if err != nil {

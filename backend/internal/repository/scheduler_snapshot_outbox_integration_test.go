@@ -21,7 +21,8 @@ func TestSchedulerSnapshotOutboxReplay(t *testing.T) {
 
 	accountRepo := newAccountRepositoryWithSQL(client, integrationDB, nil)
 	outboxRepo := NewSchedulerOutboxRepository(integrationDB)
-	cache := NewSchedulerCache(rdb)
+	cache, err := NewSchedulerCache(rdb, newDomainMigrationTestEncryptor(t))
+	require.NoError(t, err)
 
 	cfg := &config.Config{
 		RunMode: config.RunModeStandard,

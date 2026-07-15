@@ -28,25 +28,26 @@ import (
 )
 
 var (
-	ErrInvalidCredentials      = infraerrors.Unauthorized("INVALID_CREDENTIALS", "invalid email or password")
-	ErrUserNotActive           = infraerrors.Forbidden("USER_NOT_ACTIVE", "user is not active")
-	ErrEmailExists             = infraerrors.Conflict("EMAIL_EXISTS", "email already exists")
-	ErrEmailReserved           = infraerrors.BadRequest("EMAIL_RESERVED", "email is reserved")
-	ErrInvalidToken            = infraerrors.Unauthorized("INVALID_TOKEN", "invalid token")
-	ErrTokenExpired            = infraerrors.Unauthorized("TOKEN_EXPIRED", "token has expired")
-	ErrAccessTokenExpired      = infraerrors.Unauthorized("ACCESS_TOKEN_EXPIRED", "access token has expired")
-	ErrTokenTooLarge           = infraerrors.BadRequest("TOKEN_TOO_LARGE", "token too large")
-	ErrTokenRevoked            = infraerrors.Unauthorized("TOKEN_REVOKED", "token has been revoked")
-	ErrRefreshTokenInvalid     = infraerrors.Unauthorized("REFRESH_TOKEN_INVALID", "invalid refresh token")
-	ErrRefreshTokenExpired     = infraerrors.Unauthorized("REFRESH_TOKEN_EXPIRED", "refresh token has expired")
-	ErrRefreshTokenReused      = infraerrors.Unauthorized("REFRESH_TOKEN_REUSED", "refresh token has been reused")
-	ErrEmailVerifyRequired     = infraerrors.BadRequest("EMAIL_VERIFY_REQUIRED", "email verification is required")
-	ErrEmailSuffixNotAllowed   = infraerrors.BadRequest("EMAIL_SUFFIX_NOT_ALLOWED", "email suffix is not allowed")
-	ErrRegDisabled             = infraerrors.Forbidden("REGISTRATION_DISABLED", "registration is currently disabled")
-	ErrServiceUnavailable      = infraerrors.ServiceUnavailable("SERVICE_UNAVAILABLE", "service temporarily unavailable")
-	ErrInvitationCodeRequired  = infraerrors.BadRequest("INVITATION_CODE_REQUIRED", "invitation code is required")
-	ErrInvitationCodeInvalid   = infraerrors.BadRequest("INVITATION_CODE_INVALID", "invalid or used invitation code")
-	ErrOAuthInvitationRequired = infraerrors.Forbidden("OAUTH_INVITATION_REQUIRED", "invitation code required to complete oauth registration")
+	ErrInvalidCredentials            = infraerrors.Unauthorized("INVALID_CREDENTIALS", "invalid email or password")
+	ErrUserNotActive                 = infraerrors.Forbidden("USER_NOT_ACTIVE", "user is not active")
+	ErrEmailExists                   = infraerrors.Conflict("EMAIL_EXISTS", "email already exists")
+	ErrEmailReserved                 = infraerrors.BadRequest("EMAIL_RESERVED", "email is reserved")
+	ErrInvalidToken                  = infraerrors.Unauthorized("INVALID_TOKEN", "invalid token")
+	ErrTokenExpired                  = infraerrors.Unauthorized("TOKEN_EXPIRED", "token has expired")
+	ErrAccessTokenExpired            = infraerrors.Unauthorized("ACCESS_TOKEN_EXPIRED", "access token has expired")
+	ErrTokenTooLarge                 = infraerrors.BadRequest("TOKEN_TOO_LARGE", "token too large")
+	ErrTokenRevoked                  = infraerrors.Unauthorized("TOKEN_REVOKED", "token has been revoked")
+	ErrRefreshTokenInvalid           = infraerrors.Unauthorized("REFRESH_TOKEN_INVALID", "invalid refresh token")
+	ErrRefreshTokenExpired           = infraerrors.Unauthorized("REFRESH_TOKEN_EXPIRED", "refresh token has expired")
+	ErrRefreshTokenReused            = infraerrors.Unauthorized("REFRESH_TOKEN_REUSED", "refresh token has been reused")
+	ErrEmailVerifyRequired           = infraerrors.BadRequest("EMAIL_VERIFY_REQUIRED", "email verification is required")
+	ErrEmailSuffixNotAllowed         = infraerrors.BadRequest("EMAIL_SUFFIX_NOT_ALLOWED", "email suffix is not allowed")
+	ErrRegDisabled                   = infraerrors.Forbidden("REGISTRATION_DISABLED", "registration is currently disabled")
+	ErrServiceUnavailable            = infraerrors.ServiceUnavailable("SERVICE_UNAVAILABLE", "service temporarily unavailable")
+	ErrInvitationCodeRequired        = infraerrors.BadRequest("INVITATION_CODE_REQUIRED", "invitation code is required")
+	ErrInvitationCodeInvalid         = infraerrors.BadRequest("INVITATION_CODE_INVALID", "invalid or used invitation code")
+	ErrOAuthInvitationRequired       = infraerrors.Forbidden("OAUTH_INVITATION_REQUIRED", "invitation code required to complete oauth registration")
+	ErrOAuthAccountLinkProofRequired = infraerrors.Conflict("OAUTH_ACCOUNT_LINK_PROOF_REQUIRED", "existing account must be authenticated before linking oauth identity")
 )
 
 // maxTokenLength 限制 token 大小，避免超长 header 触发解析时的异常内存分配。
@@ -114,6 +115,10 @@ const (
 	maxSignupUserAgentSignalBytes     = 2048
 	maxSignupFingerprintSignalBytes   = 512
 )
+
+// A valid bcrypt hash used only to keep unknown-email login failures on the
+// same password-verification path as wrong-password failures.
+const invalidLoginPasswordHash = "$2y$10$BHZrBKt0JNlUtxg8olLx3eBoEyUgNDMwh95sfmUij7aDRXUJ39M/C"
 
 // NewAuthService 创建认证服务实例
 func NewAuthService(
@@ -568,8 +573,11 @@ func (s *AuthService) SendVerifyCodeAsync(ctx context.Context, email string) (*S
 		return nil, ErrServiceUnavailable
 	}
 	if existsEmail {
-		logger.LegacyPrintf("service.auth", "[Auth] Email already exists: %s", email)
-		return nil, ErrEmailExists
+		// Keep the public response indistinguishable from a request for an
+		// unregistered address. Do not enqueue a registration code for an
+		// existing account.
+		logger.LegacyPrintf("service.auth", "%s", "[Auth] Verify code request accepted without enqueue")
+		return &SendVerifyCodeResult{Countdown: 60}, nil
 	}
 
 	// 检查邮件队列服务是否配置
@@ -670,6 +678,7 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (string
 	user, err := s.userRepo.GetByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			_ = s.CheckPassword(password, invalidLoginPasswordHash)
 			return "", nil, ErrInvalidCredentials
 		}
 		// 记录数据库错误但不暴露给用户
@@ -1646,17 +1655,22 @@ func (s *AuthService) generateRefreshToken(ctx context.Context, user *User, fami
 
 	// 添加到用户Token集合
 	if err := s.refreshTokenCache.AddToUserTokenSet(ctx, user.ID, tokenHash, ttl); err != nil {
-		logger.LegacyPrintf("service.auth", "[Auth] Failed to add token to user set: %v", err)
-		// 不影响主流程
+		return "", s.rejectRefreshTokenWithIncompleteIndexes(ctx, tokenHash, "user", err)
 	}
 
 	// 添加到家族Token集合
 	if err := s.refreshTokenCache.AddToFamilyTokenSet(ctx, familyID, tokenHash, ttl); err != nil {
-		logger.LegacyPrintf("service.auth", "[Auth] Failed to add token to family set: %v", err)
-		// 不影响主流程
+		return "", s.rejectRefreshTokenWithIncompleteIndexes(ctx, tokenHash, "family", err)
 	}
 
 	return rawToken, nil
+}
+
+func (s *AuthService) rejectRefreshTokenWithIncompleteIndexes(ctx context.Context, tokenHash, indexName string, indexErr error) error {
+	if cleanupErr := s.refreshTokenCache.DeleteRefreshToken(ctx, tokenHash); cleanupErr != nil {
+		return fmt.Errorf("store refresh token %s index: %w (cleanup token: %v)", indexName, indexErr, cleanupErr)
+	}
+	return fmt.Errorf("store refresh token %s index: %w", indexName, indexErr)
 }
 
 // RefreshTokenPair 使用Refresh Token刷新Token对
@@ -1719,10 +1733,24 @@ func (s *AuthService) RefreshTokenPair(ctx context.Context, refreshToken string)
 		return nil, ErrTokenRevoked
 	}
 
-	// Token轮转：立即使旧Token失效
-	if err := s.refreshTokenCache.DeleteRefreshToken(ctx, tokenHash); err != nil {
-		logger.LegacyPrintf("service.auth", "[Auth] Failed to delete old refresh token: %v", err)
-		// 继续处理，不影响主流程
+	// Atomically consume the parent only after all ordinary checks pass. A
+	// separate GET+DEL allows two concurrent callers to mint descendants from
+	// the same one-time credential.
+	consumed, err := s.refreshTokenCache.ConsumeRefreshToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, ErrRefreshTokenNotFound) {
+			_ = s.refreshTokenCache.DeleteTokenFamily(ctx, data.FamilyID)
+			return nil, ErrRefreshTokenReused
+		}
+		logger.LegacyPrintf("service.auth", "[Auth] Failed to atomically consume refresh token: %v", err)
+		return nil, ErrServiceUnavailable
+	}
+	if !sameRefreshTokenData(data, consumed) {
+		_ = s.refreshTokenCache.DeleteTokenFamily(ctx, data.FamilyID)
+		if consumed.FamilyID != data.FamilyID {
+			_ = s.refreshTokenCache.DeleteTokenFamily(ctx, consumed.FamilyID)
+		}
+		return nil, ErrRefreshTokenInvalid
 	}
 
 	// 生成新的Token对，保持同一个家族ID
@@ -1796,4 +1824,15 @@ func resolvedTokenVersion(user *User) int64 {
 	sum := sha256.Sum256([]byte(material))
 	fingerprint := int64(binary.BigEndian.Uint64(sum[:8]) & 0x7fffffffffffffff)
 	return user.TokenVersion ^ fingerprint
+}
+
+func sameRefreshTokenData(expected, consumed *RefreshTokenData) bool {
+	if expected == nil || consumed == nil {
+		return false
+	}
+	return expected.UserID == consumed.UserID &&
+		expected.TokenVersion == consumed.TokenVersion &&
+		expected.FamilyID == consumed.FamilyID &&
+		expected.CreatedAt.Equal(consumed.CreatedAt) &&
+		expected.ExpiresAt.Equal(consumed.ExpiresAt)
 }

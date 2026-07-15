@@ -41,13 +41,13 @@ const (
 // plan 11=credits-30, plan 12=credits-100, plan 13=credits-500
 var affiliateCreditsPlanIDs = map[int64]bool{11: true, 12: true, 13: true}
 
-// AffiliateRebateOverrideForAdminAssign 决定 admin 后台分配订阅时的邀请人返利 override。
-// 后台分配只有 planID 可判类型（拿不到兑换码的 wallet/subscription 区分），故采用最稳口径：
-// 余额卡 plan 11/12/13 走余额卡率（当前 10%），其余（月卡及其它）走订阅率 0%
-// （不保本 SKU 不给佣金；后台手动发 ¥99 极罕见，归 0 也是省成本方向）。
-// 返回 0 而非 nil，避免落回全局 20% 率。
-func AffiliateRebateOverrideForAdminAssign(planID *int64) *float64 {
-	if planID != nil && affiliateCreditsPlanIDs[*planID] {
+// AffiliateRebateOverrideForAdminAssign decides the admin assignment rebate
+// from the plan type resolved inside the assignment transaction. Database IDs
+// are not business semantics: migrations, restores and ID reuse must not turn a
+// monthly plan into a credits rebate (or vice versa). Manual PlanID=nil wallet
+// assignments keep the existing zero-rebate policy.
+func AffiliateRebateOverrideForAdminAssign(planID *int64, resolvedPlanType string) *float64 {
+	if planID != nil && resolvedPlanType == PlanTypeCredits {
 		rate := AffiliateRebateCreditsCardRate
 		return &rate
 	}

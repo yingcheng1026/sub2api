@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -19,14 +18,17 @@ func TestAssignWalletSubscriptionCreatesNewWallet(t *testing.T) {
 	groupRepo := groupRepoNoop{}
 
 	svc := NewSubscriptionService(groupRepo, subRepo, nil, nil, nil)
+	lifecycle := &walletTopupServiceStub{}
+	svc.SetWalletTopupService(lifecycle)
 
 	initial := 1500.0
 	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
 		UserID:           1001,
 		ValidityDays:     30,
 		AssignedBy:       9, // admin id
-		Notes:            "¥299 月度套餐",
+		Notes:            "credits-1500",
 		WalletInitialUSD: &initial,
+		PlanType:         PlanTypeCredits,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, sub)
@@ -35,50 +37,37 @@ func TestAssignWalletSubscriptionCreatesNewWallet(t *testing.T) {
 	require.NotNil(t, sub.WalletBalanceUSD)
 	require.Equal(t, 1500.0, *sub.WalletInitialUSD)
 	require.Equal(t, 1500.0, *sub.WalletBalanceUSD, "新建时余额=初始值")
+	require.NotNil(t, sub.WalletCreditDeltaUSD)
+	require.Equal(t, 1500.0, *sub.WalletCreditDeltaUSD, "运行时返利元数据必须是本次激活额度")
 	require.True(t, sub.IsWalletMode())
 	require.Equal(t, 1, subRepo.createCalls)
+	require.Equal(t, 1, lifecycle.activationCalls)
 }
 
-func TestAssignWalletSubscriptionResolvesPlanID(t *testing.T) {
+func TestAssignMonthlyPlanCreationIsRejectedBeforeAdminAssignment(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
 	planSvc := &PaymentConfigService{entClient: client}
-	group := createPlanCoverageGroup(t, ctx, client, "cc-default")
-	walletQuota := 400.0
+	groupEntity, err := client.Group.Create().
+		SetName("paid-lite-v3").
+		SetSubscriptionType(SubscriptionTypeSubscription).
+		SetStatus(StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+	groupID := groupEntity.ID
 	plan, err := planSvc.CreatePlan(ctx, CreatePlanRequest{
-		Name:           "paid-lite-v3-30d",
-		Price:          99,
-		ValidityDays:   30,
-		ValidityUnit:   "days",
-		ForSale:        true,
-		PlanType:       PlanTypeSubscription,
-		WalletQuotaUSD: &walletQuota,
-		PlanGroupIDs:   []int64{group.ID},
+		Name:         "paid-lite-v3-30d",
+		Price:        99,
+		ValidityDays: 30,
+		ValidityUnit: "days",
+		ForSale:      true,
+		PlanType:     PlanTypeSubscription,
+		GroupID:      &groupID,
+		PlanGroupIDs: []int64{groupID},
 	})
-	require.NoError(t, err)
-
-	subRepo := newSubscriptionUserSubRepoStub()
-	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, client, nil)
-	sub, err := svc.AssignSubscription(ctx, &AssignSubscriptionInput{
-		UserID:     1001,
-		AssignedBy: 9,
-		Notes:      "admin plan assign",
-		PlanID:     &plan.ID,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, sub)
-	require.Nil(t, sub.GroupID)
-	require.NotNil(t, sub.WalletInitialUSD)
-	require.NotNil(t, sub.WalletBalanceUSD)
-	require.InDelta(t, walletQuota, *sub.WalletInitialUSD, 0.000001)
-	require.InDelta(t, walletQuota, *sub.WalletBalanceUSD, 0.000001)
-	require.Equal(t, 1.0, sub.LockedRates[strconvFormatInt(group.ID)])
-	// NOTE: wallet daily-cap key assertion removed — the impl commit a791536d
-	// ("enforce paid lite wallet daily cap") that defines WalletDailyLimitLockedRateKey
-	// is not merged into this branch or main, so the constant is undefined and the
-	// daily-cap value is not written into LockedRates in current production code.
-	require.True(t, sub.ExpiresAt.After(time.Now().Add(29*24*time.Hour)))
-	require.True(t, sub.ExpiresAt.Before(time.Now().Add(31*24*time.Hour)))
+	require.Error(t, err)
+	require.Nil(t, plan)
+	require.Equal(t, "MONTHLY_PLANS_RETIRED", infraerrors.Reason(err))
 }
 
 // walletGroupKeyEnsurerStub mock 出 WalletGroupKeyService 的两条路径。
@@ -121,6 +110,7 @@ func (s *walletGroupKeyEnsurerStub) EnsureWalletUniversalKey(_ context.Context, 
 func TestAssignWalletSubscriptionCreatesUniversalKeyOnActivation(t *testing.T) {
 	subRepo := newSubscriptionUserSubRepoStub()
 	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	svc.SetWalletTopupService(&walletTopupServiceStub{})
 
 	mockKey := &APIKey{ID: 999, UserID: 1001, Name: WalletUniversalAPIKeyName, GroupID: nil}
 	keyEnsurer := &walletGroupKeyEnsurerStub{
@@ -134,6 +124,7 @@ func TestAssignWalletSubscriptionCreatesUniversalKeyOnActivation(t *testing.T) {
 		UserID:           1001,
 		ValidityDays:     30,
 		WalletInitialUSD: &initial,
+		PlanType:         PlanTypeCredits,
 	})
 
 	require.NoError(t, err)
@@ -146,9 +137,7 @@ func TestAssignWalletSubscriptionCreatesUniversalKeyOnActivation(t *testing.T) {
 	require.True(t, sub.WalletUniversalKeyCreated)
 }
 
-// TestAssignWalletSubscriptionCreatesNewMonthlyWalletWhenActiveExists 验证：
-// 用户已有 active 钱包时，再次分配月卡 wallet 应新建独立订阅行，支持月卡叠月卡。
-func TestAssignWalletSubscriptionCreatesNewMonthlyWalletWhenActiveExists(t *testing.T) {
+func TestAssignWalletSubscriptionRejectsMonthlyWalletWhenActiveExists(t *testing.T) {
 	subRepo := newSubscriptionUserSubRepoStub()
 	existing := 100.0
 	subRepo.seed(&UserSubscription{
@@ -160,20 +149,17 @@ func TestAssignWalletSubscriptionCreatesNewMonthlyWalletWhenActiveExists(t *test
 	})
 
 	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	svc.SetWalletTopupService(&walletTopupServiceStub{})
 
 	initial := 1500.0
-	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+	_, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
 		UserID:           1001,
 		ValidityDays:     30,
 		WalletInitialUSD: &initial,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, sub)
-	require.NotEqual(t, int64(7), sub.ID, "月卡叠月卡应新建独立 subscription")
-	require.Nil(t, sub.GroupID)
-	require.NotNil(t, sub.WalletInitialUSD)
-	require.Equal(t, 1500.0, *sub.WalletInitialUSD)
-	require.Equal(t, 1, subRepo.createCalls, "月卡叠月卡应创建新订阅")
+	require.Error(t, err)
+	require.Equal(t, "MONTHLY_PLAN_WALLET_DISABLED", infraerrors.Reason(err))
+	require.Equal(t, 0, subRepo.createCalls)
 }
 
 // TestAssignWalletSubscriptionRejectsNonPositiveBalance 验证：初始余额 <= 0
@@ -181,6 +167,7 @@ func TestAssignWalletSubscriptionCreatesNewMonthlyWalletWhenActiveExists(t *test
 func TestAssignWalletSubscriptionRejectsNonPositiveBalance(t *testing.T) {
 	subRepo := newSubscriptionUserSubRepoStub()
 	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	svc.SetWalletTopupService(&walletTopupServiceStub{})
 
 	for _, bad := range []float64{0, -1, -100} {
 		v := bad
@@ -196,13 +183,14 @@ func TestAssignWalletSubscriptionRejectsNonPositiveBalance(t *testing.T) {
 
 // TestAssignWalletSubscriptionCreditsPlanForcesMaxExpiresAt 验证 B2.3：
 // plan_type='credits' 走永久 expires_at（截断到 MaxExpiresAt 2099-12-31），
-// validity_days 被忽略；plan_type='subscription' 或空串走 days。
+// validity_days 被忽略；plan_type='subscription' 或空串不能走 wallet。
 //
 // 见 docs/plans/2026-05-13-wallet-multikey-credits-design.md §2.2。
 func TestAssignWalletSubscriptionCreditsPlanForcesMaxExpiresAt(t *testing.T) {
 	t.Run("credits 永久有效", func(t *testing.T) {
 		subRepo := newSubscriptionUserSubRepoStub()
 		svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+		svc.SetWalletTopupService(&walletTopupServiceStub{})
 
 		initial := 500.0
 		sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
@@ -216,51 +204,61 @@ func TestAssignWalletSubscriptionCreditsPlanForcesMaxExpiresAt(t *testing.T) {
 		require.Equal(t, MaxExpiresAt, sub.ExpiresAt, "额度卡 expires_at 必须 == MaxExpiresAt (2099)")
 	})
 
-	t.Run("subscription 按 days 计算", func(t *testing.T) {
+	t.Run("subscription 被拒绝", func(t *testing.T) {
 		subRepo := newSubscriptionUserSubRepoStub()
 		svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+		svc.SetWalletTopupService(&walletTopupServiceStub{})
 
 		initial := 1500.0
-		before := time.Now()
-		sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+		_, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
 			UserID:           2002,
 			ValidityDays:     30,
 			WalletInitialUSD: &initial,
 			PlanType:         PlanTypeSubscription,
 		})
-		require.NoError(t, err)
-		// 大约 30 天后过期，但绝不应该是 MaxExpiresAt
-		require.NotEqual(t, MaxExpiresAt, sub.ExpiresAt, "月卡不应永久有效")
-		// 区间检查：在 before+29.9d ~ before+30.1d 之间
-		require.True(t, sub.ExpiresAt.After(before.Add(29*24*time.Hour)))
-		require.True(t, sub.ExpiresAt.Before(before.Add(31*24*time.Hour)))
+		require.Error(t, err)
+		require.Equal(t, "MONTHLY_PLAN_WALLET_DISABLED", infraerrors.Reason(err))
 	})
 
-	t.Run("空串等价 subscription", func(t *testing.T) {
+	t.Run("空串等价 subscription 被拒绝", func(t *testing.T) {
 		subRepo := newSubscriptionUserSubRepoStub()
 		svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+		svc.SetWalletTopupService(&walletTopupServiceStub{})
 
 		initial := 100.0
-		sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+		_, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
 			UserID:           2003,
 			ValidityDays:     30,
 			WalletInitialUSD: &initial,
 			// PlanType 留空
 		})
-		require.NoError(t, err)
-		require.NotEqual(t, MaxExpiresAt, sub.ExpiresAt, "默认走月卡路径，不应永久有效")
+		require.Error(t, err)
+		require.Equal(t, "MONTHLY_PLAN_WALLET_DISABLED", infraerrors.Reason(err))
 	})
 }
 
 // walletTopupServiceStub 记录 Topup 调用，模拟 repo 返回叠加后的 balance。
 type walletTopupServiceStub struct {
-	calls        int
-	lastSubID    int64
-	lastDelta    float64
-	lastOperator *int64
-	lastNotes    string
-	returnEntry  WalletLedgerEntry
-	err          error
+	activationCalls       int
+	lastActivationSubID   int64
+	lastActivationInitial float64
+	calls                 int
+	lastSubID             int64
+	lastDelta             float64
+	lastOperator          *int64
+	lastNotes             string
+	returnEntry           WalletLedgerEntry
+	err                   error
+}
+
+func (s *walletTopupServiceStub) Activate(_ context.Context, subscriptionID int64, initialUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error) {
+	s.activationCalls++
+	s.lastActivationSubID = subscriptionID
+	s.lastActivationInitial = initialUSD
+	if s.err != nil {
+		return WalletLedgerEntry{}, s.err
+	}
+	return WalletLedgerEntry{SubscriptionID: subscriptionID, DeltaUSD: initialUSD, BalanceAfter: initialUSD, Reason: WalletLedgerReasonActivation, OperatorID: operatorID, Notes: notes}, nil
 }
 
 func (s *walletTopupServiceStub) Topup(_ context.Context, subscriptionID int64, deltaUSD float64, operatorID *int64, notes string) (WalletLedgerEntry, error) {
@@ -270,6 +268,14 @@ func (s *walletTopupServiceStub) Topup(_ context.Context, subscriptionID int64, 
 	s.lastOperator = operatorID
 	s.lastNotes = notes
 	return s.returnEntry, s.err
+}
+
+func (s *walletTopupServiceStub) ActivateFromPayment(_ context.Context, subscriptionID int64, initialUSD float64, _ int64, notes string) (WalletLedgerEntry, error) {
+	return s.Activate(context.Background(), subscriptionID, initialUSD, nil, notes)
+}
+
+func (s *walletTopupServiceStub) TopupFromPayment(_ context.Context, subscriptionID int64, deltaUSD float64, _ int64, notes string) (WalletLedgerEntry, error) {
+	return s.Topup(context.Background(), subscriptionID, deltaUSD, nil, notes)
 }
 
 // TestAssignWalletSubscriptionToppedUpWhenCreditsAndExistingActive 验证 B2.4：
@@ -321,11 +327,58 @@ func TestAssignWalletSubscriptionToppedUpWhenCreditsAndExistingActive(t *testing
 	require.Equal(t, 600.0, *sub.WalletBalanceUSD, "余额必须 == ledger.balance_after")
 	require.NotNil(t, sub.WalletInitialUSD)
 	require.Equal(t, 600.0, *sub.WalletInitialUSD, "initial 必须 == 旧 initial + delta")
+	require.NotNil(t, sub.WalletCreditDeltaUSD)
+	require.Equal(t, 500.0, *sub.WalletCreditDeltaUSD,
+		"返利基数元数据必须只记录本次 topup delta，不得记录累计 initial")
 }
 
-// TestAssignWalletSubscriptionCreatesNewMonthlyWalletWhenSubscriptionPlanAndExistingActive 验证：
-// 已有 active 钱包 + plan_type='subscription'（月卡）→ 新建独立行，不走 topup。
-func TestAssignWalletSubscriptionCreatesNewMonthlyWalletWhenSubscriptionPlanAndExistingActive(t *testing.T) {
+func TestAssignCreditsPlanTopupReturnsPlanQuotaAsCurrentCreditDelta(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	planQuota := 50.0
+	plan, err := client.SubscriptionPlan.Create().
+		SetName("credits-50").
+		SetPrice(50).
+		SetPlanType(PlanTypeCredits).
+		SetWalletQuotaUsd(planQuota).
+		Save(ctx)
+	require.NoError(t, err)
+
+	subRepo := newSubscriptionUserSubRepoStub()
+	existingBalance := 95.0
+	existingInitial := 100.0
+	subRepo.seed(&UserSubscription{
+		ID:               17,
+		UserID:           1001,
+		Status:           SubscriptionStatusActive,
+		WalletBalanceUSD: &existingBalance,
+		WalletInitialUSD: &existingInitial,
+	})
+
+	svc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, client, nil)
+	topupStub := &walletTopupServiceStub{
+		returnEntry: WalletLedgerEntry{ID: 556, BalanceAfter: 145.0},
+	}
+	svc.SetWalletTopupService(topupStub)
+
+	sub, err := svc.AssignAdminSubscription(ctx, &AssignSubscriptionInput{
+		UserID:     1001,
+		AssignedBy: 9,
+		Notes:      "admin credits plan topup",
+		PlanID:     &plan.ID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, sub.WalletInitialUSD)
+	require.Equal(t, 150.0, *sub.WalletInitialUSD, "wallet_initial_usd remains the cumulative display total")
+	require.NotNil(t, sub.WalletCreditDeltaUSD)
+	require.Equal(t, planQuota, *sub.WalletCreditDeltaUSD,
+		"current-operation metadata must come from this credits plan's wallet_quota_usd")
+	require.Equal(t, PlanTypeCredits, sub.AssignmentPlanType,
+		"rebate classification must use the plan type resolved in the assignment transaction")
+	require.Equal(t, planQuota, topupStub.lastDelta)
+}
+
+func TestAssignWalletSubscriptionRejectsMonthlyWalletWhenSubscriptionPlanAndExistingActive(t *testing.T) {
 	subRepo := newSubscriptionUserSubRepoStub()
 	existing := 100.0
 	subRepo.seed(&UserSubscription{
@@ -341,16 +394,15 @@ func TestAssignWalletSubscriptionCreatesNewMonthlyWalletWhenSubscriptionPlanAndE
 	svc.SetWalletTopupService(topupStub)
 
 	initial := 1500.0
-	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
+	_, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{
 		UserID:           1002,
 		ValidityDays:     30,
 		WalletInitialUSD: &initial,
 		PlanType:         PlanTypeSubscription,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, sub)
-	require.NotEqual(t, int64(8), sub.ID, "月卡应新建独立 subscription")
-	require.Equal(t, 1, subRepo.createCalls)
+	require.Error(t, err)
+	require.Equal(t, "MONTHLY_PLAN_WALLET_DISABLED", infraerrors.Reason(err))
+	require.Equal(t, 0, subRepo.createCalls)
 	require.Equal(t, 0, topupStub.calls, "月卡分支不应触发 topup")
 }
 

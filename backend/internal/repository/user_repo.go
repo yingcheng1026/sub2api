@@ -95,6 +95,7 @@ func (r *userRepository) Create(ctx context.Context, userIn *service.User) error
 		SetNillableLastLoginAt(userIn.LastLoginAt).
 		SetNillableLastActiveAt(userIn.LastActiveAt).
 		SetRpmLimit(userIn.RPMLimit).
+		SetTokenVersion(userIn.TokenVersion).
 		Save(txCtx)
 	if err != nil {
 		return translatePersistenceError(err, nil, service.ErrEmailExists)
@@ -152,7 +153,8 @@ WHERE id = $1
 }
 
 func (r *userRepository) GetByID(ctx context.Context, id int64) (*service.User, error) {
-	m, err := r.client.User.Query().Where(dbuser.IDEQ(id)).Only(ctx)
+	client := clientFromContext(ctx, r.client)
+	m, err := client.User.Query().Where(dbuser.IDEQ(id)).Only(ctx)
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrUserNotFound, nil)
 	}
@@ -201,24 +203,22 @@ func (r *userRepository) Update(ctx context.Context, userIn *service.User) error
 	}
 
 	// 使用 ent 事务包裹用户更新与 allowed_groups 同步，避免跨层事务不一致。
-	tx, err := r.client.Tx(ctx)
-	if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
-		return err
-	}
-
+	var tx *dbent.Tx
 	var txClient *dbent.Client
 	txCtx := ctx
-	if err == nil {
+	if existingTx := dbent.TxFromContext(ctx); existingTx != nil {
+		// UpdateUser 还可能同时更新 user_group_rate_multipliers。复用 service
+		// 开启的外层事务，确保用户行、allowed_groups 与专属策略同成同败。
+		txClient = existingTx.Client()
+	} else {
+		var err error
+		tx, err = r.client.Tx(ctx)
+		if err != nil {
+			return err
+		}
 		defer func() { _ = tx.Rollback() }()
 		txClient = tx.Client()
 		txCtx = dbent.NewTxContext(ctx, tx)
-	} else {
-		// 已处于外部事务中（ErrTxStarted），复用当前事务 client 并由调用方负责提交/回滚。
-		if existingTx := dbent.TxFromContext(ctx); existingTx != nil {
-			txClient = existingTx.Client()
-		} else {
-			txClient = r.client
-		}
 	}
 
 	releaseEmailLock, err := lockRepositoryScopedKeys(
@@ -256,7 +256,8 @@ func (r *userRepository) Update(ctx context.Context, userIn *service.User) error
 		SetNillableBalanceNotifyThreshold(userIn.BalanceNotifyThreshold).
 		SetBalanceNotifyExtraEmails(marshalExtraEmails(userIn.BalanceNotifyExtraEmails)).
 		SetTotalRecharged(userIn.TotalRecharged).
-		SetRpmLimit(userIn.RPMLimit)
+		SetRpmLimit(userIn.RPMLimit).
+		SetTokenVersion(userIn.TokenVersion)
 	if userIn.SignupSource != "" {
 		updateOp = updateOp.SetSignupSource(userIn.SignupSource)
 	}
@@ -453,7 +454,7 @@ func (r *userRepository) ListWithFilters(ctx context.Context, params pagination.
 				dbuser.EmailContainsFold(filters.Search),
 				dbuser.UsernameContainsFold(filters.Search),
 				dbuser.NotesContainsFold(filters.Search),
-				dbuser.HasAPIKeysWith(apikey.KeyContainsFold(filters.Search)),
+				dbuser.HasAPIKeysWith(apikey.KeyPrefixContainsFold(filters.Search)),
 			),
 		)
 	}
@@ -742,6 +743,49 @@ func (r *userRepository) UpdateBalance(ctx context.Context, id int64, amount flo
 	return nil
 }
 
+// AdjustAdminBalance serializes an administrator balance mutation on the user
+// row. The caller must provide an outer transaction so the balance change and
+// its immutable adjustment record can commit or roll back together.
+func (r *userRepository) AdjustAdminBalance(ctx context.Context, id int64, amount float64, operation string) (*service.User, float64, error) {
+	if dbent.TxFromContext(ctx) == nil {
+		return nil, 0, errors.New("admin balance adjustment requires a transaction")
+	}
+	client := clientFromContext(ctx, r.client)
+	current, err := client.User.Query().
+		Where(dbuser.IDEQ(id)).
+		ForUpdate().
+		Only(ctx)
+	if err != nil {
+		return nil, 0, translatePersistenceError(err, service.ErrUserNotFound, nil)
+	}
+
+	oldBalance := current.Balance
+	newBalance := oldBalance
+	switch operation {
+	case "set":
+		newBalance = amount
+	case "add":
+		newBalance += amount
+	case "subtract":
+		newBalance -= amount
+	default:
+		return nil, 0, errors.New("invalid balance operation")
+	}
+	if newBalance < 0 {
+		return nil, 0, fmt.Errorf(
+			"balance cannot be negative, current balance: %.2f, requested operation would result in: %.2f",
+			oldBalance,
+			newBalance,
+		)
+	}
+
+	updated, err := client.User.UpdateOneID(id).SetBalance(newBalance).Save(ctx)
+	if err != nil {
+		return nil, 0, translatePersistenceError(err, service.ErrUserNotFound, nil)
+	}
+	return userEntityToService(updated), newBalance - oldBalance, nil
+}
+
 // DeductBalance 扣除用户余额
 // 透支策略：允许余额变为负数，确保当前请求能够完成
 // 中间件会阻止余额 <= 0 的用户发起后续请求
@@ -917,7 +961,8 @@ func (r *userRepository) loadAllowedGroups(ctx context.Context, userIDs []int64)
 		return out, nil
 	}
 
-	rows, err := r.client.UserAllowedGroup.Query().
+	client := clientFromContext(ctx, r.client)
+	rows, err := client.UserAllowedGroup.Query().
 		Where(userallowedgroup.UserIDIn(userIDs...)).
 		All(ctx)
 	if err != nil {

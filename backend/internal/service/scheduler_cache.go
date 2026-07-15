@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	SchedulerModeSingle = "single"
-	SchedulerModeMixed  = "mixed"
-	SchedulerModeForced = "forced"
+	SchedulerModeSingle               = "single"
+	SchedulerModeMixed                = "mixed"
+	SchedulerModeForced               = "forced"
+	SchedulerMetadataAPIKeyConfigured = "_scheduler_api_key_configured"
 )
 
 type SchedulerBucket struct {

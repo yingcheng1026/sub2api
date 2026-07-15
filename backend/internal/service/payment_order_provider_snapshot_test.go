@@ -164,6 +164,17 @@ func TestBuildPaymentOrderProviderSnapshot_IncludesEasyPayMerchantIdentity(t *te
 	require.NotContains(t, snapshot, "pkey")
 }
 
+func TestBuildPaymentOrderProviderSnapshot_BindsStripeCurrency(t *testing.T) {
+	t.Parallel()
+
+	snapshot := buildPaymentOrderProviderSnapshot(&payment.InstanceSelection{
+		InstanceID:  "77",
+		ProviderKey: payment.TypeStripe,
+	}, CreateOrderRequest{PaymentType: payment.TypeStripe})
+
+	require.Equal(t, "CNY", snapshot["currency"])
+}
+
 func valueOrEmpty(v *string) string {
 	if v == nil {
 		return ""

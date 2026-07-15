@@ -2,6 +2,7 @@ package logredact
 
 import (
 	"encoding/json"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,7 +20,10 @@ var defaultSensitiveKeys = map[string]struct{}{
 	"refresh_token":      {},
 	"id_token":           {},
 	"client_secret":      {},
+	"api_key":            {},
+	"custom_key":         {},
 	"password":           {},
+	"verification":       {},
 }
 
 var defaultSensitiveKeyList = []string{
@@ -30,7 +34,10 @@ var defaultSensitiveKeyList = []string{
 	"refresh_token",
 	"id_token",
 	"client_secret",
+	"api_key",
+	"custom_key",
 	"password",
+	"verification",
 }
 
 type textRedactPatterns struct {
@@ -42,6 +49,7 @@ type textRedactPatterns struct {
 var (
 	reGOCSPX = regexp.MustCompile(`GOCSPX-[0-9A-Za-z_-]{24,}`)
 	reAIza   = regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)
+	reURL    = regexp.MustCompile(`(?i)(?:https?|socks5h?)://[^\s"'<>]+`)
 
 	defaultTextRedactPatterns = compileTextRedactPatterns(nil)
 	extraTextPatternCache     sync.Map // map[string]*textRedactPatterns
@@ -96,7 +104,7 @@ func RedactText(input string, extraKeys ...string) string {
 
 	patterns := getTextRedactPatterns(extraKeys)
 
-	out := input
+	out := redactURLUserinfo(input)
 	out = reGOCSPX.ReplaceAllString(out, "GOCSPX-***")
 	out = reAIza.ReplaceAllString(out, "AIza***")
 	out = patterns.reJSONLike.ReplaceAllString(out, `$1***$3`)
@@ -217,9 +225,27 @@ func redactValueWithDepth(value any, keys map[string]struct{}, depth int) any {
 			out[i] = redactValueWithDepth(item, keys, depth+1)
 		}
 		return out
+	case string:
+		return redactURLUserinfo(v)
 	default:
 		return value
 	}
+}
+
+func redactURLUserinfo(input string) string {
+	return reURL.ReplaceAllStringFunc(input, func(candidate string) string {
+		parsed, err := url.Parse(candidate)
+		if err == nil && parsed.User != nil {
+			parsed.User = nil
+			return parsed.String()
+		}
+		schemeEnd := strings.Index(candidate, "://")
+		userinfoEnd := strings.LastIndex(candidate, "@")
+		if schemeEnd >= 0 && userinfoEnd > schemeEnd+3 {
+			return candidate[:schemeEnd+3] + candidate[userinfoEnd+1:]
+		}
+		return candidate
+	})
 }
 
 func isSensitiveKey(key string, keys map[string]struct{}) bool {

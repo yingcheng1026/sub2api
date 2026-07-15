@@ -13,9 +13,10 @@ export interface ChannelMonitorTemplate {
   name: string
   provider: Provider
   description: string
-  extra_headers: Record<string, string>
+  extra_headers_configured: boolean
+  extra_header_count: number
   body_override_mode: BodyOverrideMode
-  body_override: Record<string, unknown> | null
+  body_override_configured: boolean
   created_at: string
   updated_at: string
   /** 关联的监控数量（快照来自此模板，仅 template_id 匹配即可） */
@@ -45,6 +46,7 @@ export interface UpdateParams {
   extra_headers?: Record<string, string>
   body_override_mode?: BodyOverrideMode
   body_override?: Record<string, unknown> | null
+  replace_request_customization?: boolean
 }
 
 export interface ApplyResponse {

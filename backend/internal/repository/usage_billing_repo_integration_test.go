@@ -130,6 +130,60 @@ func TestUsageBillingRepositoryApply_DeduplicatesSubscriptionBilling(t *testing.
 	require.InDelta(t, 2.5, dailyUsage, 0.000001)
 }
 
+func TestUsageBillingRepositoryApply_WalletOverdraftIsFullySettledAndDeduplicated(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-wallet-overdraft-%s@example.com", uuid.NewString()),
+		PasswordHash: "hash",
+	})
+	wallet := mustCreateCreditsWallet(t, client, user.ID, 0.5)
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID:  user.ID,
+		Key:     "sk-wallet-overdraft-" + uuid.NewString(),
+		Name:    service.WalletUniversalAPIKeyName,
+		Purpose: service.APIKeyPurposeWalletUniversal,
+	})
+
+	requestID := "wallet-overdraft-" + uuid.NewString()
+	cmd := &service.UsageBillingCommand{
+		RequestID:      requestID,
+		APIKeyID:       apiKey.ID,
+		UserID:         user.ID,
+		SubscriptionID: &wallet.ID,
+		WalletCost:     1.0,
+	}
+	result, err := repo.Apply(ctx, cmd)
+	require.NoError(t, err)
+	require.True(t, result.Applied)
+	require.True(t, result.WalletInsufficient)
+	require.NotNil(t, result.NewWalletBalance)
+	require.InDelta(t, -0.5, *result.NewWalletBalance, 0.000001)
+
+	duplicate, err := repo.Apply(ctx, cmd)
+	require.NoError(t, err)
+	require.False(t, duplicate.Applied)
+
+	var balance, ledgerSum, usageDelta, usageBalanceAfter float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT wallet_balance_usd FROM user_subscriptions WHERE id=$1
+	`, wallet.ID).Scan(&balance))
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(delta_usd),0) FROM subscription_wallet_ledger WHERE subscription_id=$1
+	`, wallet.ID).Scan(&ledgerSum))
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT delta_usd, balance_after
+		FROM subscription_wallet_ledger
+		WHERE subscription_id=$1 AND reason='usage'
+	`, wallet.ID).Scan(&usageDelta, &usageBalanceAfter))
+	require.InDelta(t, -0.5, balance, 0.000001)
+	require.InDelta(t, -0.5, ledgerSum, 0.000001)
+	require.InDelta(t, -1.0, usageDelta, 0.000001)
+	require.InDelta(t, -0.5, usageBalanceAfter, 0.000001)
+}
+
 func TestUsageBillingRepositoryApply_RequestFingerprintConflict(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)

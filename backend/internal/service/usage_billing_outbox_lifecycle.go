@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -21,11 +22,22 @@ const (
 )
 
 var (
-	ErrUsageBillingOutboxLeaseLost      = errors.New("usage billing outbox lease lost")
-	ErrUsageBillingCrossTenant          = errors.New("usage billing binding crosses tenants")
-	ErrUsageBillingOutboxTargetNotFound = errors.New("usage billing binding target not found")
-	ErrUsageBillingOutboxUnavailable    = errors.New("usage billing durable outbox is unavailable")
+	ErrUsageBillingOutboxLeaseLost          = errors.New("usage billing outbox lease lost")
+	ErrUsageBillingCrossTenant              = errors.New("usage billing binding crosses tenants")
+	ErrUsageBillingOutboxTargetNotFound     = errors.New("usage billing binding target not found")
+	ErrUsageBillingOutboxUnavailable        = errors.New("usage billing durable outbox is unavailable")
+	ErrUsageBillingOutboxAdmissionRetryable = errors.New("usage billing outbox admission is retryable")
 )
+
+// MarkUsageBillingOutboxAdmissionRetryable marks a storage-layer failure that
+// may succeed once the database recovers. Producers use this classification to
+// backpressure and retry instead of losing an already successful upstream use.
+func MarkUsageBillingOutboxAdmissionRetryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrUsageBillingOutboxAdmissionRetryable, err)
+}
 
 type UsageBillingOutboxEvent struct {
 	ID             int64
@@ -54,6 +66,10 @@ type UsageBillingOutboxRepository interface {
 	Complete(ctx context.Context, id int64, owner, leaseToken, resultCode string) error
 	Retry(ctx context.Context, id int64, owner, leaseToken string, availableAt time.Time, errorCode, errorMessage string) error
 	DeadLetter(ctx context.Context, id int64, owner, leaseToken, errorCode, errorMessage string) error
+}
+
+type UsageBillingOutboxWaker interface {
+	Wake()
 }
 
 type UsageBillingBindingValidator interface {

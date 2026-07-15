@@ -134,6 +134,13 @@ func (User) Fields() []ent.Field {
 			Default(""),
 		field.Int("trial_bonus_risk_score").
 			Default(0),
+
+		// Durable revocation generation for stateless access tokens and refresh
+		// sessions. Incrementing this field invalidates every previously issued
+		// token without mutating credential material.
+		field.Int64("token_version").
+			Default(0).
+			NonNegative(),
 	}
 }
 

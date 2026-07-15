@@ -28,16 +28,41 @@ func TestOpenAIWSStateStore_BindGetDeleteResponseAccount(t *testing.T) {
 	require.Zero(t, accountID)
 }
 
+func TestOpenAIWSStateStore_ResponseAccountIsGroupScoped(t *testing.T) {
+	store := NewOpenAIWSStateStore(nil)
+	ctx := context.Background()
+
+	require.NoError(t, store.BindResponseAccount(ctx, 7, "resp_shared", 101, time.Minute))
+	accountID, err := store.GetResponseAccount(ctx, 8, "resp_shared")
+	require.NoError(t, err)
+	require.Zero(t, accountID)
+
+	require.NoError(t, store.BindResponseAccount(ctx, 8, "resp_shared", 202, time.Minute))
+	accountID, err = store.GetResponseAccount(ctx, 7, "resp_shared")
+	require.NoError(t, err)
+	require.Equal(t, int64(101), accountID)
+	accountID, err = store.GetResponseAccount(ctx, 8, "resp_shared")
+	require.NoError(t, err)
+	require.Equal(t, int64(202), accountID)
+
+	require.NoError(t, store.DeleteResponseAccount(ctx, 7, "resp_shared"))
+	accountID, err = store.GetResponseAccount(ctx, 8, "resp_shared")
+	require.NoError(t, err)
+	require.Equal(t, int64(202), accountID)
+}
+
 func TestOpenAIWSStateStore_ResponseConnTTL(t *testing.T) {
 	store := NewOpenAIWSStateStore(nil)
-	store.BindResponseConn("resp_conn", "conn_1", 30*time.Millisecond)
+	store.BindResponseConn(7, "resp_conn", "conn_1", 30*time.Millisecond)
 
-	connID, ok := store.GetResponseConn("resp_conn")
+	connID, ok := store.GetResponseConn(7, "resp_conn")
 	require.True(t, ok)
 	require.Equal(t, "conn_1", connID)
+	_, ok = store.GetResponseConn(8, "resp_conn")
+	require.False(t, ok, "response connection bindings must not cross groups")
 
 	time.Sleep(60 * time.Millisecond)
-	_, ok = store.GetResponseConn("resp_conn")
+	_, ok = store.GetResponseConn(7, "resp_conn")
 	require.False(t, ok)
 }
 

@@ -26,7 +26,8 @@ describe('API Client', () => {
 
   describe('请求拦截器', () => {
     it('自动附加 Authorization 头', async () => {
-      localStorage.setItem('auth_token', 'my-jwt-token')
+      const { setSessionAccessToken } = await import('@/auth/browserSession')
+      setSessionAccessToken('my-jwt-token')
 
       // 拦截实际请求
       const adapter = vi.fn().mockResolvedValue({
@@ -42,6 +43,7 @@ describe('API Client', () => {
 
       const config = adapter.mock.calls[0][0]
       expect(config.headers.get('Authorization')).toBe('Bearer my-jwt-token')
+      expect(config.headers.get('X-Sub2API-Browser-Session')).toBe('1')
     })
 
     it('无 token 时不附加 Authorization 头', async () => {
@@ -107,6 +109,25 @@ describe('API Client', () => {
       const config = adapter.mock.calls[0][0]
       expect(config.withCredentials).toBe(true)
     })
+
+    it('回传 browser session 与 CSRF header', async () => {
+      document.cookie = 'sub2api_csrf=csrf-test-value; path=/'
+      const adapter = vi.fn().mockResolvedValue({
+        status: 200,
+        data: { code: 0, data: {} },
+        headers: {},
+        config: {},
+        statusText: 'OK',
+      })
+      apiClient.defaults.adapter = adapter
+
+      await apiClient.post('/auth/logout', {})
+
+      const config = adapter.mock.calls[0][0]
+      expect(config.headers.get('X-Sub2API-Browser-Session')).toBe('1')
+      expect(config.headers.get('X-CSRF-Token')).toBe('csrf-test-value')
+      document.cookie = 'sub2api_csrf=; Max-Age=0; path=/'
+    })
   })
 
   // --- 响应拦截器 ---
@@ -148,9 +169,9 @@ describe('API Client', () => {
   // --- 401 Token 刷新 ---
 
   describe('401 Token 刷新', () => {
-    it('无 refresh_token 时 401 清除 localStorage', async () => {
-      localStorage.setItem('auth_token', 'expired-token')
-      // 不设置 refresh_token
+    it('cookie 刷新失败时清除内存 token', async () => {
+      const { getSessionAccessToken, setSessionAccessToken } = await import('@/auth/browserSession')
+      setSessionAccessToken('expired-token')
 
       // Mock window.location
       const originalLocation = window.location
@@ -159,28 +180,49 @@ describe('API Client', () => {
         writable: true,
       })
 
-      const adapter = vi.fn().mockRejectedValue({
+      const adapter = vi.fn().mockImplementation((config) => Promise.reject({
         response: {
           status: 401,
           data: { code: 'TOKEN_EXPIRED', message: 'Token expired' },
         },
-        config: {
-          url: '/test',
-          headers: { Authorization: 'Bearer expired-token' },
-        },
+        config,
         code: 'ERR_BAD_REQUEST',
-      })
+      }))
       apiClient.defaults.adapter = adapter
 
       await expect(apiClient.get('/test')).rejects.toBeDefined()
 
-      expect(localStorage.getItem('auth_token')).toBeNull()
+      expect(getSessionAccessToken()).toBeNull()
 
       // 恢复 location
       Object.defineProperty(window, 'location', {
         value: originalLocation,
         writable: true,
       })
+    })
+
+    it('并发刷新只轮换一次 cookie 凭据', async () => {
+      const { refreshBrowserSessionToken } = await import('@/api/client')
+      const adapter = vi.fn().mockResolvedValue({
+        status: 200,
+        data: {
+          code: 0,
+          data: { access_token: 'rotated-token', expires_in: 3600, token_type: 'Bearer' }
+        },
+        headers: {},
+        config: {},
+        statusText: 'OK',
+      })
+      apiClient.defaults.adapter = adapter
+
+      const [first, second] = await Promise.all([
+        refreshBrowserSessionToken(),
+        refreshBrowserSessionToken()
+      ])
+
+      expect(first.access_token).toBe('rotated-token')
+      expect(second.access_token).toBe('rotated-token')
+      expect(adapter).toHaveBeenCalledTimes(1)
     })
   })
 

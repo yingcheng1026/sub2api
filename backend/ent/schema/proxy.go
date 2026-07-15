@@ -4,6 +4,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
@@ -46,9 +47,9 @@ func (Proxy) Fields() []ent.Field {
 			Optional().
 			Nillable(),
 		field.String("password").
-			MaxLen(100).
 			Optional().
-			Nillable(),
+			Nillable().
+			SchemaType(map[string]string{dialect.Postgres: "text"}),
 		field.String("status").
 			MaxLen(20).
 			Default("active"),

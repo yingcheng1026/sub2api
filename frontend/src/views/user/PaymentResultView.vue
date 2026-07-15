@@ -19,6 +19,12 @@
             class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-yellow-100 dark:bg-yellow-900/30">
             <div class="h-10 w-10 animate-spin rounded-full border-4 border-yellow-500 border-t-transparent"></div>
           </div>
+          <div v-else-if="isFulfillmentFailed"
+            class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
+            <svg class="h-10 w-10 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.3 3.7 2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0Z" />
+            </svg>
+          </div>
           <div v-else
             class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
             <svg class="h-10 w-10 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -30,6 +36,9 @@
           </h2>
           <p v-if="isPending" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
             {{ t('payment.result.processingHint') }}
+          </p>
+          <p v-else-if="isFulfillmentFailed" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            {{ t('payment.result.fulfillmentFailedHint') }}
           </p>
         </div>
         <!-- Order Info -->
@@ -99,12 +108,22 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
+import type { LocationQuery } from 'vue-router'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
 import {
+  PAYMENT_RECOVERY_SESSION_STORAGE_KEY,
   PAYMENT_RECOVERY_STORAGE_KEY,
   clearPaymentRecoverySnapshot,
+  isPaymentCompleted,
+  isPaymentFulfillmentFailed,
+  isPaymentLateSettlementRecoverable,
+  isPaymentStillProcessing,
   readPaymentRecoverySnapshot,
+} from '@/components/payment/paymentFlow'
+import type {
+  PaymentRecoverySelector,
+  PaymentRecoverySnapshot,
 } from '@/components/payment/paymentFlow'
 import { usePaymentStore } from '@/stores/payment'
 import { paymentAPI } from '@/api/payment'
@@ -127,13 +146,17 @@ interface ReturnInfo {
 }
 const returnInfo = ref<ReturnInfo | null>(null)
 
-const SUCCESS_STATUSES = new Set(['COMPLETED', 'PAID', 'RECHARGING'])
-const PENDING_STATUSES = new Set(['PENDING', 'CREATED', 'WAITING', 'PROCESSING'])
 const STATUS_REFRESH_INTERVAL_MS = 2000
+const FAILED_STATUS_REFRESH_INTERVAL_MS = 10000
+const STATUS_REFRESH_MAX_INTERVAL_MS = 10000
+const STATUS_REFRESH_BACKOFF_AFTER = 3
 const STATUS_REFRESH_MAX_ATTEMPTS = 15
 
 let statusRefreshTimer: ReturnType<typeof setTimeout> | null = null
-const refreshAttempts = ref(0)
+let statusRefreshAttempts = 0
+let resultGeneration = 0
+let viewDisposed = false
+let pendingSanitizedQueryKey: string | null = null
 
 /** 充值金额 = pay_amount / (1 + fee_rate/100)，fee_rate=0 时等于 pay_amount */
 const baseAmount = computed(() => {
@@ -153,6 +176,15 @@ const isSuccess = computed(() => {
 
 const isPending = computed(() => {
   return isPendingStatus(order.value?.status)
+    || isPaymentLateSettlementRecoverable(
+      order.value?.status,
+      order.value?.paid_at,
+      order.value?.expires_at,
+    )
+})
+
+const isFulfillmentFailed = computed(() => {
+  return isPaymentFulfillmentFailed(order.value?.status, order.value?.paid_at)
 })
 
 const statusTitle = computed(() => {
@@ -162,6 +194,9 @@ const statusTitle = computed(() => {
   if (isPending.value) {
     return t('payment.result.processing')
   }
+  if (isFulfillmentFailed.value) {
+    return t('payment.result.fulfillmentFailed')
+  }
   return t('payment.result.failed')
 })
 
@@ -169,24 +204,56 @@ function normalizedOrderPaymentType(paymentType: string): string {
   return normalizePaymentMethodForDisplay(paymentType) || paymentType
 }
 
-function normalizeOrderStatus(status: string | null | undefined): string {
-  return String(status || '').trim().toUpperCase()
-}
-
 function isSuccessStatus(status: string | null | undefined): boolean {
-  return SUCCESS_STATUSES.has(normalizeOrderStatus(status))
+  return isPaymentCompleted(status)
 }
 
 function isPendingStatus(status: string | null | undefined): boolean {
-  return PENDING_STATUSES.has(normalizeOrderStatus(status))
+  return isPaymentStillProcessing(status)
 }
 
-function readRouteQueryString(key: string): string {
-  const value = route.query[key]
+function isRefreshableStatus(
+  status: string | null | undefined,
+  paidAt?: string | null,
+  expiresAt?: string | null,
+): boolean {
+  return isPendingStatus(status)
+    || isPaymentFulfillmentFailed(status, paidAt)
+    || isPaymentLateSettlementRecoverable(status, paidAt, expiresAt)
+}
+
+function readRouteQueryString(query: LocationQuery, key: string): string {
+  const value = query[key]
   if (Array.isArray(value)) {
     return typeof value[0] === 'string' ? value[0] : ''
   }
   return typeof value === 'string' ? value : ''
+}
+
+function queryKey(query: LocationQuery): string {
+  return JSON.stringify(Object.keys(query).sort().map(key => [key, query[key]]))
+}
+
+async function removeResumeTokenFromAddressBar(query: LocationQuery): Promise<void> {
+  const sanitizedQuery = { ...query }
+  delete sanitizedQuery.resume_token
+  pendingSanitizedQueryKey = queryKey(sanitizedQuery)
+  try {
+    await router.replace({ query: sanitizedQuery })
+  } catch (_err: unknown) {
+    // Keep the capability out of browser history/referrers even if a router
+    // guard unexpectedly rejects the same-route query replacement.
+    if (typeof window === 'undefined') return
+    const sanitizedURL = new URL(window.location.href)
+    sanitizedURL.searchParams.delete('resume_token')
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${sanitizedURL.pathname}${sanitizedURL.search}${sanitizedURL.hash}`,
+    )
+  } finally {
+    pendingSanitizedQueryKey = null
+  }
 }
 
 function restoreRecoverySnapshot(context: {
@@ -198,14 +265,17 @@ function restoreRecoverySnapshot(context: {
     return null
   }
 
-  const rawSnapshot = window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)
-  if (!rawSnapshot) {
-    return null
+  const sessionSnapshot = window.sessionStorage.getItem(PAYMENT_RECOVERY_SESSION_STORAGE_KEY)
+  const persistentSnapshot = window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)
+  const readMatchingSnapshot = (options: Parameters<typeof readPaymentRecoverySnapshot>[1]) => {
+    return readPaymentRecoverySnapshot(sessionSnapshot, options)
+      ?? readPaymentRecoverySnapshot(persistentSnapshot, options)
   }
 
   if (context.resumeToken) {
-    return readPaymentRecoverySnapshot(rawSnapshot, {
+    return readMatchingSnapshot({
       resumeToken: context.resumeToken,
+      includeExpired: true,
     })
   }
 
@@ -213,7 +283,11 @@ function restoreRecoverySnapshot(context: {
     return null
   }
 
-  const restored = readPaymentRecoverySnapshot(rawSnapshot)
+  const restored = readMatchingSnapshot({
+    orderId: context.routeOrderId || undefined,
+    outTradeNo: context.routeOutTradeNo || undefined,
+    includeExpired: true,
+  })
   if (!restored) {
     return null
   }
@@ -238,15 +312,6 @@ async function resolveOrderFromResumeToken(resumeToken: string): Promise<Payment
   }
 }
 
-async function resolveOrderFromOutTradeNo(outTradeNo: string): Promise<PaymentOrder | null> {
-  try {
-    const result = await paymentAPI.verifyOrderPublic(outTradeNo)
-    return result.data
-  } catch (_err: unknown) {
-    return null
-  }
-}
-
 function clearStatusRefreshTimer(): void {
   if (statusRefreshTimer !== null) {
     clearTimeout(statusRefreshTimer)
@@ -254,50 +319,111 @@ function clearStatusRefreshTimer(): void {
   }
 }
 
-function clearRecoverySnapshot(): void {
-  if (typeof window === 'undefined') return
-  clearPaymentRecoverySnapshot(window.localStorage, PAYMENT_RECOVERY_STORAGE_KEY)
-}
-
-function clearRecoverySnapshotForTerminalStatus(status: string | null | undefined): void {
-  if (!status) return
-  if (!isPendingStatus(status)) {
-    clearRecoverySnapshot()
+function recoverySelectorFor(
+  snapshot: PaymentRecoverySnapshot | null | undefined,
+): PaymentRecoverySelector | null {
+  if (!snapshot || !snapshot.orderId) return null
+  return {
+    userId: snapshot.userId || 0,
+    orderId: snapshot.orderId,
+    revision: snapshot.revision || '',
   }
 }
 
-function scheduleStatusRefresh(refreshOrder: (() => Promise<PaymentOrder | null>) | null): void {
+function clearRecoverySnapshot(selector: PaymentRecoverySelector | null): void {
+  if (typeof window === 'undefined' || !selector) return
+  clearPaymentRecoverySnapshot(window.localStorage, selector, PAYMENT_RECOVERY_STORAGE_KEY)
+  clearPaymentRecoverySnapshot(
+    window.sessionStorage,
+    selector,
+    PAYMENT_RECOVERY_SESSION_STORAGE_KEY,
+  )
+}
+
+function clearRecoverySnapshotForTerminalStatus(
+  paymentOrder: PaymentOrder,
+  selector: PaymentRecoverySelector | null,
+): void {
+  if (!isRefreshableStatus(paymentOrder.status, paymentOrder.paid_at, paymentOrder.expires_at)) {
+    clearRecoverySnapshot(selector)
+  }
+}
+
+function isResultGenerationActive(generation: number): boolean {
+  return !viewDisposed && generation === resultGeneration
+}
+
+function scheduleStatusRefresh(
+  refreshOrder: (() => Promise<PaymentOrder | null>) | null,
+  generation: number,
+  recoverySelector: PaymentRecoverySelector | null,
+): void {
   clearStatusRefreshTimer()
-  if (!refreshOrder || !isPending.value || refreshAttempts.value >= STATUS_REFRESH_MAX_ATTEMPTS) {
+  if (!isResultGenerationActive(generation) || !refreshOrder || !isRefreshableStatus(
+    order.value?.status,
+    order.value?.paid_at,
+    order.value?.expires_at,
+  )) {
+    return
+  }
+  if (statusRefreshAttempts >= STATUS_REFRESH_MAX_ATTEMPTS) {
     return
   }
 
+  const isFulfillmentRetry = isPaymentFulfillmentFailed(order.value?.status, order.value?.paid_at)
+  const pendingBackoffStep = Math.max(0, statusRefreshAttempts - STATUS_REFRESH_BACKOFF_AFTER + 1)
+  const refreshIntervalMs = isFulfillmentRetry
+    ? FAILED_STATUS_REFRESH_INTERVAL_MS
+    : Math.min(
+      STATUS_REFRESH_INTERVAL_MS * (2 ** pendingBackoffStep),
+      STATUS_REFRESH_MAX_INTERVAL_MS,
+    )
+  statusRefreshAttempts += 1
   statusRefreshTimer = setTimeout(async () => {
-    refreshAttempts.value += 1
+    statusRefreshTimer = null
     const refreshedOrder = await refreshOrder()
+    if (!isResultGenerationActive(generation)) {
+      return
+    }
     if (refreshedOrder) {
       order.value = refreshedOrder
-      clearRecoverySnapshotForTerminalStatus(refreshedOrder.status)
+      clearRecoverySnapshotForTerminalStatus(refreshedOrder, recoverySelector)
     }
 
-    if (isPendingStatus(order.value?.status)) {
-      scheduleStatusRefresh(refreshOrder)
+    if (isRefreshableStatus(
+      order.value?.status,
+      order.value?.paid_at,
+      order.value?.expires_at,
+    )) {
+      scheduleStatusRefresh(refreshOrder, generation, recoverySelector)
     }
-  }, STATUS_REFRESH_INTERVAL_MS)
+  }, refreshIntervalMs)
 }
 
-onMounted(async () => {
-  const resumeToken = readRouteQueryString('resume_token')
-  const routeOrderId = Number(readRouteQueryString('order_id')) || 0
-  let outTradeNo = readRouteQueryString('out_trade_no')
+async function loadPaymentResult(query: LocationQuery): Promise<void> {
+  const generation = ++resultGeneration
+  clearStatusRefreshTimer()
+  statusRefreshAttempts = 0
+  order.value = null
+  returnInfo.value = null
+  loading.value = true
+
+  const routeResumeToken = readRouteQueryString(query, 'resume_token')
+  if (routeResumeToken) {
+    await removeResumeTokenFromAddressBar(query)
+    if (!isResultGenerationActive(generation)) return
+  }
+  const routeOrderId = Number(readRouteQueryString(query, 'order_id')) || 0
+  let outTradeNo = readRouteQueryString(query, 'out_trade_no')
   let orderId = 0
-  let resumeTokenLookupFailed = false
 
   const restored = restoreRecoverySnapshot({
-    resumeToken,
+    resumeToken: routeResumeToken,
     routeOrderId,
     routeOutTradeNo: outTradeNo,
   })
+  const resumeToken = routeResumeToken || restored?.resumeToken || ''
+  const recoverySelector = recoverySelectorFor(restored)
   if (restored?.orderId) {
     orderId = restored.orderId
   }
@@ -307,54 +433,45 @@ onMounted(async () => {
 
   if (resumeToken) {
     const resolvedOrder = await resolveOrderFromResumeToken(resumeToken)
+    if (!isResultGenerationActive(generation)) return
     if (resolvedOrder) {
       order.value = resolvedOrder
       if (!orderId) {
         orderId = resolvedOrder.id
       }
     } else if (routeOrderId > 0) {
-      resumeTokenLookupFailed = true
       orderId = routeOrderId
-    } else {
-      resumeTokenLookupFailed = true
     }
   } else if (routeOrderId > 0) {
     orderId = routeOrderId
   }
 
-  const hasLegacyFallbackContext = readRouteQueryString('trade_status').trim() !== ''
-  const shouldUsePublicOutTradeNo = outTradeNo !== '' && (hasLegacyFallbackContext || routeOrderId > 0 || orderId > 0)
+  const hasLegacyFallbackContext = readRouteQueryString(query, 'trade_status').trim() !== ''
 
-  if (!order.value && orderId && (!resumeToken || routeOrderId > 0)) {
+  const restoredMatchesResumeToken = !!resumeToken && restored?.resumeToken === resumeToken
+  if (!order.value && orderId && (!resumeToken || routeOrderId > 0 || restoredMatchesResumeToken)) {
     try {
-      order.value = await paymentStore.pollOrderStatus(orderId)
+      const polledOrder = await paymentStore.pollOrderStatus(orderId)
+      if (!isResultGenerationActive(generation)) return
+      order.value = polledOrder
     } catch (_err: unknown) {
-      // Order lookup failed, will try legacy fallback below when possible.
-    }
-  }
-
-  if (!order.value && shouldUsePublicOutTradeNo && (!resumeToken || resumeTokenLookupFailed)) {
-    const legacyOrder = await resolveOrderFromOutTradeNo(outTradeNo)
-    if (legacyOrder) {
-      order.value = legacyOrder
-      if (!orderId) {
-        orderId = legacyOrder.id
-      }
+      // Authenticated/local order lookup is best-effort on the public result page.
     }
   }
 
   if (!order.value && !orderId && outTradeNo && hasLegacyFallbackContext) {
     returnInfo.value = {
       outTradeNo,
-      money: String(route.query.money || ''),
-      type: String(route.query.type || ''),
-      tradeStatus: String(route.query.trade_status || ''),
+      money: String(query.money || ''),
+      type: String(query.type || ''),
+      tradeStatus: String(query.trade_status || ''),
     }
   }
 
   const refreshOrder = async (): Promise<PaymentOrder | null> => {
     if (resumeToken) {
       const resolvedOrder = await resolveOrderFromResumeToken(resumeToken)
+      if (!isResultGenerationActive(generation)) return null
       if (resolvedOrder) {
         return resolvedOrder
       }
@@ -362,30 +479,42 @@ onMounted(async () => {
 
     if (orderId) {
       try {
-        return await paymentStore.pollOrderStatus(orderId)
+        const polledOrder = await paymentStore.pollOrderStatus(orderId)
+        return isResultGenerationActive(generation) ? polledOrder : null
       } catch (_err: unknown) {
-        // Fall through to legacy public verification when order polling is unavailable.
+        return null
       }
-    }
-
-    if (shouldUsePublicOutTradeNo) {
-      return await resolveOrderFromOutTradeNo(outTradeNo)
     }
 
     return null
   }
 
-  if (isPendingStatus(order.value?.status)) {
-    scheduleStatusRefresh(refreshOrder)
+  if (!isResultGenerationActive(generation)) return
+  if (isRefreshableStatus(order.value?.status, order.value?.paid_at, order.value?.expires_at)) {
+    scheduleStatusRefresh(refreshOrder, generation, recoverySelector)
   } else if (order.value) {
-    clearRecoverySnapshotForTerminalStatus(order.value.status)
+    clearRecoverySnapshotForTerminalStatus(order.value, recoverySelector)
   } else if (returnInfo.value) {
-    clearRecoverySnapshot()
+    clearRecoverySnapshot(recoverySelector)
   }
   loading.value = false
+}
+
+onMounted(() => {
+  void loadPaymentResult(route.query)
+})
+
+onBeforeRouteUpdate((to) => {
+  if (pendingSanitizedQueryKey === queryKey(to.query)) {
+    pendingSanitizedQueryKey = null
+    return
+  }
+  void loadPaymentResult(to.query)
 })
 
 onBeforeUnmount(() => {
+  viewDisposed = true
+  resultGeneration += 1
   clearStatusRefreshTimer()
 })
 </script>

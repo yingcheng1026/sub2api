@@ -6,6 +6,12 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig, AxiosResponse } from 'axios'
 import type { ApiResponse } from '@/types'
 import { getLocale } from '@/i18n'
+import {
+  clearSessionAccessToken,
+  getBrowserSessionHeaders,
+  getSessionAccessToken,
+  setSessionAccessToken
+} from '@/auth/browserSession'
 
 // ==================== Axios Instance Configuration ====================
 
@@ -16,30 +22,52 @@ export const apiClient: AxiosInstance = axios.create({
   withCredentials: true,
   timeout: 30000,
   headers: {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    ...getBrowserSessionHeaders()
   }
 })
 
-// ==================== Token Refresh State ====================
+export interface BrowserSessionRefreshResponse {
+  access_token: string
+  refresh_token?: string
+  expires_in: number
+  token_type: string
+}
 
-// Track if a token refresh is in progress to prevent multiple simultaneous refresh requests
-let isRefreshing = false
-// Queue of requests waiting for token refresh
-let refreshSubscribers: Array<(token: string) => void> = []
+let browserSessionRefreshPromise: Promise<BrowserSessionRefreshResponse> | null = null
 
-/**
- * Subscribe to token refresh completion
- */
-function subscribeTokenRefresh(callback: (token: string) => void): void {
-  refreshSubscribers.push(callback)
+async function rotateBrowserSessionToken(): Promise<BrowserSessionRefreshResponse> {
+  const rotate = async () => {
+    const { data } = await apiClient.post<BrowserSessionRefreshResponse>('/auth/refresh', {})
+    if (!data || typeof data.access_token !== 'string' || !data.access_token.trim()) {
+      throw new Error('Token refresh returned an invalid response')
+    }
+    setSessionAccessToken(data.access_token)
+    return data
+  }
+
+  // The refresh credential is a one-time rotating cookie shared by all tabs.
+  // Web Locks serialize tab-level rotations; the in-memory promise below handles
+  // concurrency inside one tab. Older browsers retain the single-tab guarantee.
+  if (typeof navigator !== 'undefined' && navigator.locks) {
+    return navigator.locks.request('sub2api-browser-refresh', { mode: 'exclusive' }, rotate)
+  }
+  return rotate()
 }
 
 /**
- * Notify all subscribers that token has been refreshed
+ * Rotate the one-time refresh credential exactly once even when proactive refresh
+ * and multiple 401 responses arrive together. Concurrent rotation would otherwise
+ * trigger refresh-token reuse detection and revoke the successful descendant.
  */
-function onTokenRefreshed(token: string): void {
-  refreshSubscribers.forEach((callback) => callback(token))
-  refreshSubscribers = []
+export function refreshBrowserSessionToken(): Promise<BrowserSessionRefreshResponse> {
+  if (browserSessionRefreshPromise) {
+    return browserSessionRefreshPromise
+  }
+  browserSessionRefreshPromise = rotateBrowserSessionToken().finally(() => {
+    browserSessionRefreshPromise = null
+  })
+  return browserSessionRefreshPromise
 }
 
 // ==================== Request Interceptor ====================
@@ -55,8 +83,8 @@ const getUserTimezone = (): string => {
 
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    // Attach token from localStorage
-    const token = localStorage.getItem('auth_token')
+    // Browser access tokens live only in memory. Refresh credentials are HttpOnly cookies.
+    const token = getSessionAccessToken()
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -64,6 +92,10 @@ apiClient.interceptors.request.use(
     // Attach locale for backend translations
     if (config.headers) {
       config.headers['Accept-Language'] = getLocale()
+      const browserSessionHeaders = getBrowserSessionHeaders()
+      for (const [name, value] of Object.entries(browserSessionHeaders)) {
+        config.headers[name] = value
+      }
     }
 
     // Attach timezone for all GET requests (backend may use it for default date ranges)
@@ -148,87 +180,23 @@ apiClient.interceptors.response.use(
         })
       }
 
-      // 401: Try to refresh the token if we have a refresh token
+      // 401: Try the HttpOnly-cookie refresh flow once.
       // This handles TOKEN_EXPIRED, INVALID_TOKEN, TOKEN_REVOKED, etc.
       if (status === 401 && !originalRequest._retry) {
-        const refreshToken = localStorage.getItem('refresh_token')
         const isAuthEndpoint =
           url.includes('/auth/login') || url.includes('/auth/register') || url.includes('/auth/refresh')
 
-        // If we have a refresh token and this is not an auth endpoint, try to refresh
-        if (refreshToken && !isAuthEndpoint) {
-          if (isRefreshing) {
-            // Wait for the ongoing refresh to complete
-            return new Promise((resolve, reject) => {
-              subscribeTokenRefresh((newToken: string) => {
-                if (newToken) {
-                  // Mark as retried to prevent infinite loop if retry also returns 401
-                  originalRequest._retry = true
-                  if (originalRequest.headers) {
-                    originalRequest.headers.Authorization = `Bearer ${newToken}`
-                  }
-                  resolve(apiClient(originalRequest))
-                } else {
-                  // Refresh failed, reject with original error
-                  reject({
-                    status,
-                    code: apiData.code,
-                    message: apiData.message || apiData.detail || error.message
-                  })
-                }
-              })
-            })
-          }
-
+        if (!isAuthEndpoint) {
           originalRequest._retry = true
-          isRefreshing = true
 
           try {
-            // Call refresh endpoint directly to avoid circular dependency
-            const refreshResponse = await axios.post(
-              `${API_BASE_URL}/auth/refresh`,
-              { refresh_token: refreshToken },
-              { headers: { 'Content-Type': 'application/json' } }
-            )
-
-            const refreshData = refreshResponse.data as ApiResponse<{
-              access_token: string
-              refresh_token: string
-              expires_in: number
-            }>
-
-            if (refreshData.code === 0 && refreshData.data) {
-              const { access_token, refresh_token: newRefreshToken, expires_in } = refreshData.data
-
-              // Update tokens in localStorage (convert expires_in to timestamp)
-              localStorage.setItem('auth_token', access_token)
-              localStorage.setItem('refresh_token', newRefreshToken)
-              localStorage.setItem('token_expires_at', String(Date.now() + expires_in * 1000))
-
-              // Notify subscribers with new token
-              onTokenRefreshed(access_token)
-
-              // Retry the original request with new token
-              if (originalRequest.headers) {
-                originalRequest.headers.Authorization = `Bearer ${access_token}`
-              }
-
-              isRefreshing = false
-              return apiClient(originalRequest)
+            const refreshed = await refreshBrowserSessionToken()
+            if (originalRequest.headers) {
+              originalRequest.headers.Authorization = `Bearer ${refreshed.access_token}`
             }
-
-            // Refresh response was not successful, fall through to clear auth
-            throw new Error('Token refresh failed')
-          } catch (refreshError) {
-            // Refresh failed - notify subscribers with empty token
-            onTokenRefreshed('')
-            isRefreshing = false
-
-            // Clear tokens and redirect to login
-            localStorage.removeItem('auth_token')
-            localStorage.removeItem('refresh_token')
-            localStorage.removeItem('auth_user')
-            localStorage.removeItem('token_expires_at')
+            return apiClient(originalRequest)
+          } catch {
+            clearSessionAccessToken()
             sessionStorage.setItem('auth_expired', '1')
 
             if (!window.location.pathname.includes('/login')) {
@@ -243,8 +211,8 @@ apiClient.interceptors.response.use(
           }
         }
 
-        // No refresh token or is auth endpoint - clear auth and redirect
-        const hasToken = !!localStorage.getItem('auth_token')
+        // Auth endpoint failure: clear the in-memory credential and redirect.
+        const hasToken = !!getSessionAccessToken()
         const headers = error.config?.headers as Record<string, unknown> | undefined
         const authHeader = headers?.Authorization ?? headers?.authorization
         const sentAuth =
@@ -254,16 +222,12 @@ apiClient.interceptors.response.use(
               ? authHeader.length > 0
               : !!authHeader
 
-        localStorage.removeItem('auth_token')
-        localStorage.removeItem('refresh_token')
-        localStorage.removeItem('auth_user')
-        localStorage.removeItem('token_expires_at')
+        clearSessionAccessToken()
         if ((hasToken || sentAuth) && !isAuthEndpoint) {
           sessionStorage.setItem('auth_expired', '1')
-        }
-        // Only redirect if not already on login page
-        if (!window.location.pathname.includes('/login')) {
-          window.location.href = '/login'
+          if (!window.location.pathname.includes('/login')) {
+            window.location.href = '/login'
+          }
         }
       }
 

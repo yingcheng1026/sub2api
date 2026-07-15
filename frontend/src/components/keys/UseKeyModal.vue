@@ -7,7 +7,7 @@
   >
     <div class="space-y-4">
       <!-- No Group Assigned Warning -->
-      <div v-if="!platform" class="flex items-start gap-3 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+      <div v-if="!effectivePlatform" class="flex items-start gap-3 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
         <svg class="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
         </svg>
@@ -164,6 +164,8 @@ interface Props {
   platform: GroupPlatform | null
   groupName?: string | null
   allowMessagesDispatch?: boolean
+  walletUniversal?: boolean
+  walletVipAccess?: boolean
 }
 
 interface Emits {
@@ -192,8 +194,14 @@ const { copyToClipboard: clipboardCopy } = useClipboard()
 const copiedIndex = ref<number | null>(null)
 const activeTab = ref<string>('unix')
 const activeClientTab = ref<string>('claude')
+const effectivePlatform = computed<GroupPlatform | null>(() =>
+  props.walletUniversal ? 'openai' : props.platform
+)
+const effectiveGroupName = computed(() =>
+  props.walletUniversal ? 'openai-default' : props.groupName
+)
 const openAIGroupMismatch = computed(() =>
-  props.platform === 'openai' && props.groupName !== 'openai-default'
+  effectivePlatform.value === 'openai' && effectiveGroupName.value !== 'openai-default'
 )
 
 const OPENAI_CLAUDE_CODE_MODELS = {
@@ -211,7 +219,7 @@ const isCmdSafeConfigValue = (value: string) => /^[A-Za-z0-9:/.~_+\-]+$/.test(va
 
 // Reset tabs when platform changes
 const defaultClientTab = computed(() => {
-  switch (props.platform) {
+  switch (effectivePlatform.value) {
     case 'openai':
       return 'codex'
     case 'gemini':
@@ -223,7 +231,7 @@ const defaultClientTab = computed(() => {
   }
 })
 
-watch(() => props.platform, () => {
+watch(effectivePlatform, () => {
   activeTab.value = 'unix'
   activeClientTab.value = defaultClientTab.value
 }, { immediate: true })
@@ -297,8 +305,8 @@ const SparkleIcon = {
 }
 
 const clientTabs = computed((): TabConfig[] => {
-  if (!props.platform) return []
-  switch (props.platform) {
+  if (!effectivePlatform.value) return []
+  switch (effectivePlatform.value) {
     case 'openai': {
       const tabs: TabConfig[] = [
         { id: 'codex', label: t('keys.useKeyModal.cliTabs.codexCli'), icon: TerminalIcon },
@@ -306,6 +314,9 @@ const clientTabs = computed((): TabConfig[] => {
       ]
       if (props.allowMessagesDispatch) {
         tabs.push({ id: 'claude', label: t('keys.useKeyModal.cliTabs.claudeCode'), icon: TerminalIcon })
+      }
+      if (props.walletUniversal && props.walletVipAccess) {
+        tabs.push({ id: 'wallet-claude', label: t('keys.useKeyModal.cliTabs.claudeCodeVip'), icon: TerminalIcon })
       }
       tabs.push({ id: 'opencode', label: t('keys.useKeyModal.cliTabs.opencode'), icon: TerminalIcon })
       return tabs
@@ -353,7 +364,8 @@ const currentTabs = computed(() => {
 })
 
 const platformDescription = computed(() => {
-  switch (props.platform) {
+  if (activeClientTab.value === 'wallet-claude') return t('keys.useKeyModal.description')
+  switch (effectivePlatform.value) {
     case 'openai':
       if (activeClientTab.value === 'claude') {
         return t('keys.useKeyModal.description')
@@ -369,7 +381,8 @@ const platformDescription = computed(() => {
 })
 
 const platformNote = computed(() => {
-  switch (props.platform) {
+  if (activeClientTab.value === 'wallet-claude') return t('keys.useKeyModal.note')
+  switch (effectivePlatform.value) {
     case 'openai':
       if (activeClientTab.value === 'claude') {
         return t('keys.useKeyModal.note')
@@ -451,8 +464,12 @@ const currentFiles = computed((): FileConfig[] => {
     return trimmed.endsWith('/v1beta') ? trimmed : `${trimmed}/v1beta`
   })()
 
+  if (activeClientTab.value === 'wallet-claude') {
+    return generateAnthropicFiles(baseRoot, apiKey)
+  }
+
   if (activeClientTab.value === 'opencode') {
-    switch (props.platform) {
+    switch (effectivePlatform.value) {
       case 'anthropic':
         return [generateOpenCodeConfig('anthropic', apiBase, apiKey)]
       case 'openai':
@@ -469,7 +486,7 @@ const currentFiles = computed((): FileConfig[] => {
     }
   }
 
-  switch (props.platform) {
+  switch (effectivePlatform.value) {
     case 'openai':
       if (activeClientTab.value === 'claude') {
         return generateOpenAINativeClaudeFiles(baseRoot, apiKey)

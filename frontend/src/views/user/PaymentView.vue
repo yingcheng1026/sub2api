@@ -5,13 +5,6 @@
         <div class="h-8 w-8 animate-spin rounded-full border-4 border-primary-500 border-t-transparent"></div>
       </div>
       <template v-else>
-        <!-- Tab Switcher (hide during payment and subscription confirm) -->
-        <div v-if="tabs.length > 1 && paymentPhase === 'select'" class="flex space-x-1 rounded-xl bg-gray-100 p-1 dark:bg-dark-800">
-          <button v-for="tab in tabs" :key="tab.key"
-            class="flex-1 rounded-lg px-4 py-2.5 text-sm font-medium transition-all"
-            :class="activeTab === tab.key ? 'bg-white text-gray-900 shadow dark:bg-dark-700 dark:text-white' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'"
-            @click="activeTab = tab.key">{{ tab.label }}</button>
-        </div>
         <!-- Payment in progress (shared by recharge and subscription) -->
         <template v-if="paymentPhase === 'paying'">
           <PaymentStatusPanel
@@ -29,12 +22,20 @@
         <!-- Tab content (select phase) -->
         <template v-else>
           <!-- Top-up Tab — 直跳链动小铺 3 档通用余额 (ZPay 死路, 所有充值走链动) -->
-          <template v-if="activeTab === 'recharge'">
+          <div class="space-y-5">
             <!-- Recharge Account Card -->
             <div class="card p-5">
               <p class="text-xs font-medium text-gray-400 dark:text-gray-500">{{ t('payment.rechargeAccount') }}</p>
               <p class="mt-1 text-base font-semibold text-gray-900 dark:text-white">{{ user?.username || '' }}</p>
-              <p class="mt-0.5 text-sm font-medium text-green-600 dark:text-green-400">{{ t('payment.currentBalance') }}: ${{ user?.balance?.toFixed(2) || '0.00' }}</p>
+              <p
+                class="mt-0.5 text-sm font-medium"
+                :class="creditsWalletDebtUSD > 0 ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'"
+              >
+                {{ t('payment.currentBalance') }}: ${{ creditsWalletBalanceUSD.toFixed(2) }}
+                <span v-if="creditsWalletDebtUSD > 0">
+                  · {{ t('payment.walletDebt', { amount: creditsWalletDebtUSD.toFixed(2) }) }}
+                </span>
+              </p>
             </div>
 
             <!-- 通用余额 3 档直跳链动 SKU -->
@@ -43,13 +44,14 @@
                 选择充值档位
               </h3>
               <p class="mb-4 text-xs text-gray-500 dark:text-dark-400">
-                点击下方任一档位跳转链动小铺下单,完成后余额自动到账。永久有效,1¥=$1,所有模型可用(按渠道倍率消耗)。
+                点击档位跳转链动小铺下单；付款后获取兑换码，再回个人中心兑换。余额按实际调用扣费，到账结果以余额与流水为准。
               </p>
               <div class="grid gap-3 sm:grid-cols-3">
                 <button
                   v-for="tier in LIANDONG_CREDITS_TIERS"
                   :key="tier.url"
                   type="button"
+                  :data-hfc-liandong-credit="String(tier.creditsUsd)"
                   class="flex flex-col items-center justify-center rounded-lg border border-gray-200 bg-white p-4 transition-all hover:border-primary-500 hover:bg-primary-50 dark:border-dark-600 dark:bg-dark-800 dark:hover:bg-dark-700"
                   @click="openLiandongCredits(tier.url)"
                 >
@@ -60,167 +62,27 @@
                     ¥{{ tier.priceCny }} = ${{ tier.creditsUsd }} 余额
                   </span>
                   <span class="mt-1 text-[10px] text-gray-400 dark:text-dark-500">
-                    永久 · 所有模型
+                    通用余额 · 按实际调用扣费
                   </span>
                 </button>
               </div>
             </div>
+
+            <a
+              href="/redeem"
+              class="block rounded-xl border border-primary-200 bg-primary-50 p-4 text-center text-sm font-semibold text-primary-700 hover:bg-primary-100 dark:border-primary-800 dark:bg-primary-900/20 dark:text-primary-300"
+            >
+              已拿到兑换码？去个人中心兑换
+            </a>
 
             <!-- 自定义额度兜底 -->
             <div class="card rounded-lg bg-amber-50 p-4 text-sm dark:bg-amber-900/20">
               <p class="text-amber-800 dark:text-amber-300">
                 想要自定义额度(例如 $50、$1000)?这三档以外
-                <button
-                  type="button"
-                  class="underline hover:text-amber-900 dark:hover:text-amber-200"
-                  @click="copyCustomWechat"
-                >
-                  联系管理员微信 <code class="font-mono font-semibold">{{ LIANDONG_CUSTOM_WECHAT }}</code>
-                </button>
-                手动开单。
+                请联系管理员或客服人工自定义充值；按客服确认的方式完成转账，管理员核对后在后台增加额度。
               </p>
             </div>
-          </template>
-          <!-- Subscribe Tab -->
-          <template v-else-if="activeTab === 'subscription'">
-            <div
-              data-hfc-purchase-liandong-subscription="monthly"
-              class="space-y-5"
-            >
-              <div class="card p-5">
-                <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-                  <div>
-                    <h3 class="text-base font-semibold text-gray-900 dark:text-white">
-                      选择订阅月卡
-                    </h3>
-                    <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
-                      5 档与官网价格同步,点击后跳转链动小铺下单。
-                    </p>
-                  </div>
-                  <span class="text-xs font-medium text-primary-600 dark:text-primary-400">
-                    链动小铺直连
-                  </span>
-                </div>
-              </div>
-
-              <div class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-                <div
-                  v-for="tier in LIANDONG_MONTHLY_TIERS"
-                  :key="tier.id"
-                  class="group relative flex min-h-[290px] flex-col overflow-hidden rounded-2xl border bg-white transition-all hover:-translate-y-0.5 hover:shadow-xl dark:bg-dark-800"
-                  :class="tier.recommended
-                    ? 'border-primary-500 shadow-lg shadow-primary-500/10'
-                    : 'border-gray-200 dark:border-dark-700'"
-                  :data-hfc-liandong-tier="tier.id"
-                >
-                  <div
-                    class="h-1.5"
-                    :class="tier.recommended ? 'bg-primary-500' : 'bg-emerald-400'"
-                  />
-                  <div
-                    v-if="tier.recommended"
-                    class="absolute right-3 top-3 rounded-full bg-primary-500 px-2 py-0.5 text-[10px] font-semibold text-white"
-                  >
-                    推荐
-                  </div>
-                  <div class="flex flex-1 flex-col p-4">
-                    <div class="mb-3 pr-10">
-                      <div class="flex flex-wrap items-center gap-2">
-                        <h4 class="text-base font-bold text-gray-900 dark:text-white">
-                          {{ tier.name }}
-                        </h4>
-                        <span
-                          v-if="tier.purchaseBadge"
-                          class="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200 dark:bg-amber-400/10 dark:text-amber-200 dark:ring-amber-300/20"
-                        >
-                          {{ tier.purchaseBadge }}
-                        </span>
-                      </div>
-                      <p class="mt-1 min-h-[32px] text-xs leading-relaxed text-gray-500 dark:text-dark-400">
-                        {{ tier.tagline }}
-                      </p>
-                    </div>
-
-                    <div class="mb-3 flex items-end gap-1">
-                      <span class="text-sm font-medium text-gray-500 dark:text-dark-400">¥</span>
-                      <span class="text-3xl font-extrabold text-primary-600 dark:text-primary-400">
-                        {{ tier.priceCny }}
-                      </span>
-                      <span class="pb-1 text-xs text-gray-500 dark:text-dark-400">/ 30天</span>
-                    </div>
-                    <div class="mb-3 flex items-center gap-2 text-xs">
-                      <span class="text-gray-400 line-through dark:text-dark-500">原价 ¥{{ tier.originalPriceCny }}</span>
-                      <span class="rounded bg-red-50 px-1.5 py-0.5 font-semibold text-red-500 dark:bg-red-900/20 dark:text-red-300">
-                        {{ discountText(tier) }}
-                      </span>
-                    </div>
-
-                    <div class="mb-3 grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg bg-gray-50 px-3 py-2 text-xs dark:bg-dark-700/50">
-                      <div class="flex items-center justify-between">
-                        <span class="text-gray-400 dark:text-dark-500">月额度</span>
-                        <span class="font-semibold text-gray-800 dark:text-gray-200">{{ formatUsd(tier.quotaUsd) }}</span>
-                      </div>
-                      <div class="flex items-center justify-between">
-                        <span class="text-gray-400 dark:text-dark-500">日 cap</span>
-                        <span class="font-semibold text-gray-800 dark:text-gray-200">{{ formatDailyCap(tier.dailyCapUsd) }}</span>
-                      </div>
-                      <div class="col-span-2 flex items-center justify-between">
-                        <span class="text-gray-400 dark:text-dark-500">模式</span>
-                        <span class="font-semibold text-gray-800 dark:text-gray-200">共享钱包</span>
-                      </div>
-                    </div>
-
-                    <div class="mb-4 space-y-1.5">
-                      <div
-                        v-for="feature in tier.features"
-                        :key="feature"
-                        class="flex items-start gap-1.5"
-                      >
-                        <svg class="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                        </svg>
-                        <span class="text-xs text-gray-600 dark:text-gray-300">{{ feature }}</span>
-                      </div>
-                    </div>
-
-                    <div class="flex-1" />
-
-                    <button
-                      type="button"
-                      class="w-full rounded-xl bg-primary-600 py-2.5 text-sm font-semibold text-white transition-all hover:bg-primary-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
-                      :aria-label="`开通${tier.name}`"
-                      @click="openLiandongMonthly(tier.url)"
-                    >
-                      立即开通
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div v-if="activeSubscriptions.length > 0">
-                <p class="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">{{ t('payment.activeSubscription') }}</p>
-                <div class="space-y-2">
-                  <div v-for="sub in activeSubscriptions" :key="sub.id"
-                    class="flex items-center gap-3 rounded-xl border border-gray-100 bg-white px-3 py-2 dark:border-dark-700 dark:bg-dark-800">
-                    <div :class="['h-6 w-1 shrink-0 rounded-full', platformAccentBarClass(sub.group?.platform || '')]" />
-                    <div class="min-w-0 flex-1">
-                      <div class="flex items-center gap-1.5">
-                        <span class="truncate text-xs font-semibold text-gray-900 dark:text-white">{{ sub.group?.name || t('payment.groupFallback', { id: sub.group_id }) }}</span>
-                        <span :class="['shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium', platformBadgeLightClass(sub.group?.platform || '')]">{{ platformLabel(sub.group?.platform || '') }}</span>
-                      </div>
-                      <div class="flex flex-wrap gap-x-3 text-[11px] text-gray-400 dark:text-gray-500">
-                        <span v-if="sub.group?.monthly_limit_usd != null">月额度: ${{ Number(sub.group.monthly_limit_usd).toLocaleString() }}</span>
-                        <span v-if="sub.group?.daily_limit_usd != null">日 cap: ${{ Number(sub.group.daily_limit_usd).toLocaleString() }}</span>
-                        <span v-if="sub.expires_at">{{ t('userSubscriptions.daysRemaining', { days: getDaysRemaining(sub.expires_at) }) }}</span>
-                        <span v-else>{{ t('userSubscriptions.noExpiration') }}</span>
-                      </div>
-                    </div>
-                    <span class="badge badge-success shrink-0 text-[10px]">{{ t('userSubscriptions.status.active') }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </template>
+          </div>
         </template>
         <div v-if="(checkout.help_text || checkout.help_image_url) && paymentPhase === 'select'" class="card p-4">
           <div class="flex flex-col items-center gap-3">
@@ -232,23 +94,6 @@
         </div>
       </template>
     </div>
-    <!-- Renewal Plan Selection Modal -->
-    <Teleport to="body">
-      <Transition name="modal">
-        <div v-if="showRenewalModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click.self="closeRenewalModal">
-          <div class="relative w-full max-w-lg rounded-2xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-dark-700 dark:bg-dark-900">
-            <!-- Close button -->
-            <button class="absolute right-4 top-4 rounded-lg p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-dark-700 dark:hover:text-gray-200" @click="closeRenewalModal">
-              <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>
-            <h3 class="mb-4 text-lg font-semibold text-gray-900 dark:text-white">{{ t('payment.selectPlan') }}</h3>
-            <div class="space-y-4">
-              <SubscriptionPlanCard v-for="plan in renewalPlans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" @select="selectPlanFromModal" />
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
     <!-- Image Preview Overlay -->
     <Teleport to="body">
       <Transition name="modal">
@@ -272,16 +117,12 @@ import { paymentAPI } from '@/api/payment'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
 import { isMobileDevice } from '@/utils/device'
 import type { SubscriptionPlan, CheckoutInfoResponse, CreateOrderResult, OrderType } from '@/types/payment'
-import {
-  LIANDONG_MONTHLY_TIERS,
-  LIANDONG_CREDITS_TIERS,
-  LIANDONG_CUSTOM_WECHAT,
-  type LiandongMonthlyTier
-} from '@/constants/liandongSku'
+import { LIANDONG_CREDITS_TIERS } from '@/constants/liandongSku'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { METHOD_ORDER, getPaymentPopupFeatures } from '@/components/payment/providerConfig'
 import {
   PAYMENT_RECOVERY_STORAGE_KEY,
+  PAYMENT_RECOVERY_SESSION_STORAGE_KEY,
   buildCreateOrderPayload,
   clearPaymentRecoverySnapshot,
   decidePaymentLaunch,
@@ -291,8 +132,7 @@ import {
   type PaymentRecoverySnapshot,
   writePaymentRecoverySnapshot,
 } from '@/components/payment/paymentFlow'
-import { platformAccentBarClass, platformBadgeLightClass, platformLabel } from '@/utils/platformColors'
-import SubscriptionPlanCard from '@/components/payment/SubscriptionPlanCard.vue'
+import { getActiveCreditsWalletBalanceUSD } from '@/utils/subscriptionWallet'
 import PaymentStatusPanel from '@/components/payment/PaymentStatusPanel.vue'
 import { buildPaymentErrorToastMessage, describePaymentScenarioError } from './paymentUx'
 import { hasWechatResumeQuery, parseWechatResumeRoute, stripWechatResumeQuery } from './paymentWechatResume'
@@ -307,48 +147,19 @@ const appStore = useAppStore()
 
 const user = computed(() => authStore.user)
 const activeSubscriptions = computed(() => subscriptionStore.activeSubscriptions)
+const creditsWalletRawBalanceUSD = computed(() => getActiveCreditsWalletBalanceUSD(activeSubscriptions.value))
+const creditsWalletBalanceUSD = computed(() => Math.max(0, creditsWalletRawBalanceUSD.value))
+const creditsWalletDebtUSD = computed(() => Math.max(0, -creditsWalletRawBalanceUSD.value))
 
 // recharge tab — 直跳链动小铺,不走内置 ZPay
 function openLiandongCredits(url: string) {
   window.open(url, '_blank', 'noopener')
 }
 
-function openLiandongMonthly(url: string) {
-  window.open(url, '_blank', 'noopener')
-}
-
-function copyCustomWechat() {
-  navigator.clipboard?.writeText(LIANDONG_CUSTOM_WECHAT).catch(() => {})
-  appStore.showSuccess?.(`已复制微信号 ${LIANDONG_CUSTOM_WECHAT}`)
-}
-
-function formatUsd(value: number): string {
-  return `$${value.toLocaleString()}`
-}
-
-function formatDailyCap(value: number | null): string {
-  return value == null ? '不限' : formatUsd(value)
-}
-
-function discountText(tier: LiandongMonthlyTier): string {
-  if (!tier.originalPriceCny || tier.originalPriceCny <= tier.priceCny) return ''
-  const discount = Math.round((tier.priceCny / tier.originalPriceCny) * 100) / 10
-  if (Number.isInteger(discount)) {
-    return `约 ${discount.toFixed(0)} 折`
-  }
-  return `约 ${discount} 折`
-}
-
-function getDaysRemaining(expiresAt: string): number {
-  const diff = new Date(expiresAt).getTime() - Date.now()
-  return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)))
-}
-
 const loading = ref(true)
 const submitting = ref(false)
 const errorMessage = ref('')
 const errorHintMessage = ref('')
-const activeTab = ref<'recharge' | 'subscription'>('recharge')
 const amount = ref<number | null>(null)
 const selectedMethod = ref('')
 const selectedPlan = ref<SubscriptionPlan | null>(null)
@@ -375,6 +186,8 @@ interface WeixinJSBridgeLike {
 function emptyPaymentState(): PaymentRecoverySnapshot {
   return {
     orderId: 0,
+    userId: authStore.user?.id || 0,
+    revision: '',
     amount: 0,
     qrCode: '',
     expiresAt: '',
@@ -429,18 +242,45 @@ const paymentState = ref<PaymentRecoverySnapshot>(emptyPaymentState())
 
 function persistRecoverySnapshot(snapshot: PaymentRecoverySnapshot) {
   if (typeof window === 'undefined' || !snapshot.orderId) return
-  writePaymentRecoverySnapshot(window.localStorage, snapshot, PAYMENT_RECOVERY_STORAGE_KEY)
+  const boundSnapshot: PaymentRecoverySnapshot = {
+    ...snapshot,
+    userId: snapshot.userId || authStore.user?.id || 0,
+  }
+  writePaymentRecoverySnapshot(
+    window.sessionStorage,
+    boundSnapshot,
+    PAYMENT_RECOVERY_SESSION_STORAGE_KEY,
+  )
+  writePaymentRecoverySnapshot(window.localStorage, {
+    ...boundSnapshot,
+    qrCode: '',
+    payUrl: '',
+    clientSecret: '',
+    resumeToken: '',
+  }, PAYMENT_RECOVERY_STORAGE_KEY)
 }
 
-function removeRecoverySnapshot() {
+function removeRecoverySnapshot(snapshot = paymentState.value) {
   if (typeof window === 'undefined') return
-  clearPaymentRecoverySnapshot(window.localStorage, PAYMENT_RECOVERY_STORAGE_KEY)
+  if (!snapshot.userId || !snapshot.orderId || !snapshot.revision) return
+  const selector = {
+    userId: snapshot.userId,
+    orderId: snapshot.orderId,
+    revision: snapshot.revision,
+  }
+  clearPaymentRecoverySnapshot(window.localStorage, selector, PAYMENT_RECOVERY_STORAGE_KEY)
+  clearPaymentRecoverySnapshot(
+    window.sessionStorage,
+    selector,
+    PAYMENT_RECOVERY_SESSION_STORAGE_KEY,
+  )
 }
 
 function resetPayment() {
+  const currentPayment = paymentState.value
   paymentPhase.value = 'select'
   paymentState.value = emptyPaymentState()
-  removeRecoverySnapshot()
+  removeRecoverySnapshot(currentPayment)
 }
 
 async function redirectToPaymentResult(state: PaymentRecoverySnapshot): Promise<void> {
@@ -450,9 +290,6 @@ async function redirectToPaymentResult(state: PaymentRecoverySnapshot): Promise<
   }
   if (state.outTradeNo) {
     query.out_trade_no = state.outTradeNo
-  }
-  if (state.resumeToken) {
-    query.resume_token = state.resumeToken
   }
   await router.push({
     path: '/payment/result',
@@ -507,28 +344,19 @@ function onPaymentDone() {
 }
 
 function onPaymentSuccess() {
-  removeRecoverySnapshot()
+  removeRecoverySnapshot(paymentState.value)
   authStore.refreshUser()
-  if (paymentState.value.orderType === 'subscription') {
-    subscriptionStore.fetchActiveSubscriptions(true).catch(() => {})
-  }
+  subscriptionStore.fetchActiveSubscriptions(true).catch(() => {})
 }
 
 function onPaymentSettled() {
-  removeRecoverySnapshot()
+  removeRecoverySnapshot(paymentState.value)
 }
 
 // All checkout data from single API call
 const checkout = ref<CheckoutInfoResponse>({
   methods: {}, global_min: 0, global_max: 0,
   plans: [], balance_disabled: false, balance_recharge_multiplier: 1, recharge_fee_rate: 0, help_text: '', help_image_url: '', stripe_publishable_key: '',
-})
-
-const tabs = computed(() => {
-  const result: { key: 'recharge' | 'subscription'; label: string }[] = []
-  if (!checkout.value.balance_disabled) result.push({ key: 'recharge', label: t('payment.tabTopUp') })
-  result.push({ key: 'subscription', label: t('payment.tabSubscribe') })
-  return result
 })
 
 const visibleMethods = computed(() => getVisibleMethods(checkout.value.methods))
@@ -551,26 +379,6 @@ watch(() => [validAmount.value, selectedMethod.value] as const, ([amt, method]) 
   const available = enabledMethods.value.find((m) => amountFitsMethod(amt, m))
   if (available) selectedMethod.value = available
 })
-
-// Renewal modal state
-const showRenewalModal = ref(false)
-const renewGroupId = ref<number | null>(null)
-const renewalPlans = computed(() => {
-  if (renewGroupId.value == null) return []
-  return checkout.value.plans.filter(p => p.group_id === renewGroupId.value)
-})
-
-function selectPlanFromModal(plan: SubscriptionPlan) {
-  showRenewalModal.value = false
-  renewGroupId.value = null
-  selectedPlan.value = plan
-  errorMessage.value = ''
-}
-
-function closeRenewalModal() {
-  showRenewalModal.value = false
-  renewGroupId.value = null
-}
 
 async function createOrder(orderAmount: number, orderType: OrderType, planId?: number, options: CreateOrderOptions = {}) {
   submitting.value = true
@@ -612,9 +420,7 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
         path: '/payment/stripe',
         query: {
           order_id: String(result.order_id),
-          client_secret: result.client_secret,
           method: stripeMethod || undefined,
-          resume_token: result.resume_token || undefined,
         },
       }).href
       : ''
@@ -625,6 +431,7 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
       isWechatBrowser: typeof window !== 'undefined' && /MicroMessenger/i.test(window.navigator.userAgent),
       stripePopupUrl: stripeRouteUrl,
       stripeRouteUrl,
+      userId: authStore.user?.id,
     })
 
     if (decision.kind === 'wechat_oauth' && decision.oauth?.authorize_url) {
@@ -659,10 +466,11 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
         const jsapiResult = await invokeWechatJsapiPayment(decision.jsapi as Record<string, unknown>)
         const errMsg = String(jsapiResult.err_msg || '').toLowerCase()
         if (errMsg.includes('cancel')) {
-          appStore.showInfo(t('payment.qr.cancelled'))
-          resetPayment()
+          if (await cancelCreatedOrderBeforeRetry(decision.paymentState)) {
+            appStore.showInfo(t('payment.qr.cancelled'))
+          }
         } else if (errMsg && !errMsg.includes('ok')) {
-          resetPayment()
+          if (!await cancelCreatedOrderBeforeRetry(decision.paymentState)) return
           const fallbackApplied = await attemptMobileQrFallback(
             { reason: 'WECHAT_JSAPI_FAILED', message: errMsg },
             {
@@ -678,11 +486,10 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
           }
         } else {
           const resultState = { ...decision.paymentState }
-          resetPayment()
           await redirectToPaymentResult(resultState)
         }
       } catch (err: unknown) {
-        resetPayment()
+        if (!await cancelCreatedOrderBeforeRetry(decision.paymentState)) return
         const fallbackApplied = await attemptMobileQrFallback(err, {
           orderAmount,
           orderType,
@@ -736,6 +543,24 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
     appStore.showError(buildPaymentErrorToastMessage(errorMessage.value, errorHintMessage.value))
   } finally {
     submitting.value = false
+  }
+}
+
+async function cancelCreatedOrderBeforeRetry(state: PaymentRecoverySnapshot): Promise<boolean> {
+  try {
+    const response = await paymentAPI.cancelOrder(state.orderId)
+    if (response.data.message !== 'cancelled') {
+      await redirectToPaymentResult(state)
+      return false
+    }
+    resetPayment()
+    return true
+  } catch {
+    // Cancellation is a financial state transition. If it cannot be confirmed,
+    // keep the order identity and let the result page reconcile instead of
+    // creating a second order.
+    await redirectToPaymentResult(state)
+    return false
   }
 }
 
@@ -803,9 +628,7 @@ async function attemptMobileQrFallback(err: unknown, context: MobileQrFallbackCo
         path: '/payment/stripe',
         query: {
           order_id: String(result.order_id),
-          client_secret: result.client_secret,
           method: stripeMethod,
-          resume_token: result.resume_token || undefined,
         },
       }).href
       : ''
@@ -816,6 +639,7 @@ async function attemptMobileQrFallback(err: unknown, context: MobileQrFallbackCo
       isWechatBrowser: false,
       stripePopupUrl: stripeRouteUrl,
       stripeRouteUrl,
+      userId: authStore.user?.id,
     })
 
     if (decision.kind !== 'qr_waiting' || !decision.paymentState.qrCode) {
@@ -900,16 +724,25 @@ onMounted(async () => {
     }
     if (typeof window !== 'undefined') {
       if (hasWechatResumeQuery(route.query)) {
-        removeRecoverySnapshot()
+        clearPaymentRecoverySnapshot(window.localStorage, PAYMENT_RECOVERY_STORAGE_KEY)
+        clearPaymentRecoverySnapshot(window.sessionStorage, PAYMENT_RECOVERY_SESSION_STORAGE_KEY)
       }
       const routeResumeToken = typeof route.query.resume_token === 'string'
         ? route.query.resume_token
         : typeof route.query.wechat_resume_token === 'string'
           ? route.query.wechat_resume_token
           : undefined
+      const currentUserID = authStore.user?.id || 0
+      const recoveryOptions = {
+        resumeToken: routeResumeToken,
+        userId: currentUserID || undefined,
+      }
       const restored = readPaymentRecoverySnapshot(
+        window.sessionStorage.getItem(PAYMENT_RECOVERY_SESSION_STORAGE_KEY),
+        recoveryOptions,
+      ) || readPaymentRecoverySnapshot(
         window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY),
-        { resumeToken: routeResumeToken },
+        recoveryOptions,
       )
       if (restored) {
         paymentState.value = restored
@@ -923,23 +756,6 @@ onMounted(async () => {
       }
     }
     await resumeWechatPaymentFromQuery()
-    if (checkout.value.balance_disabled) {
-      activeTab.value = 'subscription'
-    }
-    // Handle renewal navigation: ?tab=subscription&group=123
-    if (route.query.tab === 'subscription') {
-      activeTab.value = 'subscription'
-      if (route.query.group) {
-        const groupId = Number(route.query.group)
-        const groupPlans = checkout.value.plans.filter(p => p.group_id === groupId)
-        if (groupPlans.length === 1) {
-          selectedPlan.value = groupPlans[0]
-        } else if (groupPlans.length > 1) {
-          renewGroupId.value = groupId
-          showRenewalModal.value = true
-        }
-      }
-    }
   } catch (err: unknown) { appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error'))) }
   finally { loading.value = false }
   // Fetch active subscriptions (uses cache, non-blocking)

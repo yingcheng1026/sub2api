@@ -2,6 +2,7 @@ package admin
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/model"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -94,6 +95,10 @@ func (h *ErrorPassthroughHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	if req.PassthroughBody != nil && *req.PassthroughBody {
+		response.BadRequest(c, "Raw upstream error body passthrough is disabled for security")
+		return
+	}
 
 	rule := &model.ErrorPassthroughRule{
 		Name:       req.Name,
@@ -119,16 +124,12 @@ func (h *ErrorPassthroughHandler) Create(c *gin.Context) {
 	} else {
 		rule.PassthroughCode = true
 	}
-	if req.PassthroughBody != nil {
-		rule.PassthroughBody = *req.PassthroughBody
-	} else {
-		rule.PassthroughBody = true
-	}
+	rule.PassthroughBody = false
 	if req.SkipMonitoring != nil {
 		rule.SkipMonitoring = *req.SkipMonitoring
 	}
 	rule.ResponseCode = req.ResponseCode
-	rule.CustomMessage = req.CustomMessage
+	rule.CustomMessage = safeErrorPassthroughCustomMessage(req.CustomMessage)
 	rule.Description = req.Description
 
 	// 确保切片不为 nil
@@ -169,6 +170,10 @@ func (h *ErrorPassthroughHandler) Update(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	if req.PassthroughBody != nil && *req.PassthroughBody {
+		response.BadRequest(c, "Raw upstream error body passthrough is disabled for security")
+		return
+	}
 
 	// 先获取现有规则
 	existing, err := h.service.GetByID(c.Request.Context(), id)
@@ -193,8 +198,8 @@ func (h *ErrorPassthroughHandler) Update(c *gin.Context) {
 		Platforms:       existing.Platforms,
 		PassthroughCode: existing.PassthroughCode,
 		ResponseCode:    existing.ResponseCode,
-		PassthroughBody: existing.PassthroughBody,
-		CustomMessage:   existing.CustomMessage,
+		PassthroughBody: false,
+		CustomMessage:   safeErrorPassthroughCustomMessage(existing.CustomMessage),
 		SkipMonitoring:  existing.SkipMonitoring,
 		Description:     existing.Description,
 	}
@@ -226,9 +231,6 @@ func (h *ErrorPassthroughHandler) Update(c *gin.Context) {
 	}
 	if req.ResponseCode != nil {
 		rule.ResponseCode = req.ResponseCode
-	}
-	if req.PassthroughBody != nil {
-		rule.PassthroughBody = *req.PassthroughBody
 	}
 	if req.CustomMessage != nil {
 		rule.CustomMessage = req.CustomMessage
@@ -262,6 +264,14 @@ func (h *ErrorPassthroughHandler) Update(c *gin.Context) {
 	}
 
 	response.Success(c, updated)
+}
+
+func safeErrorPassthroughCustomMessage(message *string) *string {
+	if message == nil || strings.TrimSpace(*message) == "" {
+		fallback := service.DefaultErrorPassthroughClientMessage
+		return &fallback
+	}
+	return message
 }
 
 // Delete 删除规则

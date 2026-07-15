@@ -16,7 +16,7 @@ func (s *UserRepoSuite) mustInsertUsageLog(userID int64, createdAt time.Time) {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "usage-log-account"})
 	apiKey := mustCreateApiKey(s.T(), s.client, &service.APIKey{UserID: userID})
 
-	_, err := integrationDB.ExecContext(
+	_, err := s.repo.sql.ExecContext(
 		s.ctx,
 		`INSERT INTO usage_logs (user_id, api_key_id, account_id, model, input_tokens, output_tokens, total_cost, actual_cost, created_at)
 		 VALUES ($1, $2, $3, 'gpt-test', 1, 1, 0.01, 0.01, $4)`,

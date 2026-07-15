@@ -67,8 +67,14 @@ func InitEnt(cfg *config.Config) (*ent.Client, *sql.DB, error) {
 	// 创建 Ent 客户端，绑定到已配置的数据库驱动。
 	client := ent.NewClient(ent.Driver(drv))
 
-	// 启动阶段：从配置或数据库中确保系统密钥可用。
-	if err := ensureBootstrapSecrets(migrationCtx, client, cfg); err != nil {
+	// JWT signing material must be opened or migrated before configuration
+	// validation and before any worker or listener can observe it.
+	secretEncryptor, err := NewAESEncryptor(cfg)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("initialize bootstrap secret encryption: %w", err)
+	}
+	if err := ensureBootstrapSecrets(migrationCtx, client, cfg, secretEncryptor); err != nil {
 		_ = client.Close()
 		return nil, nil, err
 	}

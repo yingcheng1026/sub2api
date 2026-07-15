@@ -23,16 +23,21 @@ type UserRepoSuite struct {
 }
 
 func (s *UserRepoSuite) SetupTest() {
-	s.ctx = context.Background()
-	s.client = testEntClient(s.T())
-	s.repo = newUserRepositoryWithSQL(s.client, integrationDB)
-
-	// 清理测试数据，确保每个测试从干净状态开始
-	_, _ = integrationDB.ExecContext(s.ctx, "DELETE FROM auth_identity_channels")
-	_, _ = integrationDB.ExecContext(s.ctx, "DELETE FROM auth_identities")
-	_, _ = integrationDB.ExecContext(s.ctx, "DELETE FROM user_subscriptions")
-	_, _ = integrationDB.ExecContext(s.ctx, "DELETE FROM user_allowed_groups")
-	_, _ = integrationDB.ExecContext(s.ctx, "DELETE FROM users")
+	tx := testEntTx(s.T())
+	s.ctx = dbent.NewTxContext(context.Background(), tx)
+	s.client = tx.Client()
+	s.repo = newUserRepositoryWithSQL(s.client, tx)
+	_, err := tx.ExecContext(s.ctx, `
+		SET LOCAL session_replication_role = 'replica';
+		DELETE FROM user_subscriptions;
+		DELETE FROM user_allowed_groups;
+		DELETE FROM auth_identity_channels;
+		DELETE FROM auth_identities;
+		DELETE FROM users;
+		DELETE FROM groups;
+		SET LOCAL session_replication_role = 'origin';
+	`)
+	s.Require().NoError(err, "isolate user repository test transaction")
 }
 
 func TestUserRepoSuite(t *testing.T) {
@@ -68,6 +73,7 @@ func (s *UserRepoSuite) mustCreateGroup(name string) *service.Group {
 	g, err := s.client.Group.Create().
 		SetName(name).
 		SetStatus(service.StatusActive).
+		SetSubscriptionType(service.SubscriptionTypeSubscription).
 		Save(s.ctx)
 	s.Require().NoError(err, "create group")
 	return groupEntityToService(g)
@@ -158,6 +164,21 @@ func (s *UserRepoSuite) TestUpdate() {
 	updated, err := s.repo.GetByID(s.ctx, user.ID)
 	s.Require().NoError(err, "GetByID after update")
 	s.Require().Equal("updated", updated.Username)
+}
+
+func (s *UserRepoSuite) TestUpdatePersistsTokenVersionForSessionRevocation() {
+	user := s.mustCreateUser(&service.User{Email: "token-version@test.com"})
+
+	loaded, err := s.repo.GetByID(s.ctx, user.ID)
+	s.Require().NoError(err)
+	loaded.TokenVersion = 9
+	loaded.TokenVersionResolved = true
+	s.Require().NoError(s.repo.Update(s.ctx, loaded), "persist token version")
+
+	reloaded, err := s.repo.GetByID(s.ctx, user.ID)
+	s.Require().NoError(err)
+	s.Require().True(reloaded.TokenVersionResolved)
+	s.Require().Equal(int64(9), reloaded.TokenVersion)
 }
 
 func (s *UserRepoSuite) TestUpdateIgnoresNoRowsFromConflictingEmailIdentityUpsert() {
@@ -277,6 +298,27 @@ func (s *UserRepoSuite) TestListWithFilters_SearchByUsername() {
 	s.Require().NoError(err)
 	s.Require().Len(users, 1)
 	s.Require().Equal("JohnDoe", users[0].Username)
+}
+
+func (s *UserRepoSuite) TestListWithFilters_SearchesAPIKeyPrefixNotCiphertext() {
+	user := s.mustCreateUser(&service.User{Email: "prefix-owner@test.com", Username: "PrefixOwner"})
+	_, err := s.client.APIKey.Create().
+		SetUserID(user.ID).
+		SetKey("enc:v1:opaque-ciphertext-that-must-not-be-searched").
+		SetKeyPrefix("sk-ab123").
+		SetName("prefix key").
+		SetStatus(service.StatusActive).
+		Save(s.ctx)
+	s.Require().NoError(err)
+
+	users, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, service.UserListFilters{Search: "sk-ab123"})
+	s.Require().NoError(err)
+	s.Require().Len(users, 1)
+	s.Require().Equal(user.ID, users[0].ID)
+
+	users, _, err = s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, service.UserListFilters{Search: "opaque-ciphertext"})
+	s.Require().NoError(err)
+	s.Require().Empty(users)
 }
 
 func (s *UserRepoSuite) TestListWithFilters_LoadsActiveSubscriptions() {

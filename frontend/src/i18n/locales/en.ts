@@ -370,8 +370,8 @@ export default {
     expand: 'Expand',
     logout: 'Logout',
     github: 'GitHub',
-    mySubscriptions: 'My Subscriptions',
-    buySubscription: 'Recharge / Subscription',
+    mySubscriptions: 'Legacy Entitlements',
+    buySubscription: 'Top Up Credits',
     docs: 'Docs',
     myOrders: 'My Orders',
     orderManagement: 'Orders',
@@ -580,6 +580,7 @@ export default {
     title: 'Dashboard',
     welcomeMessage: "Welcome back! Here's an overview of your account.",
     balance: 'Balance',
+    walletStatusUnavailable: 'Wallet status could not be verified. Legacy account balance is hidden to avoid showing the wrong balance; refresh and try again.',
     apiKeys: 'API Keys',
     todayRequests: 'Today Requests',
     todayCost: 'Today Cost',
@@ -675,6 +676,13 @@ export default {
     created: 'Created',
     copyToClipboard: 'Copy to clipboard',
     copied: 'Copied!',
+    revealTitle: 'Verify your identity',
+    revealVerificationLabel: 'Current password or 2FA code',
+    revealVerificationPrompt: 'Verify again to protect this key and its sensitive settings: enter your current password, or your 6-digit code if 2FA is enabled.',
+    oauthPasswordGuidance: 'OAuth-only and do not know a local password? Use Forgot Password to establish one, or enable 2FA in Profile first.',
+    revealSubmit: 'Verify and continue',
+    revealSubmitting: 'Verifying...',
+    revealFailed: 'Verification failed. The API key was not revealed.',
     importToCcSwitch: 'Import to CCS',
     enable: 'Enable',
     disable: 'Disable',
@@ -682,12 +690,15 @@ export default {
     namePlaceholder: 'My API Key',
     groupLabel: 'Group',
     selectGroup: 'Select a group',
-    walletAnyKey: 'Universal key (auto-route by model)',
-    walletAnyKeyHint: 'Claude, GPT, and Gemini requests automatically use the matching group and charge your wallet.',
-    walletAnyKeyBadge: 'Universal · Wallet mode',
-    walletAnyKeySelectPlaceholder: 'Auto-route by model',
+    walletAnyKey: 'Credits wallet auto-routing key',
+    walletAnyKeyHint: 'Created by the system. GPT uses openai-default; Claude requires an administrator-granted vip group.',
+    walletAnyKeyBadge: 'Credits wallet · Auto-routing',
+    walletAnyKeySelectPlaceholder: 'System-managed routing',
     walletKeyBadge: 'Wallet',
-    walletKeyBadgeHint: 'Auto-created wallet key. All wallet keys share the same balance.',
+    walletKeyBadgeHint: 'System-created credits wallet key. GPT uses openai-default; Claude requires vip access.',
+    walletFixedGroupHint: 'Credits-wallet keys can use openai-default. The Claude vip group appears only after administrator authorization.',
+    walletEntitlementsLoading: 'Checking wallet and group permissions…',
+    walletEntitlementsUnavailable: 'Wallet group permissions could not be verified. Saving is blocked; refresh and try again.',
     statusLabel: 'Status',
     selectStatus: 'Select status',
     saving: 'Saving...',
@@ -732,6 +743,7 @@ export default {
       },
       cliTabs: {
         claudeCode: 'Claude Code',
+        claudeCodeVip: 'Claude Code (vip)',
         geminiCli: 'Gemini CLI',
         codexCli: 'Codex CLI',
         codexCliWs: 'Codex CLI (WebSocket)',
@@ -1846,6 +1858,11 @@ export default {
       useDefaultRate: 'Use Default',
       customRatePlaceholder: 'Leave empty for default',
       groupConfigUpdated: 'Group configuration updated successfully',
+      groupConfigLoadFailed: 'Group configuration failed to load, so saving is disabled. Retry to avoid writing another user\'s settings.',
+      groupConfigStale: 'This user\'s group access changed elsewhere. Close, refresh, and configure it again.',
+      walletRoutingBusinessRule: 'Credits wallets use GPT through openai-default by default. Grant the dedicated vip group only after the user explicitly requests Claude access.',
+      openAIDefaultGroupHint: 'Default GPT wallet group (public; no extra grant required)',
+      vipGroupHint: 'Dedicated Claude group (grant only after an explicit user request)',
       replaceGroup: 'Replace Group',
       clickToReplace: 'Click to replace',
       replaceGroupTitle: 'Replace Exclusive Group',
@@ -2677,14 +2694,14 @@ export default {
       createFirstMonitor: 'Create your first monitor to track channel availability',
       advanced: {
         section: 'Advanced (optional)',
-        sectionHint: 'Customize request headers and body to bypass upstream client-detection (e.g. "only Claude Code clients allowed").',
+        sectionHint: 'Use only customization explicitly allowed by the upstream. Official-client impersonation and credential headers are rejected.',
         headers: 'Custom request headers',
-        headersPlaceholder: 'User-Agent: claude-cli/1.0.83 (external, cli)\nx-app: cli\nanthropic-beta: claude-code-20250219',
+        headersPlaceholder: 'User-Agent: sub2api-monitor/1.0\nanthropic-beta: interleaved-thinking-2025-05-14\nX-Monitor-Trace: enabled',
         headerNamePlaceholder: 'Header name',
         headerValuePlaceholder: 'Value',
         headerAddRow: 'Add header',
         headerNameInvalid: 'Header name cannot contain whitespace or colon: {name}',
-        headersHint: 'Merged on top of adapter defaults (user wins). Hop-by-hop headers (Host / Content-Length / ...) are ignored.',
+        headersHint: 'Merged with adapter defaults. Credential, official-client identity, and hop-by-hop headers are rejected by the server.',
         headersParseError: 'Cannot parse line: {line}',
         bodyMode: 'Body handling',
         bodyModeOff: 'Default',
@@ -2697,13 +2714,16 @@ export default {
         bodyJsonFormat: 'Format',
         bodyJsonHint: 'Parsed on blur. Empty means no override.',
         bodyJsonError: 'JSON parse failed',
-        bodyJsonObjectError: 'Body must be a JSON object (no arrays or primitives)'
+        bodyJsonObjectError: 'Body must be a JSON object (no arrays or primitives)',
+        writeOnlyNotice: 'Existing headers and body are write-only sensitive configuration and are never returned to the browser. A normal save preserves them.',
+        replaceExisting: 'Replace or clear the existing advanced configuration',
+        templateAppliedServerSide: 'The server applies this template securely; its sensitive contents are not expanded in the browser.'
       },
       templateField: {
         label: 'Request template',
         none: 'No template',
         placeholder: 'Pick a template (filtered by current provider)',
-        applyHint: 'Picking a template copies its headers and body to this monitor (snapshot). Later template edits are not auto-synced.'
+        applyHint: 'Picking a template makes the server copy its headers and body snapshot securely. Sensitive contents are not returned to the browser; later edits are not auto-synced.'
       },
       template: {
         manageButton: 'Templates',
@@ -2817,6 +2837,8 @@ export default {
       noSubscriptionsYet: 'No subscriptions yet',
       assignFirstSubscription: 'Assign a subscription to get started.',
       subscriptionAssigned: 'Subscription assigned successfully',
+      pendingAssignmentReconciliationRequired: 'This assignment is still unresolved and is too old to retry safely. Reconcile the order and wallet ledger before assigning again.',
+      pendingAssignmentActorUnavailable: 'The current admin identity is not loaded. Automatic retry and assignment were stopped; refresh and try again.',
       subscriptionAdjusted: 'Subscription adjusted successfully',
       subscriptionRevoked: 'Subscription revoked successfully',
       failedToLoad: 'Failed to load subscriptions',
@@ -4120,6 +4142,7 @@ export default {
       balance: 'Balance',
       concurrency: 'Concurrency',
       subscription: 'Subscription',
+      wallet: 'Credits Wallet',
       invitation: 'Invitation',
       invitationHint: 'Invitation codes are used to restrict user registration. They are automatically marked as used after use.',
       unused: 'Unused',
@@ -4168,6 +4191,7 @@ export default {
         balance: 'Balance',
         concurrency: 'Concurrency',
         subscription: 'Subscription',
+        wallet: 'Credits Wallet',
         invitation: 'Invitation',
         // Admin adjustment types (created when admin modifies user balance/concurrency)
         admin_balance: 'Balance (Admin)',
@@ -4177,6 +4201,9 @@ export default {
       selectGroupPlaceholder: 'Choose a subscription group',
       validityDays: 'Validity Days',
       groupRequired: 'Please select a subscription group',
+      selectCreditsPlan: 'Select Credits Tier',
+      selectCreditsPlanPlaceholder: 'Choose a credits plan',
+      creditsPlanRequired: 'Please select a valid credits tier',
       days: ' days',
       status: {
         unused: 'Unused',
@@ -5297,7 +5324,7 @@ export default {
         totp: 'Two-Factor Authentication (2FA)',
         totpHint: 'Allow users to use authenticator apps like Google Authenticator',
         totpKeyNotConfigured:
-          'Please configure TOTP_ENCRYPTION_KEY in environment variables first. Generate a key with: openssl rand -hex 32'
+          'Please configure SECRET_ENCRYPTION_TOTP_SECRET_KEY in environment variables first. Generate a key with: openssl rand -hex 32'
       },
       turnstile: {
         title: 'Cloudflare Turnstile',
@@ -5518,17 +5545,17 @@ export default {
         logoReadError: 'Failed to read the image file',
         homeContent: 'Home Page Content',
         homeContentPlaceholder: 'Enter custom content for the home page. Supports Markdown & HTML. If a URL is entered, it will be displayed as an iframe.',
-        homeContentHint: 'Customize the home page content. Supports Markdown/HTML. If you enter a URL (starting with http:// or https://), it will be used as an iframe src to embed an external page. When set, the default status information will no longer be displayed.',
+        homeContentHint: 'Customize the home page content with Markdown/HTML. Executable HTML such as scripts and event handlers is removed to protect signed-in sessions. A URL starting with http:// or https:// is displayed in an isolated iframe. When set, the default status information is hidden.',
         homeContentIframeWarning: '⚠️ iframe mode note: Some websites have X-Frame-Options or CSP security policies that prevent embedding in iframes. If the page appears blank or shows an error, please verify the target website allows embedding, or consider using HTML mode to build your own content.',
         hideCcsImportButton: 'Hide CCS Import Button',
         hideCcsImportButtonHint: 'When enabled, the "Import to CCS" button will be hidden on the API Keys page'
       },
       purchase: {
-        title: 'Recharge / Subscription Page',
-        description: 'Show a "Recharge / Subscription" entry in the sidebar and open the configured URL in an iframe',
-        enabled: 'Show Recharge / Subscription Entry',
+        title: 'Credit Top-up Page',
+        description: 'Show a "Top Up Credits" entry in the sidebar and open the configured URL in an iframe',
+        enabled: 'Show Credit Top-up Entry',
         enabledHint: 'Only shown in standard mode (not simple mode)',
-        url: 'Recharge / Subscription URL',
+        url: 'Credit Top-up URL',
         urlPlaceholder: 'https://example.com/purchase',
         urlHint: 'Must be an absolute http(s) URL',
         iframeWarning:
@@ -6089,7 +6116,7 @@ export default {
     // Error Passthrough Rules
     errorPassthrough: {
       title: 'Error Passthrough Rules',
-      description: 'Configure how upstream errors are returned to clients',
+      description: 'Configure safe upstream error responses; raw upstream bodies are never returned to clients',
       createRule: 'Create Rule',
       editRule: 'Edit Rule',
       deleteRule: 'Delete Rule',
@@ -6142,9 +6169,10 @@ export default {
         responseBehavior: 'Response Behavior',
         passthroughCode: 'Passthrough upstream status code',
         responseCode: 'Custom status code',
-        passthroughBody: 'Passthrough upstream error message',
-        customMessage: 'Custom error message',
+        passthroughBody: 'Passthrough upstream error message (disabled)',
+        customMessage: 'Safe client error message',
         customMessagePlaceholder: 'Error message to return to client...',
+        customMessageHint: 'Maximum 512 characters; raw upstream errors remain internal and are never reflected',
         skipMonitoring: 'Skip monitoring',
         skipMonitoringHint: 'When enabled, errors matching this rule will not be recorded in ops monitoring',
         enabled: 'Enable this rule'
@@ -6222,9 +6250,9 @@ export default {
 
   // Subscription Progress (Header component)
   subscriptionProgress: {
-    title: 'My Subscriptions',
-    viewDetails: 'View subscription details',
-    activeCount: '{count} active subscription(s)',
+    title: 'Account Credits',
+    viewDetails: 'View account credits',
+    activeCount: '{count} active entitlement(s)',
     daily: 'Daily',
     weekly: 'Weekly',
     monthly: 'Monthly',
@@ -6232,8 +6260,8 @@ export default {
     expired: 'Expired',
     expiresToday: 'Expires today',
     expiresTomorrow: 'Expires tomorrow',
-    viewAll: 'View all subscriptions',
-    noSubscriptions: 'No active subscriptions',
+    viewAll: 'View all entitlements',
+    noSubscriptions: 'No active entitlements',
     unlimited: 'Unlimited'
   },
 
@@ -6251,6 +6279,7 @@ export default {
     refresh: 'Refresh',
     sourceMode: 'Source Build',
     sourceModeHint: 'Source build, use git pull to update',
+    customUpdateDisabled: 'Official binary replacement is disabled for this custom build; complete compatibility review and use the controlled release process',
     updateNow: 'Update Now',
     updating: 'Updating...',
     updateComplete: 'Update Complete',
@@ -6261,16 +6290,16 @@ export default {
     retry: 'Retry'
   },
 
-  // Recharge / Subscription Page
+  // Credit Top-up Page
   purchase: {
-    title: 'Recharge / Subscription',
-    description: 'Recharge balance or purchase subscription via the embedded page',
+    title: 'Top Up Credits',
+    description: 'Top up account credits via the embedded page',
     openInNewTab: 'Open in new tab',
     notEnabledTitle: 'Feature not enabled',
-    notEnabledDesc: 'The administrator has not enabled the recharge/subscription entry. Please contact admin.',
-    notConfiguredTitle: 'Recharge / Subscription URL not configured',
+    notEnabledDesc: 'The administrator has not enabled the credit top-up entry. Please contact admin.',
+    notConfiguredTitle: 'Credit top-up URL not configured',
     notConfiguredDesc:
-      'The administrator enabled the entry but has not configured a recharge/subscription URL. Please contact admin.'
+      'The administrator enabled the entry but has not configured a credit top-up URL. Please contact admin.'
   },
 
   // Custom Page (iframe embed)
@@ -6309,9 +6338,9 @@ export default {
 
   // User Subscriptions Page
   userSubscriptions: {
-    title: 'My Subscriptions',
-    description: 'View your subscription plans and usage',
-    noActiveSubscriptions: 'No Active Subscriptions',
+    title: 'Account Credits and Legacy Entitlements',
+    description: 'View account credits and legacy usage records',
+    noActiveSubscriptions: 'No Active Legacy Entitlements',
     noActiveSubscriptionsDesc:
       "You don't have any active subscriptions. Contact administrator to get one.",
     failedToLoad: 'Failed to load subscriptions',
@@ -6335,11 +6364,13 @@ export default {
     usageOf: '{used} of {limit}',
     wallet: {
       title: 'Wallet Balance',
-      subtitle: 'Shared across all groups, charged by rate multiplier',
+      subtitle: 'GPT uses openai-default; Claude requires an administrator-granted vip group',
       remaining: 'Remaining',
       usedPercent: 'Used',
       lowWarning: 'Only ${amount} left — consider renewing soon',
       exhausted: 'Wallet exhausted — please renew to keep using',
+      debtToCover: 'Debt to cover',
+      debtWarning: 'Outstanding debt: ${amount}. Top up the wallet before continuing.',
       rateListTitle: 'Group Rate Multipliers',
       rateListDesc: 'Higher multiplier groups burn the wallet faster',
       rateListEmpty: 'No groups available',
@@ -6501,7 +6532,7 @@ export default {
 
   // Payment System
   payment: {
-    title: 'Recharge / Subscription',
+    title: 'Top Up Credits',
     amountLabel: 'Amount',
     paymentAmount: 'Payment Amount',
     creditedBalance: 'Credited Balance',
@@ -6552,6 +6583,8 @@ export default {
       cancelledDesc: 'You have cancelled this payment.',
       waitingPayment: 'Waiting for payment...',
       cancelOrder: 'Cancel Order',
+      invalidSession: 'Payment Session Expired',
+      invalidSessionDesc: 'This page is not bound to a payment created in this browser. Return to checkout and create a new order.',
     },
     orders: {
       title: 'My Orders',
@@ -6578,20 +6611,23 @@ export default {
       subscriptionSuccess: 'Subscription Successful',
       processing: 'Payment Processing',
       processingHint: 'Payment confirmation is still pending. This page will refresh automatically.',
+      fulfillmentFailed: 'Payment received, crediting issue',
+      fulfillmentFailedHint: 'Do not pay again. We will keep checking this order; contact support with the order number if the credit does not arrive.',
       failed: 'Payment Failed',
       backToRecharge: 'Back to Recharge',
       viewOrders: 'View Orders',
     },
     currentBalance: 'Current Balance',
+    walletDebt: 'Debt to cover: ${amount}',
     groupFallback: 'Group #{id}',
     rechargeAccount: 'Recharge Account',
-    activeSubscription: 'Active Subscription',
+    activeSubscription: 'Active Legacy Entitlement',
     noActiveSubscription: 'No active subscription',
     tabTopUp: 'Top Up',
-    tabSubscribe: 'Subscribe',
-    noPlans: 'No subscription plans available',
+    tabSubscribe: 'Legacy Entitlements',
+    noPlans: 'No credit plans available',
     notAvailable: 'Top-up is currently unavailable',
-    confirmSubscription: 'Confirm Subscription',
+    confirmSubscription: 'Confirm Credit Top-up',
     confirmCancel: 'Are you sure you want to cancel this order?',
     amountTooLow: 'Minimum amount is {min}',
     amountTooHigh: 'Maximum amount is {max}',
@@ -6601,6 +6637,7 @@ export default {
     refundReasonPlaceholder: 'Please describe your refund reason',
     stripeLoadFailed: 'Failed to load payment component. Please refresh and try again.',
     stripeMissingParams: 'Missing order ID or client secret',
+    stripeInvalidSession: 'This payment session does not match the order. Return to checkout and try again.',
     stripeNotConfigured: 'Stripe is not configured',
     errors: {
       tooManyPending: 'Too many pending orders (max {max}). Please complete or cancel existing orders first.',
@@ -6655,8 +6692,8 @@ export default {
       timeout: 'Timed out waiting for payment credentials, please retry',
       qrFailed: 'Failed to get WeChat Pay QR code',
     },
-    subscribeNow: 'Subscribe Now',
-    renewNow: 'Renew',
+    subscribeNow: 'Top Up Credits',
+    renewNow: 'Top Up Credits',
     selectPlan: 'Select Plan',
     planFeatures: 'Features',
     planCard: {
@@ -6751,9 +6788,9 @@ export default {
       planName: 'Plan Name',
       planDescription: 'Plan Description',
       planType: 'Plan Type',
-      planTypeSubscription: 'Subscription (monthly)',
+      planTypeSubscription: 'Legacy Entitlement (retired)',
       planTypeCredits: 'Credits (permanent)',
-      planTypeSubscriptionHint: 'Pay per validity period; balance freezes when it expires.',
+      planTypeSubscriptionHint: 'Retained only for historical records and cannot be sold again.',
       planTypeCreditsHint: 'One-time credit purchase, never expires; multiple credit packs stack into the same wallet.',
       createPlan: 'Create Plan',
       editPlan: 'Edit Plan',
@@ -6776,7 +6813,7 @@ export default {
       walletQuotaRequired: 'Wallet quota must be greater than 0',
       coveredGroups: 'Covered Groups',
       coveredGroupsHint: 'Standard groups unlocked by wallet or multi-group plans. Exclusive groups should usually be assigned manually.',
-      coveredGroupsRequired: 'Wallet subscription plans require at least one covered group',
+      coveredGroupsRequired: 'Legacy entitlement plans require at least one covered group',
       coveredGroupsEmpty: 'No standard groups available',
       coveredGroupsEmptyShort: 'Not configured',
       exclusiveManualHint: 'Exclusive groups are manual',

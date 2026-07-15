@@ -118,6 +118,22 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	billingCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+	if err != nil {
+		h.errorResponse(c, http.StatusServiceUnavailable, "billing_service_error", "Billing service temporarily unavailable")
+		return
+	}
+	c.Request = c.Request.WithContext(billingCtx)
+	billingRequestBody := body
+	if parsed.Multipart {
+		billingRequestBody = []byte(parsed.StickySessionSeed())
+	}
+	usageBillingAdmission := &service.OpenAIUsageBillingAdmissionInput{
+		APIKey: apiKey, User: apiKey.User, Subscription: subscription,
+		RequestBody: append([]byte(nil), billingRequestBody...), RequestPayloadHash: service.HashUsageRequestPayload(billingRequestBody),
+		RequestCount: parsed.N,
+	}
+	defer h.finalizeOpenAIUsageBillingLifecycle(c.Request.Context(), usageBillingAdmission, reqLog)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -212,6 +228,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			service.WithOpenAIImagesBillingPreflight(service.OpenAIForwardOptions{
 				RequestedModel: parsed.Model, ChannelMapping: channelMapping, GroupID: apiKey.GroupID,
 				ImagePriceConfig: openAIImagePriceConfig(apiKey.Group), RequirePricingPreflight: true,
+				RequireBillingAdmission: true, UsageBilling: usageBillingAdmission,
 			}),
 		)
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
@@ -228,6 +245,9 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			if h.handleOpenAIUsageBillingAdmissionError(c, err, streamStarted, false) {
+				return
+			}
 			if errors.Is(err, service.ErrOpenAIBillingPreflight) || errors.Is(err, service.ErrOpenAIPricingUnavailable) {
 				h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "OpenAI billing preflight failed", streamStarted)
 				return
@@ -262,6 +282,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					h.markOpenAIUsageBillingAttemptFailed(c.Request.Context(), usageBillingAdmission, reqLog)
 					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 					if failoverErr.RetryableOnSameAccount {
 						retryLimit := account.GetPoolModeRetryCount()
@@ -312,6 +333,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				return
 			}
 		}
+		h.gatewayService.MarkOpenAIUsageBillingAccepted(usageBillingAdmission)
 		if result != nil {
 			if account.Type == service.AccountTypeOAuth {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
@@ -334,7 +356,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		if result != nil {
 			upstreamModel = result.UpstreamModel
 		}
-		h.submitMandatoryUsageRecordTask(func(ctx context.Context) {
+		h.submitOpenAIUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -349,6 +371,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				APIKeyService:      h.apiKeyService,
 				ChannelUsageFields: channelMapping.ToUsageFields(parsed.Model, upstreamModel),
 			}); err != nil {
+				h.markOpenAIUsageBillingResultOrphaned(ctx, result, reqLog)
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.images"),
 					zap.Int64("user_id", subject.UserID),

@@ -50,9 +50,9 @@ type OpenAIWSStateStore interface {
 	GetResponseAccount(ctx context.Context, groupID int64, responseID string) (int64, error)
 	DeleteResponseAccount(ctx context.Context, groupID int64, responseID string) error
 
-	BindResponseConn(responseID, connID string, ttl time.Duration)
-	GetResponseConn(responseID string) (string, bool)
-	DeleteResponseConn(responseID string)
+	BindResponseConn(groupID int64, responseID, connID string, ttl time.Duration)
+	GetResponseConn(groupID int64, responseID string) (string, bool)
+	DeleteResponseConn(groupID int64, responseID string)
 
 	BindSessionTurnState(groupID int64, sessionHash, turnState string, ttl time.Duration)
 	GetSessionTurnState(groupID int64, sessionHash string) (string, bool)
@@ -96,13 +96,14 @@ func (s *defaultOpenAIWSStateStore) BindResponseAccount(ctx context.Context, gro
 	if id == "" || accountID <= 0 {
 		return nil
 	}
+	localKey := openAIWSResponseStateKey(groupID, id)
 	ttl = normalizeOpenAIWSTTL(ttl)
 	s.maybeCleanup()
 
 	expiresAt := time.Now().Add(ttl)
 	s.responseToAccountMu.Lock()
-	ensureBindingCapacity(s.responseToAccount, id, openAIWSStateStoreMaxEntriesPerMap)
-	s.responseToAccount[id] = openAIWSAccountBinding{accountID: accountID, expiresAt: expiresAt}
+	ensureBindingCapacity(s.responseToAccount, localKey, openAIWSStateStoreMaxEntriesPerMap)
+	s.responseToAccount[localKey] = openAIWSAccountBinding{accountID: accountID, expiresAt: expiresAt}
 	s.responseToAccountMu.Unlock()
 
 	if s.cache == nil {
@@ -119,11 +120,12 @@ func (s *defaultOpenAIWSStateStore) GetResponseAccount(ctx context.Context, grou
 	if id == "" {
 		return 0, nil
 	}
+	localKey := openAIWSResponseStateKey(groupID, id)
 	s.maybeCleanup()
 
 	now := time.Now()
 	s.responseToAccountMu.RLock()
-	if binding, ok := s.responseToAccount[id]; ok {
+	if binding, ok := s.responseToAccount[localKey]; ok {
 		if now.Before(binding.expiresAt) {
 			accountID := binding.accountID
 			s.responseToAccountMu.RUnlock()
@@ -152,8 +154,9 @@ func (s *defaultOpenAIWSStateStore) DeleteResponseAccount(ctx context.Context, g
 	if id == "" {
 		return nil
 	}
+	localKey := openAIWSResponseStateKey(groupID, id)
 	s.responseToAccountMu.Lock()
-	delete(s.responseToAccount, id)
+	delete(s.responseToAccount, localKey)
 	s.responseToAccountMu.Unlock()
 
 	if s.cache == nil {
@@ -164,34 +167,36 @@ func (s *defaultOpenAIWSStateStore) DeleteResponseAccount(ctx context.Context, g
 	return s.cache.DeleteSessionAccountID(cacheCtx, groupID, openAIWSResponseAccountCacheKey(id))
 }
 
-func (s *defaultOpenAIWSStateStore) BindResponseConn(responseID, connID string, ttl time.Duration) {
+func (s *defaultOpenAIWSStateStore) BindResponseConn(groupID int64, responseID, connID string, ttl time.Duration) {
 	id := normalizeOpenAIWSResponseID(responseID)
 	conn := strings.TrimSpace(connID)
 	if id == "" || conn == "" {
 		return
 	}
+	localKey := openAIWSResponseStateKey(groupID, id)
 	ttl = normalizeOpenAIWSTTL(ttl)
 	s.maybeCleanup()
 
 	s.responseToConnMu.Lock()
-	ensureBindingCapacity(s.responseToConn, id, openAIWSStateStoreMaxEntriesPerMap)
-	s.responseToConn[id] = openAIWSConnBinding{
+	ensureBindingCapacity(s.responseToConn, localKey, openAIWSStateStoreMaxEntriesPerMap)
+	s.responseToConn[localKey] = openAIWSConnBinding{
 		connID:    conn,
 		expiresAt: time.Now().Add(ttl),
 	}
 	s.responseToConnMu.Unlock()
 }
 
-func (s *defaultOpenAIWSStateStore) GetResponseConn(responseID string) (string, bool) {
+func (s *defaultOpenAIWSStateStore) GetResponseConn(groupID int64, responseID string) (string, bool) {
 	id := normalizeOpenAIWSResponseID(responseID)
 	if id == "" {
 		return "", false
 	}
+	localKey := openAIWSResponseStateKey(groupID, id)
 	s.maybeCleanup()
 
 	now := time.Now()
 	s.responseToConnMu.RLock()
-	binding, ok := s.responseToConn[id]
+	binding, ok := s.responseToConn[localKey]
 	s.responseToConnMu.RUnlock()
 	if !ok || now.After(binding.expiresAt) || strings.TrimSpace(binding.connID) == "" {
 		return "", false
@@ -199,13 +204,14 @@ func (s *defaultOpenAIWSStateStore) GetResponseConn(responseID string) (string, 
 	return binding.connID, true
 }
 
-func (s *defaultOpenAIWSStateStore) DeleteResponseConn(responseID string) {
+func (s *defaultOpenAIWSStateStore) DeleteResponseConn(groupID int64, responseID string) {
 	id := normalizeOpenAIWSResponseID(responseID)
 	if id == "" {
 		return
 	}
+	localKey := openAIWSResponseStateKey(groupID, id)
 	s.responseToConnMu.Lock()
-	delete(s.responseToConn, id)
+	delete(s.responseToConn, localKey)
 	s.responseToConnMu.Unlock()
 }
 
@@ -410,6 +416,14 @@ func ensureBindingCapacity[T any](bindings map[string]T, incomingKey string, max
 
 func normalizeOpenAIWSResponseID(responseID string) string {
 	return strings.TrimSpace(responseID)
+}
+
+func openAIWSResponseStateKey(groupID int64, responseID string) string {
+	id := normalizeOpenAIWSResponseID(responseID)
+	if id == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d:%s", groupID, id)
 }
 
 func openAIWSResponseAccountCacheKey(responseID string) string {

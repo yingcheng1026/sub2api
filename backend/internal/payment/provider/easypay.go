@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/payment"
+	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 )
 
 // EasyPay constants.
@@ -51,12 +52,39 @@ func NewEasyPay(instanceID string, config map[string]string) (*EasyPay, error) {
 	for k, v := range config {
 		cfg[k] = v
 	}
-	cfg["apiBase"] = normalizeEasyPayAPIBase(cfg["apiBase"])
+	apiBase, err := validateEasyPayAPIBase(cfg["apiBase"])
+	if err != nil {
+		return nil, err
+	}
+	cfg["apiBase"] = apiBase
 	return &EasyPay{
 		instanceID: instanceID,
 		config:     cfg,
-		httpClient: &http.Client{Timeout: easypayHTTPTimeout},
+		httpClient: newEasyPayHTTPClient(),
 	}, nil
+}
+
+func newEasyPayHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: easypayHTTPTimeout,
+		Transport: &http.Transport{
+			DialContext:           urlvalidator.NewSafeDialContext(false),
+			TLSHandshakeTimeout:   easypayHTTPTimeout,
+			ResponseHeaderTimeout: easypayHTTPTimeout,
+		},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func validateEasyPayAPIBase(raw string) (string, error) {
+	base := normalizeEasyPayAPIBase(raw)
+	normalized, err := urlvalidator.ValidateHTTPSURL(base, urlvalidator.ValidationOptions{AllowPrivate: false})
+	if err != nil {
+		return "", fmt.Errorf("invalid easypay apiBase: %w", err)
+	}
+	return normalized, nil
 }
 
 func normalizeEasyPayAPIBase(apiBase string) string {
@@ -426,7 +454,13 @@ func (e *EasyPay) postRaw(ctx context.Context, endpoint string, params map[strin
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	client := e.httpClient
 	if client == nil {
-		client = &http.Client{Timeout: easypayHTTPTimeout}
+		client = newEasyPayHTTPClient()
+	} else {
+		clone := *client
+		clone.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		client = &clone
 	}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -568,6 +568,7 @@ export interface ApiKey {
   user_id: number
   key: string
   name: string
+  purpose: 'standard' | 'wallet_universal'
   group_id: number | null
   status: 'active' | 'inactive' | 'quota_exhausted' | 'expired'
   ip_whitelist: string[]
@@ -595,6 +596,7 @@ export interface ApiKey {
 
 export interface CreateApiKeyRequest {
   name: string
+  verification: string
   group_id?: number | null
   custom_key?: string // Optional custom API Key
   ip_whitelist?: string[]
@@ -607,6 +609,7 @@ export interface CreateApiKeyRequest {
 }
 
 export interface UpdateApiKeyRequest {
+  verification?: string
   name?: string
   group_id?: number | null
   status?: 'active' | 'inactive'
@@ -1158,7 +1161,7 @@ export interface AdminDataImportResult {
 
 // ==================== Usage & Redeem Types ====================
 
-export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation'
+export type RedeemCodeType = 'balance' | 'concurrency' | 'subscription' | 'invitation' | 'wallet'
 export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2'
 export type UsageCompatMode = 'native_gpt' | 'legacy_claude_alias' | 'other'
 
@@ -1288,6 +1291,7 @@ export interface RedeemCode {
   updated_at?: string
   group_id?: number | null // 订阅类型专用
   validity_days?: number // 订阅类型专用
+  plan_id?: number | null // wallet 额度码专用
   user?: User
   group?: Group // 关联的分组
 }
@@ -1298,6 +1302,7 @@ export interface GenerateRedeemCodesRequest {
   value: number
   group_id?: number | null // 订阅类型专用
   validity_days?: number // 订阅类型专用
+  plan_id?: number | null // wallet 额度码专用
 }
 
 export interface RedeemCodeRequest {
@@ -1548,6 +1553,17 @@ export interface BulkAssignSubscriptionRequest {
   user_ids: number[]
   group_id: number
   validity_days?: number
+  notes?: string
+}
+
+export interface BulkAssignSubscriptionResult {
+  success_count: number
+  created_count: number
+  reused_count: number
+  failed_count: number
+  subscriptions: UserSubscription[]
+  errors: string[]
+  statuses: Record<string, string>
 }
 
 export interface ExtendSubscriptionRequest {

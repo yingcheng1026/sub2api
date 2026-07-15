@@ -12,13 +12,24 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/paymentauditlog"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 // --- Dashboard & Analytics ---
 
+// MaxPaymentDashboardDays bounds both the database range and the daily-series
+// allocation performed for one admin dashboard request.
+const MaxPaymentDashboardDays = 366
+
 func (s *PaymentService) GetDashboardStats(ctx context.Context, days int) (*DashboardStats, error) {
 	if days <= 0 {
 		days = 30
+	}
+	if days > MaxPaymentDashboardDays {
+		return nil, infraerrors.BadRequest(
+			"INVALID_DASHBOARD_DAYS",
+			"payment dashboard range exceeds the maximum of 366 days",
+		)
 	}
 	now := time.Now()
 	since := now.AddDate(0, 0, -days)

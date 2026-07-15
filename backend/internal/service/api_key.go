@@ -34,6 +34,7 @@ type APIKey struct {
 	KeyHash     string
 	KeyPrefix   string
 	Name        string
+	Purpose     string
 	GroupID     *int64
 	Status      string
 	IPWhitelist []string
@@ -62,6 +63,22 @@ type APIKey struct {
 	Window5hStart *time.Time // Start of current 5h window
 	Window1dStart *time.Time // Start of current 1d window
 	Window7dStart *time.Time // Start of current 7d window
+}
+
+const (
+	APIKeyPurposeStandard        = "standard"
+	APIKeyPurposeWalletUniversal = "wallet_universal"
+)
+
+func (k *APIKey) IsWalletUniversal() bool {
+	return k != nil && k.Purpose == APIKeyPurposeWalletUniversal
+}
+
+func (k *APIKey) HasValidWalletUniversalShape() bool {
+	return k != nil &&
+		k.IsWalletUniversal() &&
+		k.GroupID == nil &&
+		k.Name == WalletUniversalAPIKeyName
 }
 
 func (k *APIKey) IsActive() bool {

@@ -339,6 +339,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	// Get subscription info (may be nil)
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	billingCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+	if err != nil {
+		h.errorResponse(c, http.StatusServiceUnavailable, "billing_service_error", "Billing service temporarily unavailable")
+		return
+	}
+	c.Request = c.Request.WithContext(billingCtx)
+	usageBillingAdmission := &service.OpenAIUsageBillingAdmissionInput{
+		APIKey: apiKey, User: apiKey.User, Subscription: subscription,
+		RequestBody: append([]byte(nil), body...), RequestPayloadHash: service.HashUsageRequestPayload(body),
+	}
+	defer h.finalizeOpenAIUsageBillingLifecycle(c.Request.Context(), usageBillingAdmission, reqLog)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -469,6 +480,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			GroupID:                 apiKey.GroupID,
 			ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 			RequirePricingPreflight: true,
+			RequireBillingAdmission: true,
+			UsageBilling:            usageBillingAdmission,
 		})
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		if accountReleaseFunc != nil {
@@ -484,6 +497,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			if h.handleOpenAIUsageBillingAdmissionError(c, err, streamStarted, false) {
+				return
+			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
@@ -493,6 +509,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					h.markOpenAIUsageBillingAttemptFailed(c.Request.Context(), usageBillingAdmission, reqLog)
 					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 					// 池模式：同账号重试
 					if failoverErr.RetryableOnSameAccount {
@@ -549,6 +566,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				return
 			}
 		}
+		h.gatewayService.MarkOpenAIUsageBillingAccepted(usageBillingAdmission)
 		if result != nil {
 			if account.Type == service.AccountTypeOAuth {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
@@ -566,7 +584,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
 
 		// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
-		h.submitOpenAIUsageRecordTask(result, func(ctx context.Context) {
+		h.submitOpenAIUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -581,6 +599,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				APIKeyService:      h.apiKeyService,
 				ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 			}); err != nil {
+				h.markOpenAIUsageBillingResultOrphaned(ctx, result, reqLog)
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.responses"),
 					zap.Int64("user_id", subject.UserID),
@@ -802,6 +821,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	billingCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+	if err != nil {
+		h.anthropicErrorResponse(c, http.StatusServiceUnavailable, "api_error", "Billing service temporarily unavailable")
+		return
+	}
+	c.Request = c.Request.WithContext(billingCtx)
+	usageBillingAdmission := &service.OpenAIUsageBillingAdmissionInput{
+		APIKey: apiKey, User: apiKey.User, Subscription: subscription,
+		RequestBody: append([]byte(nil), body...), RequestPayloadHash: service.HashUsageRequestPayload(body),
+	}
+	defer h.finalizeOpenAIUsageBillingLifecycle(c.Request.Context(), usageBillingAdmission, reqLog)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -924,6 +954,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			GroupID:                 apiKey.GroupID,
 			ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 			RequirePricingPreflight: true,
+			RequireBillingAdmission: true,
+			UsageBilling:            usageBillingAdmission,
 		})
 
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
@@ -940,6 +972,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			if h.handleOpenAIUsageBillingAdmissionError(c, err, streamStarted, true) {
+				return
+			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_messages.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
@@ -949,6 +984,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					h.markOpenAIUsageBillingAttemptFailed(c.Request.Context(), usageBillingAdmission, reqLog)
 					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 					// 池模式：同账号重试
 					if failoverErr.RetryableOnSameAccount {
@@ -1000,6 +1036,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				return
 			}
 		}
+		h.gatewayService.MarkOpenAIUsageBillingAccepted(usageBillingAdmission)
 		if result != nil {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
 		} else {
@@ -1018,7 +1055,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
 
 		dispatchMappedModel := effectiveMappedModel
-		h.submitOpenAIUsageRecordTask(result, func(ctx context.Context) {
+		h.submitOpenAIUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
 			usageFields := channelMappingMsg.ToUsageFields(reqModel, result.UpstreamModel)
 			usageFields = preserveOpenAIMessagesDispatchSub2BillingSource(usageFields, reqModel, dispatchMappedModel)
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
@@ -1035,6 +1072,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				APIKeyService:      h.apiKeyService,
 				ChannelUsageFields: usageFields,
 			}); err != nil {
+				h.markOpenAIUsageBillingResultOrphaned(ctx, result, reqLog)
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.messages"),
 					zap.Int64("user_id", subject.UserID),
@@ -1300,6 +1338,16 @@ func (h *OpenAIGatewayHandler) acquireResponsesAccountSlot(
 	return wrapReleaseOnDone(ctx, accountReleaseFunc), true
 }
 
+const openAIWSIngressMaxMessageBytes int64 = 8 * 1024 * 1024
+
+func openAIWSIngressReadLimit(cfg *config.Config) int64 {
+	limit := openAIWSIngressMaxMessageBytes
+	if cfg != nil && cfg.Gateway.MaxBodySize > 0 && cfg.Gateway.MaxBodySize < limit {
+		limit = cfg.Gateway.MaxBodySize
+	}
+	return limit
+}
+
 // ResponsesWebSocket handles OpenAI Responses API WebSocket ingress endpoint
 // GET /openai/v1/responses (Upgrade: websocket)
 func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
@@ -1332,11 +1380,41 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	reqLog.Info("openai.websocket_ingress_started")
+	ctx := c.Request.Context()
+	var currentUserRelease func()
+	var currentAccountRelease func()
+	releaseTurnSlots := func() {
+		if currentAccountRelease != nil {
+			currentAccountRelease()
+			currentAccountRelease = nil
+		}
+		if currentUserRelease != nil {
+			currentUserRelease()
+			currentUserRelease = nil
+		}
+	}
+	defer releaseTurnSlots()
+
+	// Reserve the tenant slot before accepting or decompressing any WebSocket
+	// frame. This keeps pre-admission sockets inside the same distributed
+	// concurrency budget as normal gateway work.
+	userReleaseFunc, userAcquired, err := h.concurrencyHelper.TryAcquireUserSlot(ctx, subject.UserID, subject.Concurrency)
+	if err != nil {
+		reqLog.Warn("openai.websocket_user_slot_acquire_failed", zap.Error(err))
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Concurrency service temporarily unavailable")
+		return
+	}
+	if !userAcquired {
+		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Too many concurrent requests, please retry later")
+		return
+	}
+	currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
+
 	clientIP := ip.GetClientIP(c)
 	userAgent := strings.TrimSpace(c.GetHeader("User-Agent"))
 
 	wsConn, err := coderws.Accept(c.Writer, c.Request, &coderws.AcceptOptions{
-		CompressionMode: coderws.CompressionContextTakeover,
+		CompressionMode: coderws.CompressionNoContextTakeover,
 	})
 	if err != nil {
 		reqLog.Warn("openai.websocket_accept_failed",
@@ -1353,9 +1431,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	defer func() {
 		_ = wsConn.CloseNow()
 	}()
-	wsConn.SetReadLimit(16 * 1024 * 1024)
+	wsConn.SetReadLimit(openAIWSIngressReadLimit(h.cfg))
 
-	ctx := c.Request.Context()
 	readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	msgType, firstMessage, err := wsConn.Read(readCtx)
 	cancel()
@@ -1422,33 +1499,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "invalid GPT-5.6 preview model mapping")
 		return
 	}
-
-	var currentUserRelease func()
-	var currentAccountRelease func()
-	releaseTurnSlots := func() {
-		if currentAccountRelease != nil {
-			currentAccountRelease()
-			currentAccountRelease = nil
-		}
-		if currentUserRelease != nil {
-			currentUserRelease()
-			currentUserRelease = nil
-		}
-	}
-	// 必须尽早注册，确保任何 early return 都能释放已获取的并发槽位。
-	defer releaseTurnSlots()
-
-	userReleaseFunc, userAcquired, err := h.concurrencyHelper.TryAcquireUserSlot(ctx, subject.UserID, subject.Concurrency)
-	if err != nil {
-		reqLog.Warn("openai.websocket_user_slot_acquire_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire user concurrency slot")
-		return
-	}
-	if !userAcquired {
-		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "too many concurrent requests, please retry later")
-		return
-	}
-	currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 	if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription); err != nil {
@@ -1540,27 +1590,55 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		GroupID:                 apiKey.GroupID,
 		ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 		RequirePricingPreflight: true,
+		RequireBillingAdmission: true,
 	}
-	_, err = h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(ctx, account, wsPreflightOptions, firstMessage)
+	firstTurnCtx := context.WithValue(ctx, ctxkey.UsageBillingRequestID, deriveOpenAIWSBillingRequestID(wsBillingConnectionID, 1))
+	firstTurnCtx, err = service.PrepareUsageBillingRequestContext(firstTurnCtx)
+	if err != nil {
+		reqLog.Warn("openai.websocket_billing_context_failed", zap.Error(err))
+		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "Billing service temporarily unavailable")
+		return
+	}
+	firstTurnBillingIdentity, err := h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(firstTurnCtx, account, wsPreflightOptions, firstMessage)
 	if err != nil {
 		reqLog.Warn("openai.websocket_billing_preflight_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenAI billing preflight failed")
 		return
 	}
+	firstTurnPayloadHash := service.HashUsageRequestPayload(firstMessage)
+	_, firstTurnAdmission, admissionErr := h.gatewayService.PrepareOpenAIUsageBillingAdmission(firstTurnCtx, account, &service.OpenAIUsageBillingAdmissionInput{
+		APIKey: apiKey, User: apiKey.User, Subscription: subscription,
+		RequestBody: append([]byte(nil), firstMessage...), RequestPayloadHash: firstTurnPayloadHash,
+		BillingIdentity: firstTurnBillingIdentity,
+	})
+	if admissionErr == nil {
+		admissionErr = h.gatewayService.DispatchUsageBillingRequest(firstTurnCtx, firstTurnAdmission)
+	}
+	if admissionErr != nil {
+		reqLog.Warn("openai.websocket_billing_admission_failed", zap.Int64("account_id", account.ID), zap.Error(admissionErr))
+		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenAI billing admission failed")
+		return
+	}
+	if firstTurnAdmission != nil {
+		firstTurnBillingIdentity.AdmissionAttemptID = firstTurnAdmission.AttemptID
+		firstTurnBillingIdentity.AdmissionRef = firstTurnAdmission.Ref()
+	}
 
 	token, _, err := h.gatewayService.GetAccessToken(ctx, account)
 	if err != nil {
+		if firstTurnBillingIdentity != nil && firstTurnBillingIdentity.AdmissionRef.Validate() == nil {
+			lifecycleInput := &service.OpenAIUsageBillingAdmissionInput{AdmissionRef: firstTurnBillingIdentity.AdmissionRef}
+			if lifecycleErr := h.gatewayService.MarkOpenAIUsageBillingAttemptFailed(firstTurnCtx, lifecycleInput); lifecycleErr != nil {
+				reqLog.Error("openai.websocket_billing_attempt_fail_mark_failed", zap.Error(lifecycleErr))
+			}
+			if lifecycleErr := h.gatewayService.FinalizeOpenAIUsageBillingRequest(firstTurnCtx, lifecycleInput); lifecycleErr != nil {
+				reqLog.Error("openai.websocket_billing_lifecycle_finalize_failed", zap.Error(lifecycleErr))
+			}
+		}
 		reqLog.Warn("openai.websocket_get_access_token_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to get access token")
 		return
 	}
-	firstTurnBillingIdentity, err := h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(ctx, account, wsPreflightOptions, firstMessage)
-	if err != nil {
-		reqLog.Warn("openai.websocket_first_turn_billing_preflight_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "OpenAI billing preflight failed")
-		return
-	}
-
 	reqLog.Debug("openai.websocket_account_selected",
 		zap.Int64("account_id", account.ID),
 		zap.String("account_name", account.Name),
@@ -1568,24 +1646,79 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		zap.Int("candidate_count", scheduleDecision.CandidateCount),
 	)
 
-	turnBillingIdentities := map[int]*service.ResolvedOpenAIBillingIdentity{1: firstTurnBillingIdentity}
+	type turnBillingState struct {
+		Context     context.Context
+		Identity    *service.ResolvedOpenAIBillingIdentity
+		PayloadHash string
+	}
+	turnBillingIdentities := map[int]turnBillingState{1: {
+		Context: firstTurnCtx, Identity: firstTurnBillingIdentity, PayloadHash: firstTurnPayloadHash,
+	}}
 	var turnBillingIdentitiesMu sync.Mutex
+	finalizeTurnBilling := func(state turnBillingState, definitelyRejected bool) {
+		if state.Context == nil || state.Identity == nil || state.Identity.AdmissionRef.Validate() != nil {
+			return
+		}
+		lifecycleInput := &service.OpenAIUsageBillingAdmissionInput{AdmissionRef: state.Identity.AdmissionRef}
+		if definitelyRejected {
+			if lifecycleErr := h.gatewayService.MarkOpenAIUsageBillingAttemptFailed(state.Context, lifecycleInput); lifecycleErr != nil {
+				reqLog.Error("openai.websocket_billing_attempt_fail_mark_failed", zap.Error(lifecycleErr))
+				return
+			}
+		}
+		if lifecycleErr := h.gatewayService.FinalizeOpenAIUsageBillingRequest(state.Context, lifecycleInput); lifecycleErr != nil {
+			reqLog.Error("openai.websocket_billing_lifecycle_finalize_failed", zap.Error(lifecycleErr))
+		}
+	}
+	defer func() {
+		turnBillingIdentitiesMu.Lock()
+		remaining := make([]turnBillingState, 0, len(turnBillingIdentities))
+		for turn, state := range turnBillingIdentities {
+			remaining = append(remaining, state)
+			delete(turnBillingIdentities, turn)
+		}
+		turnBillingIdentitiesMu.Unlock()
+		for _, state := range remaining {
+			finalizeTurnBilling(state, false)
+		}
+	}()
 	hooks := &service.OpenAIWSIngressHooks{
 		InitialRequestModel: reqModel,
 		BeforeRequest: func(turn int, payload []byte, originalModel string) error {
 			if !gjson.ValidBytes(payload) {
 				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 			}
-			turnIdentity, preflightErr := h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(ctx, account, wsPreflightOptions, payload)
-			if preflightErr != nil {
-				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "OpenAI billing preflight failed", preflightErr)
-			}
-			turnBillingIdentitiesMu.Lock()
-			turnBillingIdentities[turn] = turnIdentity
-			turnBillingIdentitiesMu.Unlock()
 			if turn == 1 {
 				return nil
 			}
+			turnCtx := context.WithValue(ctx, ctxkey.UsageBillingRequestID, deriveOpenAIWSBillingRequestID(wsBillingConnectionID, turn))
+			turnCtx, preflightErr := service.PrepareUsageBillingRequestContext(turnCtx)
+			if preflightErr != nil {
+				return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "Billing service temporarily unavailable", preflightErr)
+			}
+			turnIdentity, preflightErr := h.gatewayService.ResolveOpenAIWSBillingIdentityForPayload(turnCtx, account, wsPreflightOptions, payload)
+			if preflightErr != nil {
+				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "OpenAI billing preflight failed", preflightErr)
+			}
+			payloadHash := service.HashUsageRequestPayload(payload)
+			_, turnAdmission, admissionErr := h.gatewayService.PrepareOpenAIUsageBillingAdmission(turnCtx, account, &service.OpenAIUsageBillingAdmissionInput{
+				APIKey: apiKey, User: apiKey.User, Subscription: subscription,
+				RequestBody: append([]byte(nil), payload...), RequestPayloadHash: payloadHash,
+				BillingIdentity: turnIdentity,
+			})
+			if admissionErr == nil {
+				admissionErr = h.gatewayService.DispatchUsageBillingRequest(turnCtx, turnAdmission)
+			}
+			if admissionErr != nil {
+				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "OpenAI billing admission failed", admissionErr)
+			}
+			if turnAdmission != nil {
+				turnIdentity.AdmissionAttemptID = turnAdmission.AttemptID
+				turnIdentity.AdmissionRef = turnAdmission.Ref()
+			}
+			turnBillingIdentitiesMu.Lock()
+			turnBillingIdentities[turn] = turnBillingState{Context: turnCtx, Identity: turnIdentity, PayloadHash: payloadHash}
+			turnBillingIdentitiesMu.Unlock()
 			model := strings.TrimSpace(originalModel)
 			if model == "" {
 				model = strings.TrimSpace(gjson.GetBytes(payload, "model").String())
@@ -1594,6 +1727,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				model = reqModel
 			}
 			if decision := h.checkContentModeration(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload); decision != nil && decision.Blocked {
+				turnBillingIdentitiesMu.Lock()
+				blockedBilling := turnBillingIdentities[turn]
+				delete(turnBillingIdentities, turn)
+				turnBillingIdentitiesMu.Unlock()
+				finalizeTurnBilling(blockedBilling, true)
 				writeContentModerationWSError(ctx, wsConn, decision)
 				return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, decision.Message, nil)
 			}
@@ -1633,11 +1771,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
 			releaseTurnSlots()
 			turnBillingIdentitiesMu.Lock()
-			turnBillingIdentity := turnBillingIdentities[turn]
+			turnBilling := turnBillingIdentities[turn]
 			delete(turnBillingIdentities, turn)
 			turnBillingIdentitiesMu.Unlock()
 			if turnErr != nil {
 				if result == nil || result.ImageCount <= 0 {
+					finalizeTurnBilling(turnBilling, false)
 					return
 				}
 				reqLog.Warn("openai.websocket_partial_error_with_image_result",
@@ -1647,17 +1786,23 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				)
 			}
 			if result == nil {
+				finalizeTurnBilling(turnBilling, false)
+				return
+			}
+			if turnBilling.Context == nil || turnBilling.Identity == nil || turnBilling.PayloadHash == "" {
+				reqLog.Error("openai.websocket_missing_turn_billing_admission", zap.Int("turn", turn))
+				finalizeTurnBilling(turnBilling, false)
 				return
 			}
 			result.RequestID = deriveOpenAIWSBillingRequestID(wsBillingConnectionID, turn)
-			service.AttachOpenAIBillingIdentity(result, turnBillingIdentity)
+			service.AttachOpenAIBillingIdentity(result, turnBilling.Identity)
 			if account.Type == service.AccountTypeOAuth {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, result.ResponseHeaders)
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
 			inboundEndpoint := GetInboundEndpoint(c)
 			upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
-			h.submitOpenAIUsageRecordTask(result, func(taskCtx context.Context) {
+			h.submitOpenAIUsageRecordTask(turnBilling.Context, result, func(taskCtx context.Context) {
 				if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 					Result:             result,
 					APIKey:             apiKey,
@@ -1668,10 +1813,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					UpstreamEndpoint:   upstreamEndpoint,
 					UserAgent:          userAgent,
 					IPAddress:          clientIP,
-					RequestPayloadHash: service.HashUsageRequestPayload(firstMessage),
+					RequestPayloadHash: turnBilling.PayloadHash,
 					APIKeyService:      h.apiKeyService,
 					ChannelUsageFields: channelMappingWS.ToUsageFields(reqModel, result.UpstreamModel),
 				}); err != nil {
+					h.markOpenAIUsageBillingResultOrphaned(taskCtx, result, reqLog)
 					reqLog.Error("openai.websocket_record_usage_failed",
 						zap.Int64("account_id", account.ID),
 						zap.String("request_id", result.RequestID),
@@ -1830,46 +1976,38 @@ func getContextInt64(c *gin.Context, key string) (int64, bool) {
 	}
 }
 
-func (h *OpenAIGatewayHandler) submitUsageRecordTask(task service.UsageRecordTask) {
+func (h *OpenAIGatewayHandler) submitUsageRecordTask(requestCtx context.Context, task service.UsageRecordTask) {
+	h.runDurableUsageRecordTask(requestCtx, task)
+}
+
+func (h *OpenAIGatewayHandler) submitOpenAIUsageRecordTask(requestCtx context.Context, result *service.OpenAIForwardResult, task service.UsageRecordTask) {
 	if task == nil {
 		return
 	}
-	if h.usageRecordWorkerPool != nil {
-		h.usageRecordWorkerPool.Submit(task)
-		return
-	}
-	// 回退路径：worker 池未注入时同步执行，避免退回到无界 goroutine 模式。
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			logger.L().With(
-				zap.String("component", "handler.openai_gateway.responses"),
-				zap.Any("panic", recovered),
-			).Error("openai.usage_record_task_panic_recovered")
-		}
-	}()
-	task(ctx)
+	h.runDurableUsageRecordTask(requestCtx, func(ctx context.Context) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if err := h.gatewayService.MarkOpenAIUsageBillingResultOrphaned(ctx, result); err != nil {
+					logger.L().Error("openai.billing_result_orphan_mark_failed", zap.Error(err))
+				}
+				panic(recovered)
+			}
+		}()
+		task(ctx)
+	})
 }
 
-func (h *OpenAIGatewayHandler) submitOpenAIUsageRecordTask(result *service.OpenAIForwardResult, task service.UsageRecordTask) {
-	_ = result
-	h.runDurableUsageRecordTask(task)
+func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(requestCtx context.Context, task service.UsageRecordTask) {
+	h.runDurableUsageRecordTask(requestCtx, task)
 }
 
-func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(task service.UsageRecordTask) {
-	h.runDurableUsageRecordTask(task)
-}
-
-func (h *OpenAIGatewayHandler) runDurableUsageRecordTask(task service.UsageRecordTask) {
+func (h *OpenAIGatewayHandler) runDurableUsageRecordTask(requestCtx context.Context, task service.UsageRecordTask) {
 	if task == nil {
 		return
 	}
 	// Standard-mode RecordUsage now performs the durable outbox insert. It must
 	// finish before this request goroutine can disappear; the in-memory worker
 	// pool remains available only to non-OpenAI/native usage paths.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			logger.L().With(
@@ -1878,7 +2016,14 @@ func (h *OpenAIGatewayHandler) runDurableUsageRecordTask(task service.UsageRecor
 			).Error("openai.usage_record_task_panic_recovered")
 		}
 	}()
-	task(ctx)
+	// RecordUsage persists the durable outbox event synchronously. Database
+	// slowness therefore applies backpressure instead of expiring this task and
+	// erasing an already successful billable use.
+	billingCtx := context.Background()
+	if requestCtx != nil {
+		billingCtx = context.WithoutCancel(requestCtx)
+	}
+	task(billingCtx)
 }
 
 func (h *OpenAIGatewayHandler) acquireImageGenerationSlot(c *gin.Context, streamStarted bool) (func(), bool) {
@@ -1921,11 +2066,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 				respCode = *rule.ResponseCode
 			}
 
-			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
-			if !rule.PassthroughBody && rule.CustomMessage != nil {
-				msg = *rule.CustomMessage
-			}
+			msg := service.ErrorPassthroughClientMessage(rule, "Upstream request failed")
 
 			if rule.SkipMonitoring {
 				c.Set(service.OpsSkipPassthroughKey, true)
@@ -2016,6 +2157,67 @@ func (h *OpenAIGatewayHandler) errorResponse(c *gin.Context, status int, errType
 			"message": message,
 		},
 	})
+}
+
+func (h *OpenAIGatewayHandler) handleOpenAIUsageBillingAdmissionError(c *gin.Context, err error, streamStarted, anthropic bool) bool {
+	if err == nil {
+		return false
+	}
+	status := http.StatusServiceUnavailable
+	code := "billing_service_error"
+	message := "Billing service temporarily unavailable"
+	switch {
+	case errors.Is(err, service.ErrWalletInsufficient):
+		status, code, message, _ = billingErrorDetails(err)
+	case errors.Is(err, service.ErrUsageBillingRequestConflict), errors.Is(err, service.ErrUsageBillingAdmissionFinalized):
+		status = http.StatusConflict
+		code = "billing_request_conflict"
+		message = "Billing request identity conflict"
+	case errors.Is(err, service.ErrUsageBillingLifecycleContractInvalid),
+		errors.Is(err, service.ErrUsageBillingAdmissionInvalid),
+		errors.Is(err, service.ErrUsageBillingAdmissionMissing),
+		errors.Is(err, service.ErrUsageBillingAdmissionLeaseLost),
+		errors.Is(err, service.ErrUsageBillingOutboxUnavailable),
+		errors.Is(err, service.ErrUsageBillingOutboxAdmissionRetryable):
+	default:
+		return false
+	}
+	if anthropic {
+		h.anthropicStreamingAwareError(c, status, code, message, streamStarted)
+	} else {
+		h.handleStreamingAwareError(c, status, code, message, streamStarted)
+	}
+	return true
+}
+
+func (h *OpenAIGatewayHandler) markOpenAIUsageBillingAttemptFailed(
+	ctx context.Context,
+	input *service.OpenAIUsageBillingAdmissionInput,
+	reqLog *zap.Logger,
+) {
+	if err := h.gatewayService.MarkOpenAIUsageBillingAttemptFailed(ctx, input); err != nil && reqLog != nil {
+		reqLog.Error("openai.billing_attempt_fail_mark_failed", zap.Error(err))
+	}
+}
+
+func (h *OpenAIGatewayHandler) finalizeOpenAIUsageBillingLifecycle(
+	ctx context.Context,
+	input *service.OpenAIUsageBillingAdmissionInput,
+	reqLog *zap.Logger,
+) {
+	if err := h.gatewayService.FinalizeOpenAIUsageBillingRequest(ctx, input); err != nil && reqLog != nil {
+		reqLog.Error("openai.billing_lifecycle_finalize_failed", zap.Error(err))
+	}
+}
+
+func (h *OpenAIGatewayHandler) markOpenAIUsageBillingResultOrphaned(
+	ctx context.Context,
+	result *service.OpenAIForwardResult,
+	reqLog *zap.Logger,
+) {
+	if err := h.gatewayService.MarkOpenAIUsageBillingResultOrphaned(ctx, result); err != nil && reqLog != nil {
+		reqLog.Error("openai.billing_result_orphan_mark_failed", zap.Error(err))
+	}
 }
 
 func setOpenAIClientTransportHTTP(c *gin.Context) {

@@ -98,7 +98,7 @@ func TestGroupRepository_DeleteCascade_RemovesAllowedGroupsAndClearsApiKeys(t *t
 
 	userRepo := newUserRepositoryWithSQL(entClient, tx)
 	groupRepo := newGroupRepositoryWithSQL(entClient, tx)
-	apiKeyRepo := newAPIKeyRepositoryWithSQL(entClient, tx)
+	apiKeyRepo := newAPIKeyRepositoryWithSQL(entClient, tx, strictAPIKeyTestProtector{})
 
 	u := &service.User{
 		Email:         uniqueTestValue(t, "cascade-user") + "@example.com",

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -26,6 +27,31 @@ type walletRepository struct {
 
 func NewWalletRepository(_ *dbent.Client, sqlDB *sql.DB) service.WalletRepository {
 	return &walletRepository{db: sqlDB}
+}
+
+func (r *walletRepository) withWalletMutation(ctx context.Context, fn func(sqlQueryExecutor) (service.WalletLedgerEntry, error)) (service.WalletLedgerEntry, error) {
+	if existingTx := dbent.TxFromContext(ctx); existingTx != nil {
+		exec := sqlExecutorFromEntClient(existingTx.Client())
+		if exec == nil {
+			return service.WalletLedgerEntry{}, fmt.Errorf("wallet transaction executor is unavailable")
+		}
+		return fn(exec)
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return service.WalletLedgerEntry{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	entry, err := fn(tx)
+	if err != nil {
+		return service.WalletLedgerEntry{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return service.WalletLedgerEntry{}, fmt.Errorf("commit: %w", err)
+	}
+	return entry, nil
 }
 
 func (r *walletRepository) Deduct(ctx context.Context, cmd service.WalletDeductCommand) (service.WalletLedgerEntry, error) {
@@ -67,7 +93,24 @@ func (r *walletRepository) Deduct(ctx context.Context, cmd service.WalletDeductC
 		return service.WalletLedgerEntry{}, service.ErrWalletNotFound
 	}
 
-	if balance.Float64 < cmd.CostUSD {
+	if cmd.UsageLogID != nil {
+		existing, found, err := findUsageLedger(ctx, tx, *cmd.UsageLogID)
+		if err != nil {
+			return service.WalletLedgerEntry{}, fmt.Errorf("query usage ledger: %w", err)
+		}
+		if found {
+			if existing.SubscriptionID != cmd.SubscriptionID {
+				return service.WalletLedgerEntry{}, fmt.Errorf("usage log is already settled for another subscription")
+			}
+			if err := tx.Commit(); err != nil {
+				return service.WalletLedgerEntry{}, fmt.Errorf("commit replay lookup: %w", err)
+			}
+			tx = nil
+			return existing, nil
+		}
+	}
+
+	if balance.Float64 < cmd.CostUSD && !cmd.PostpaidSettlement {
 		return service.WalletLedgerEntry{}, service.ErrWalletInsufficient
 	}
 
@@ -88,6 +131,22 @@ func (r *walletRepository) Deduct(ctx context.Context, cmd service.WalletDeductC
 		usageLogID:     cmd.UsageLogID,
 	})
 	if err != nil {
+		if cmd.UsageLogID != nil && isUniqueConstraintViolation(err) {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				return service.WalletLedgerEntry{}, fmt.Errorf("rollback duplicate usage settlement: %w", rollbackErr)
+			}
+			tx = nil
+			existing, found, lookupErr := findUsageLedger(ctx, r.db, *cmd.UsageLogID)
+			if lookupErr != nil {
+				return service.WalletLedgerEntry{}, fmt.Errorf("query winning usage ledger: %w", lookupErr)
+			}
+			if found {
+				if existing.SubscriptionID != cmd.SubscriptionID {
+					return service.WalletLedgerEntry{}, fmt.Errorf("usage log is already settled for another subscription")
+				}
+				return existing, nil
+			}
+		}
 		return service.WalletLedgerEntry{}, err
 	}
 
@@ -134,8 +193,9 @@ func (r *walletRepository) Adjust(ctx context.Context, cmd service.WalletAdjustC
 	}
 
 	newBalance := balance.Float64 + cmd.DeltaUSD
-	// 约束：调整后余额不可负 (DB CHECK 兜底允许 -0.01 浮点抖动；应用层提前拦)
-	if newBalance < 0 {
+	// 管理员负向扣减不能把正常钱包扣成欠费；但已经因 post-response
+	// settlement 进入负数的钱包，必须允许退款/补偿等正向金额逐步还债。
+	if cmd.DeltaUSD < 0 && newBalance < 0 {
 		return service.WalletLedgerEntry{}, service.ErrWalletInsufficient
 	}
 
@@ -166,6 +226,76 @@ func (r *walletRepository) Adjust(ctx context.Context, cmd service.WalletAdjustC
 	return entry, nil
 }
 
+func (r *walletRepository) RecordActivation(ctx context.Context, cmd service.WalletActivationCommand) (service.WalletLedgerEntry, error) {
+	if cmd.SubscriptionID <= 0 {
+		return service.WalletLedgerEntry{}, service.ErrWalletNotFound
+	}
+	if cmd.InitialUSD <= 0 {
+		return service.WalletLedgerEntry{}, service.ErrWalletNegativeDelta
+	}
+
+	return r.withWalletMutation(ctx, func(exec sqlQueryExecutor) (service.WalletLedgerEntry, error) {
+		var balance, initial sql.NullFloat64
+		err := scanSingleRow(ctx, exec, `
+			SELECT wallet_balance_usd, wallet_initial_usd
+			FROM user_subscriptions
+			WHERE id = $1 AND deleted_at IS NULL
+			FOR UPDATE
+		`, []any{cmd.SubscriptionID}, &balance, &initial)
+		if errors.Is(err, sql.ErrNoRows) {
+			return service.WalletLedgerEntry{}, service.ErrWalletNotFound
+		}
+		if err != nil {
+			return service.WalletLedgerEntry{}, fmt.Errorf("lock subscription row: %w", err)
+		}
+		if !balance.Valid || !initial.Valid {
+			return service.WalletLedgerEntry{}, service.ErrWalletNotFound
+		}
+		if math.Abs(initial.Float64-cmd.InitialUSD) > 0.0000001 || math.Abs(balance.Float64-cmd.InitialUSD) > 0.01 {
+			return service.WalletLedgerEntry{}, fmt.Errorf("wallet activation amount does not match opening balance")
+		}
+
+		var existing service.WalletLedgerEntry
+		var usageLogID, operatorID sql.NullInt64
+		var notes sql.NullString
+		err = scanSingleRow(ctx, exec, `
+			SELECT id, subscription_id, delta_usd, balance_after, reason,
+			       usage_log_id, operator_id, notes
+			FROM subscription_wallet_ledger
+			WHERE subscription_id = $1 AND reason = 'activation'
+			ORDER BY id
+			LIMIT 1
+		`, []any{cmd.SubscriptionID}, &existing.ID, &existing.SubscriptionID, &existing.DeltaUSD,
+			&existing.BalanceAfter, &existing.Reason, &usageLogID, &operatorID, &notes)
+		if err == nil {
+			if math.Abs(existing.DeltaUSD-cmd.InitialUSD) > 0.0000001 {
+				return service.WalletLedgerEntry{}, fmt.Errorf("wallet activation ledger conflicts with opening balance")
+			}
+			if operatorID.Valid {
+				v := operatorID.Int64
+				existing.OperatorID = &v
+			}
+			if notes.Valid {
+				existing.Notes = notes.String
+			}
+			return existing, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return service.WalletLedgerEntry{}, fmt.Errorf("query activation ledger: %w", err)
+		}
+
+		return insertLedger(ctx, exec, ledgerInsert{
+			subscriptionID: cmd.SubscriptionID,
+			deltaUSD:       cmd.InitialUSD,
+			balanceAfter:   balance.Float64,
+			reason:         service.WalletLedgerReasonActivation,
+			paymentOrderID: cmd.PaymentOrderID,
+			operatorID:     cmd.OperatorID,
+			notes:          cmd.Notes,
+		})
+	})
+}
+
 // Topup 额度卡叠加 (B2.4)：同时 +balance 和 +initial，写 reason='topup' 流水。
 // DeltaUSD 必须 > 0；非钱包模式订阅（wallet_balance_usd IS NULL）返 ErrWalletNotFound。
 func (r *walletRepository) Topup(ctx context.Context, cmd service.WalletTopupCommand) (service.WalletLedgerEntry, error) {
@@ -176,63 +306,44 @@ func (r *walletRepository) Topup(ctx context.Context, cmd service.WalletTopupCom
 		return service.WalletLedgerEntry{}, service.ErrWalletNegativeDelta
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return service.WalletLedgerEntry{}, fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() {
-		if tx != nil {
-			_ = tx.Rollback()
+	return r.withWalletMutation(ctx, func(exec sqlQueryExecutor) (service.WalletLedgerEntry, error) {
+		var balance, initial sql.NullFloat64
+		err := scanSingleRow(ctx, exec, `
+			SELECT wallet_balance_usd, wallet_initial_usd
+			FROM user_subscriptions
+			WHERE id = $1 AND deleted_at IS NULL
+			FOR UPDATE
+		`, []any{cmd.SubscriptionID}, &balance, &initial)
+		if errors.Is(err, sql.ErrNoRows) {
+			return service.WalletLedgerEntry{}, service.ErrWalletNotFound
 		}
-	}()
+		if err != nil {
+			return service.WalletLedgerEntry{}, fmt.Errorf("lock subscription row: %w", err)
+		}
+		if !balance.Valid || !initial.Valid {
+			return service.WalletLedgerEntry{}, service.ErrWalletNotFound
+		}
 
-	var balance, initial sql.NullFloat64
-	err = tx.QueryRowContext(ctx, `
-		SELECT wallet_balance_usd, wallet_initial_usd
-		FROM user_subscriptions
-		WHERE id = $1 AND deleted_at IS NULL
-		FOR UPDATE
-	`, cmd.SubscriptionID).Scan(&balance, &initial)
-	if errors.Is(err, sql.ErrNoRows) {
-		return service.WalletLedgerEntry{}, service.ErrWalletNotFound
-	}
-	if err != nil {
-		return service.WalletLedgerEntry{}, fmt.Errorf("lock subscription row: %w", err)
-	}
-	if !balance.Valid || !initial.Valid {
-		// 非钱包模式订阅
-		return service.WalletLedgerEntry{}, service.ErrWalletNotFound
-	}
+		newBalance := balance.Float64 + cmd.DeltaUSD
+		newInitial := initial.Float64 + cmd.DeltaUSD
+		if _, err := exec.ExecContext(ctx, `
+			UPDATE user_subscriptions
+			SET wallet_balance_usd = $1, wallet_initial_usd = $2, updated_at = NOW()
+			WHERE id = $3
+		`, newBalance, newInitial, cmd.SubscriptionID); err != nil {
+			return service.WalletLedgerEntry{}, fmt.Errorf("update balance+initial: %w", err)
+		}
 
-	newBalance := balance.Float64 + cmd.DeltaUSD
-	newInitial := initial.Float64 + cmd.DeltaUSD
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE user_subscriptions
-		SET wallet_balance_usd = $1, wallet_initial_usd = $2, updated_at = NOW()
-		WHERE id = $3
-	`, newBalance, newInitial, cmd.SubscriptionID); err != nil {
-		return service.WalletLedgerEntry{}, fmt.Errorf("update balance+initial: %w", err)
-	}
-
-	notes := cmd.Notes
-	entry, err := insertLedger(ctx, tx, ledgerInsert{
-		subscriptionID: cmd.SubscriptionID,
-		deltaUSD:       cmd.DeltaUSD,
-		balanceAfter:   newBalance,
-		reason:         service.WalletLedgerReasonTopup,
-		operatorID:     cmd.OperatorID,
-		notes:          notes,
+		return insertLedger(ctx, exec, ledgerInsert{
+			subscriptionID: cmd.SubscriptionID,
+			deltaUSD:       cmd.DeltaUSD,
+			balanceAfter:   newBalance,
+			reason:         service.WalletLedgerReasonTopup,
+			paymentOrderID: cmd.PaymentOrderID,
+			operatorID:     cmd.OperatorID,
+			notes:          cmd.Notes,
+		})
 	})
-	if err != nil {
-		return service.WalletLedgerEntry{}, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return service.WalletLedgerEntry{}, fmt.Errorf("commit: %w", err)
-	}
-	tx = nil
-	return entry, nil
 }
 
 // ReconcileBalances 把所有钱包模式订阅的 cached wallet_balance_usd 与
@@ -296,7 +407,7 @@ func (r *walletRepository) ListLedger(ctx context.Context, subscriptionID int64,
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, subscription_id, delta_usd, balance_after, reason,
-		       usage_log_id, operator_id, COALESCE(notes, '')
+		       payment_order_id, usage_log_id, operator_id, COALESCE(notes, '')
 		FROM subscription_wallet_ledger
 		WHERE subscription_id = $1
 		ORDER BY created_at DESC, id DESC
@@ -310,10 +421,14 @@ func (r *walletRepository) ListLedger(ctx context.Context, subscriptionID int64,
 	out := make([]service.WalletLedgerEntry, 0, limit)
 	for rows.Next() {
 		var e service.WalletLedgerEntry
-		var usageLogID, operatorID sql.NullInt64
+		var paymentOrderID, usageLogID, operatorID sql.NullInt64
 		if err := rows.Scan(&e.ID, &e.SubscriptionID, &e.DeltaUSD, &e.BalanceAfter, &e.Reason,
-			&usageLogID, &operatorID, &e.Notes); err != nil {
+			&paymentOrderID, &usageLogID, &operatorID, &e.Notes); err != nil {
 			return nil, fmt.Errorf("scan ledger: %w", err)
+		}
+		if paymentOrderID.Valid {
+			v := paymentOrderID.Int64
+			e.PaymentOrderID = &v
 		}
 		if usageLogID.Valid {
 			v := usageLogID.Int64
@@ -333,13 +448,50 @@ type ledgerInsert struct {
 	deltaUSD       float64
 	balanceAfter   float64
 	reason         string
+	paymentOrderID *int64
 	usageLogID     *int64
 	operatorID     *int64
 	notes          string
 }
 
-func insertLedger(ctx context.Context, tx *sql.Tx, in ledgerInsert) (service.WalletLedgerEntry, error) {
-	var usageLog, operator sql.NullInt64
+func findUsageLedger(ctx context.Context, exec sqlQueryExecutor, usageLogID int64) (service.WalletLedgerEntry, bool, error) {
+	var entry service.WalletLedgerEntry
+	var paymentOrderID, storedUsageLogID, operatorID sql.NullInt64
+	err := scanSingleRow(ctx, exec, `
+		SELECT id, subscription_id, delta_usd, balance_after, reason,
+		       payment_order_id, usage_log_id, operator_id, COALESCE(notes, '')
+		FROM subscription_wallet_ledger
+		WHERE usage_log_id = $1 AND reason = 'usage'
+		ORDER BY id
+		LIMIT 1
+	`, []any{usageLogID}, &entry.ID, &entry.SubscriptionID, &entry.DeltaUSD, &entry.BalanceAfter,
+		&entry.Reason, &paymentOrderID, &storedUsageLogID, &operatorID, &entry.Notes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return service.WalletLedgerEntry{}, false, nil
+	}
+	if err != nil {
+		return service.WalletLedgerEntry{}, false, err
+	}
+	if paymentOrderID.Valid {
+		value := paymentOrderID.Int64
+		entry.PaymentOrderID = &value
+	}
+	if storedUsageLogID.Valid {
+		value := storedUsageLogID.Int64
+		entry.UsageLogID = &value
+	}
+	if operatorID.Valid {
+		value := operatorID.Int64
+		entry.OperatorID = &value
+	}
+	return entry, true, nil
+}
+
+func insertLedger(ctx context.Context, exec sqlQueryExecutor, in ledgerInsert) (service.WalletLedgerEntry, error) {
+	var paymentOrder, usageLog, operator sql.NullInt64
+	if in.paymentOrderID != nil {
+		paymentOrder = sql.NullInt64{Int64: *in.paymentOrderID, Valid: true}
+	}
 	if in.usageLogID != nil {
 		usageLog = sql.NullInt64{Int64: *in.usageLogID, Valid: true}
 	}
@@ -352,12 +504,12 @@ func insertLedger(ctx context.Context, tx *sql.Tx, in ledgerInsert) (service.Wal
 	}
 
 	var id int64
-	err := tx.QueryRowContext(ctx, `
-		INSERT INTO subscription_wallet_ledger
-			(subscription_id, delta_usd, balance_after, reason, usage_log_id, operator_id, notes)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id
-	`, in.subscriptionID, in.deltaUSD, in.balanceAfter, in.reason, usageLog, operator, notes).Scan(&id)
+	err := scanSingleRow(ctx, exec, `
+			INSERT INTO subscription_wallet_ledger
+				(subscription_id, delta_usd, balance_after, reason, payment_order_id, usage_log_id, operator_id, notes)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING id
+		`, []any{in.subscriptionID, in.deltaUSD, in.balanceAfter, in.reason, paymentOrder, usageLog, operator, notes}, &id)
 	if err != nil {
 		return service.WalletLedgerEntry{}, fmt.Errorf("insert ledger: %w", err)
 	}
@@ -368,6 +520,7 @@ func insertLedger(ctx context.Context, tx *sql.Tx, in ledgerInsert) (service.Wal
 		DeltaUSD:       in.deltaUSD,
 		BalanceAfter:   in.balanceAfter,
 		Reason:         in.reason,
+		PaymentOrderID: in.paymentOrderID,
 		UsageLogID:     in.usageLogID,
 		OperatorID:     in.operatorID,
 		Notes:          in.notes,

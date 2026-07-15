@@ -3,8 +3,10 @@
 package service
 
 import (
+	"math"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,6 +103,26 @@ func TestValidatePlanRequired_ValidOriginalPrice(t *testing.T) {
 	op := 19.99
 	err := validatePlanRequired("Pro", ptrInt64(1), nil, PlanTypeSubscription, 9.99, 30, "days", &op)
 	require.NoError(t, err)
+}
+
+func TestValidatePlanRequired_MonthlyAndCreditsShapes(t *testing.T) {
+	walletQuota := 20.0
+	require.Error(t, validatePlanRequired(
+		"monthly wallet", nil, &walletQuota, PlanTypeSubscription, 9.99, 30, "days", nil,
+	))
+	require.Error(t, validatePlanRequired(
+		"credits group", ptrInt64(1), &walletQuota, PlanTypeCredits, 9.99, 30, "days", nil,
+	))
+	require.NoError(t, validatePlanRequired(
+		"credits wallet", nil, &walletQuota, PlanTypeCredits, 9.99, 30, "days", nil,
+	))
+
+	for _, invalidQuota := range []float64{0, -1, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		quota := invalidQuota
+		err := validatePlanRequired("invalid credits", nil, &quota, PlanTypeCredits, 9.99, 30, "days", nil)
+		require.Error(t, err)
+		require.Equal(t, "PLAN_WALLET_QUOTA_INVALID", infraerrors.Reason(err))
+	}
 }
 
 // --- validatePlanPatch tests ---

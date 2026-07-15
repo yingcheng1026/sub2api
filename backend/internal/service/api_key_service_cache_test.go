@@ -17,10 +17,11 @@ import (
 )
 
 type authRepoStub struct {
-	getByKeyForAuth   func(ctx context.Context, key string) (*APIKey, error)
-	listByUserID      func(ctx context.Context, userID int64, params pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error)
-	listKeysByUserID  func(ctx context.Context, userID int64) ([]string, error)
-	listKeysByGroupID func(ctx context.Context, groupID int64) ([]string, error)
+	getByKeyForAuth           func(ctx context.Context, key string) (*APIKey, error)
+	validateAuthCacheSnapshot func(ctx context.Context, cacheLocator string, snapshot *APIKeyAuthSnapshot) (bool, error)
+	listByUserID              func(ctx context.Context, userID int64, params pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error)
+	listKeysByUserID          func(ctx context.Context, userID int64) ([]string, error)
+	listKeysByGroupID         func(ctx context.Context, groupID int64) ([]string, error)
 }
 
 func (s *authRepoStub) Create(ctx context.Context, key *APIKey) error {
@@ -44,6 +45,13 @@ func (s *authRepoStub) GetByKeyForAuth(ctx context.Context, key string) (*APIKey
 		panic("unexpected GetByKeyForAuth call")
 	}
 	return s.getByKeyForAuth(ctx, key)
+}
+
+func (s *authRepoStub) ValidateAuthCacheSnapshot(ctx context.Context, cacheLocator string, snapshot *APIKeyAuthSnapshot) (bool, error) {
+	if s.validateAuthCacheSnapshot == nil {
+		return true, nil
+	}
+	return s.validateAuthCacheSnapshot(ctx, cacheLocator, snapshot)
 }
 
 func (s *authRepoStub) Update(ctx context.Context, key *APIKey) error {
@@ -92,16 +100,16 @@ func (s *authRepoStub) CountByGroupID(ctx context.Context, groupID int64) (int64
 	panic("unexpected CountByGroupID call")
 }
 
-func (s *authRepoStub) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
+func (s *authRepoStub) ListAuthCacheLocatorsByUserID(ctx context.Context, userID int64) ([]string, error) {
 	if s.listKeysByUserID == nil {
-		panic("unexpected ListKeysByUserID call")
+		panic("unexpected ListAuthCacheLocatorsByUserID call")
 	}
 	return s.listKeysByUserID(ctx, userID)
 }
 
-func (s *authRepoStub) ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error) {
+func (s *authRepoStub) ListAuthCacheLocatorsByGroupID(ctx context.Context, groupID int64) ([]string, error) {
 	if s.listKeysByGroupID == nil {
-		panic("unexpected ListKeysByGroupID call")
+		panic("unexpected ListAuthCacheLocatorsByGroupID call")
 	}
 	return s.listKeysByGroupID(ctx, groupID)
 }
@@ -235,22 +243,130 @@ func TestAPIKeyService_GetByKey_UsesL2Cache(t *testing.T) {
 	require.Equal(t, map[string][]int64{"claude-opus-*": {1, 2}}, apiKey.Group.ModelRouting)
 }
 
+func TestAPIKeyService_GetByKey_RejectsStalePermissionSnapshotEvenWhenRedisInvalidationFailed(t *testing.T) {
+	groupID := int64(22)
+	cacheDeleteErr := errors.New("redis delete unavailable")
+	cachePublishErr := errors.New("redis publish unavailable")
+	cache := &authCacheStub{
+		deleteAuthErr:  cacheDeleteErr,
+		publishAuthErr: cachePublishErr,
+	}
+	var repoCalls int32
+	expectedLocator := APIKeyAuthCacheLocator("stale-vip-key")
+	repo := &authRepoStub{
+		validateAuthCacheSnapshot: func(_ context.Context, cacheLocator string, _ *APIKeyAuthSnapshot) (bool, error) {
+			require.Equal(t, expectedLocator, cacheLocator)
+			return false, nil
+		},
+		getByKeyForAuth: func(context.Context, string) (*APIKey, error) {
+			atomic.AddInt32(&repoCalls, 1)
+			return &APIKey{
+				ID:      1,
+				UserID:  2,
+				GroupID: &groupID,
+				Name:    "VIP key",
+				Status:  StatusActive,
+				User: &User{
+					ID:            2,
+					Status:        StatusActive,
+					Role:          RoleUser,
+					AllowedGroups: nil,
+				},
+				Group: &Group{
+					ID:               groupID,
+					Name:             "vip",
+					Platform:         PlatformAnthropic,
+					Status:           StatusActive,
+					Hydrated:         true,
+					IsExclusive:      true,
+					SubscriptionType: SubscriptionTypeStandard,
+				},
+			}, nil
+		},
+	}
+	cache.getAuthCache = func(context.Context, string) (*APIKeyAuthCacheEntry, error) {
+		return &APIKeyAuthCacheEntry{Snapshot: &APIKeyAuthSnapshot{
+			Version:  apiKeyAuthSnapshotVersion,
+			APIKeyID: 1,
+			UserID:   2,
+			GroupID:  &groupID,
+			Name:     "VIP key",
+			Status:   StatusActive,
+			User: APIKeyAuthUserSnapshot{
+				ID:            2,
+				Status:        StatusActive,
+				Role:          RoleUser,
+				AllowedGroups: []int64{groupID},
+			},
+			Group: &APIKeyAuthGroupSnapshot{
+				ID:               groupID,
+				Name:             "vip",
+				Platform:         PlatformAnthropic,
+				Status:           StatusActive,
+				IsExclusive:      true,
+				SubscriptionType: SubscriptionTypeStandard,
+			},
+		}}, nil
+	}
+	cfg := &config.Config{APIKeyAuth: config.APIKeyAuthCacheConfig{L2TTLSeconds: 60}}
+	svc := NewAPIKeyService(repo, nil, nil, nil, nil, cache, cfg)
+
+	got, err := svc.GetByKey(context.Background(), "stale-vip-key")
+	require.NoError(t, err)
+	require.Empty(t, got.User.AllowedGroups, "the stale VIP grant must not survive a failed Redis invalidation")
+	require.Equal(t, int32(1), atomic.LoadInt32(&repoCalls), "a stale snapshot must be reloaded from the database")
+}
+
+func TestAPIKeyService_GetByKey_FailsClosedWhenPermissionSnapshotCannotBeValidated(t *testing.T) {
+	validationErr := errors.New("database unavailable")
+	cache := &authCacheStub{}
+	repo := &authRepoStub{
+		validateAuthCacheSnapshot: func(context.Context, string, *APIKeyAuthSnapshot) (bool, error) {
+			return false, validationErr
+		},
+		getByKeyForAuth: func(context.Context, string) (*APIKey, error) {
+			panic("a validation failure must not fall through to an unguarded authorization path")
+		},
+	}
+	cache.getAuthCache = func(context.Context, string) (*APIKeyAuthCacheEntry, error) {
+		return &APIKeyAuthCacheEntry{Snapshot: &APIKeyAuthSnapshot{
+			Version:  apiKeyAuthSnapshotVersion,
+			APIKeyID: 1,
+			UserID:   2,
+			Status:   StatusActive,
+			User: APIKeyAuthUserSnapshot{
+				ID:     2,
+				Status: StatusActive,
+				Role:   RoleUser,
+			},
+		}}, nil
+	}
+	cfg := &config.Config{APIKeyAuth: config.APIKeyAuthCacheConfig{L2TTLSeconds: 60}}
+	svc := NewAPIKeyService(repo, nil, nil, nil, nil, cache, cfg)
+
+	_, err := svc.GetByKey(context.Background(), "cached-key")
+	require.ErrorIs(t, err, validationErr)
+}
+
 func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t *testing.T) {
 	svc := NewAPIKeyService(nil, nil, nil, nil, nil, nil, &config.Config{})
 	groupID := int64(9)
+	groupUpdatedAt := time.Now().UTC().Truncate(time.Microsecond)
 	apiKey := &APIKey{
 		ID:      1,
 		UserID:  2,
 		GroupID: &groupID,
 		Key:     "k-roundtrip",
 		Name:    "Audit Key",
+		Purpose: APIKeyPurposeStandard,
 		Status:  StatusActive,
 		User: &User{
-			ID:          2,
-			Status:      StatusActive,
-			Role:        RoleUser,
-			Balance:     10,
-			Concurrency: 3,
+			ID:            2,
+			Status:        StatusActive,
+			Role:          RoleUser,
+			Balance:       10,
+			Concurrency:   3,
+			AllowedGroups: []int64{groupID, 22},
 		},
 		Group: &Group{
 			ID:                    groupID,
@@ -258,6 +374,7 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t 
 			Platform:              PlatformOpenAI,
 			Status:                StatusActive,
 			SubscriptionType:      SubscriptionTypeStandard,
+			IsExclusive:           true,
 			RateMultiplier:        1,
 			AllowMessagesDispatch: true,
 			DefaultMappedModel:    "gpt-5.4",
@@ -269,6 +386,7 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t 
 					"claude-sonnet-4.5": "gpt-5.4-nano",
 				},
 			},
+			UpdatedAt: groupUpdatedAt,
 		},
 	}
 
@@ -277,8 +395,12 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t 
 
 	require.NotNil(t, roundTrip)
 	require.Equal(t, apiKey.Name, roundTrip.Name)
+	require.Equal(t, apiKey.Purpose, roundTrip.Purpose)
 	require.NotNil(t, roundTrip.Group)
 	require.Equal(t, apiKey.Group.MessagesDispatchModelConfig, roundTrip.Group.MessagesDispatchModelConfig)
+	require.Equal(t, apiKey.User.AllowedGroups, roundTrip.User.AllowedGroups)
+	require.True(t, roundTrip.Group.IsExclusive)
+	require.True(t, roundTrip.Group.UpdatedAt.Equal(groupUpdatedAt))
 }
 
 func TestAPIKeyService_GetByKey_IgnoresLegacyAuthCacheSnapshotWithoutMessagesDispatchConfig(t *testing.T) {
@@ -461,7 +583,7 @@ func TestAPIKeyService_InvalidateAuthCacheByUserID(t *testing.T) {
 	cache := &authCacheStub{}
 	repo := &authRepoStub{
 		listKeysByUserID: func(ctx context.Context, userID int64) ([]string, error) {
-			return []string{"k1", "k2"}, nil
+			return []string{APIKeyAuthCacheLocator("k1"), APIKeyAuthCacheLocator("k2")}, nil
 		},
 	}
 	cfg := &config.Config{
@@ -490,7 +612,9 @@ func TestAPIKeyService_InvalidateAuthCacheByUserIDReliable_ReportsRepositoryAndC
 		publishErr := errors.New("publish failed")
 		cache := &authCacheStub{deleteAuthErr: deleteErr, publishAuthErr: publishErr}
 		svc := NewAPIKeyService(&authRepoStub{
-			listKeysByUserID: func(context.Context, int64) ([]string, error) { return []string{"k1", "k2"}, nil },
+			listKeysByUserID: func(context.Context, int64) ([]string, error) {
+				return []string{APIKeyAuthCacheLocator("k1"), APIKeyAuthCacheLocator("k2")}, nil
+			},
 		}, nil, nil, nil, nil, cache, &config.Config{})
 
 		err := svc.InvalidateAuthCacheByUserIDReliable(context.Background(), 7)
@@ -523,7 +647,7 @@ func TestAPIKeyService_InvalidateAuthCacheByGroupID(t *testing.T) {
 	cache := &authCacheStub{}
 	repo := &authRepoStub{
 		listKeysByGroupID: func(ctx context.Context, groupID int64) ([]string, error) {
-			return []string{"k1", "k2"}, nil
+			return []string{APIKeyAuthCacheLocator("k1"), APIKeyAuthCacheLocator("k2")}, nil
 		},
 	}
 	cfg := &config.Config{

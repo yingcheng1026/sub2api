@@ -156,8 +156,14 @@ GitHub Releases からビルド済みバイナリをダウンロードするワ�
 
 #### インストール手順
 
+レビュー済みのクローンまたはリリースアーカイブからのみ実行してください。
+インストーラーは `curl | bash` 入力を拒否します。
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api
+git checkout <reviewed-tag-or-commit>
+sudo bash deploy/install.sh
 ```
 
 スクリプトは以下を実行します:
@@ -176,8 +182,9 @@ sudo systemctl start sub2api
 # 2. 起動時の自動起動を有効化
 sudo systemctl enable sub2api
 
-# 3. ブラウザでセットアップウィザードを開く
-# http://YOUR_SERVER_IP:8080
+# 3. ループバック専用のセットアップ画面をワークステーションへ転送
+ssh -L 18080:127.0.0.1:8080 USER@YOUR_SERVER_IP
+# 次に http://127.0.0.1:18080 を開く
 ```
 
 セットアップウィザードでは以下の設定を行います:
@@ -187,12 +194,9 @@ sudo systemctl enable sub2api
 
 #### アップグレード
 
-**管理ダッシュボード**の左上にある**アップデートを確認**ボタンをクリックすることで、ダッシュボードから直接アップグレードできます。
-
-Web インターフェースでは以下が可能です:
-- 新しいバージョンの自動確認
-- ワンクリックでのアップデートのダウンロードと適用
-- 必要に応じたロールバック
+このカスタムビルドは上流バージョンを確認できますが、更新とロールバックの適用は
+既定で無効です。対象リリースの互換性ゲート、バックアップ、復元演習、制御された
+ロールアウトが完了するまで `SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED=false` を維持してください。
 
 #### よく使うコマンド
 
@@ -206,8 +210,8 @@ sudo journalctl -u sub2api -f
 # サービスを再起動
 sudo systemctl restart sub2api
 
-# アンインストール
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+# 同じレビュー済みチェックアウトからアンインストール
+sudo bash deploy/install.sh uninstall -y
 ```
 
 ---
@@ -223,14 +227,13 @@ PostgreSQL と Redis のコンテナを含む Docker Compose でデプロイし�
 
 #### クイックスタート（ワンクリックデプロイ）
 
-自動デプロイスクリプトを使用して簡単にセットアップできます:
+レビュー済みのクローンまたはリリースアーカイブからスクリプトを実行してください。可変ブランチからの `curl | bash` はサポートしません。
 
 ```bash
-# デプロイ用ディレクトリを作成
-mkdir -p sub2api-deploy && cd sub2api-deploy
-
-# デプロイ準備スクリプトをダウンロードして実行
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+# レビュー済みリビジョンをクローンしてローカルスクリプトを実行
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api/deploy
+bash docker-deploy.sh
 
 # サービスを起動
 docker compose up -d
@@ -240,11 +243,11 @@ docker compose logs -f sub2api
 ```
 
 **スクリプトの動作内容:**
-- `docker-compose.local.yml`（`docker-compose.yml` として保存）と `.env.example` をダウンロード
-- セキュアな認証情報（JWT_SECRET、TOTP_ENCRYPTION_KEY、POSTGRES_PASSWORD）を自動生成
+- スクリプトと同梱されたレビュー済み Compose / 環境テンプレートのみをコピー
+- JWT、TOTP、支払い再開、PostgreSQL、Redis、管理者の各シークレットを個別生成
 - 自動生成されたシークレットで `.env` ファイルを作成
 - データディレクトリを作成（バックアップ・移行が容易なローカルディレクトリを使用）
-- 生成された認証情報を参照用に表示
+- シークレットは権限 0600 の `.env` にのみ書き込み、端末やログには表示しない
 
 #### 手動デプロイ
 
@@ -268,15 +271,38 @@ nano .env
 # PostgreSQL パスワード（必須）
 POSTGRES_PASSWORD=your_secure_password_here
 
-# JWT シークレット（推奨 - 再起動後もユーザーのログイン状態を保持）
+# Redis パスワード（必須。他のシークレットと共用しない）
+REDIS_PASSWORD=your_redis_password_here
+
+# JWT シークレット（必須 - 再起動後もユーザーのログイン状態を保持）
 JWT_SECRET=your_jwt_secret_here
 
-# TOTP 暗号化キー（推奨 - 再起動後も二要素認証を維持）
-TOTP_ENCRYPTION_KEY=your_totp_key_here
+# 旧 v1/v2 移行ルート（v3 移行後に削除）
+TOTP_ENCRYPTION_KEY=
 
-# オプション: 管理者アカウント
+# アプリケーション秘密ドメインごとの独立ルート（必須。すべて別々に生成）
+SECRET_ENCRYPTION_TOTP_SECRET_KEY=your_totp_secret_key_here
+SECRET_ENCRYPTION_TOTP_CACHE_KEY=your_totp_cache_key_here
+SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=your_account_credential_key_here
+SECRET_ENCRYPTION_BACKUP_S3_KEY=your_backup_s3_key_here
+SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=your_content_moderation_key_here
+SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=your_channel_monitor_key_here
+SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=your_payment_provider_key_here
+SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=your_proxy_credential_key_here
+SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=your_scheduler_cache_key_here
+SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=your_oauth_token_cache_key_here
+SECRET_ENCRYPTION_JWT_HMAC_KEY=your_jwt_hmac_encryption_key_here
+SECRET_ENCRYPTION_SETTING_SECRET_KEY=your_setting_secret_encryption_key_here
+
+# 支払い再開署名キー（必須。独立した値を使用）
+PAYMENT_RESUME_SIGNING_KEY=your_payment_resume_key_here
+
+# 管理者パスワード（必須）
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=your_admin_password
+
+# カスタムビルドでは公式更新の適用を無効のままにする
+SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED=false
 
 # オプション: カスタムポート
 SERVER_PORT=8080
@@ -287,7 +313,16 @@ SERVER_PORT=8080
 # JWT_SECRET を生成
 openssl rand -hex 32
 
-# TOTP_ENCRYPTION_KEY を生成
+# 各 SECRET_ENCRYPTION_* キーを別々に生成し、旧キーは既存環境の移行時だけ保持
+openssl rand -hex 32
+
+# PAYMENT_RESUME_SIGNING_KEY を生成
+openssl rand -hex 32
+
+# REDIS_PASSWORD を生成
+openssl rand -hex 32
+
+# ADMIN_PASSWORD を生成
 openssl rand -hex 32
 
 # POSTGRES_PASSWORD を生成
@@ -325,10 +360,7 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 ブラウザで `http://YOUR_SERVER_IP:8080` を開いてください。
 
-管理者パスワードが自動生成された場合は、ログで確認できます:
-```bash
-docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
-```
+管理者パスワードは起動前に設定する必要があり、サービスログには出力されません。付属のデプロイスクリプトは権限 0600 の `.env` にのみ保存します。
 
 #### アップグレード
 
@@ -468,20 +500,22 @@ default:
 
 **⚠️ セキュリティ警告: HTTP URL 設定**
 
-上流アカウントの `base_url` はホスト許可リストではなく最小限の URL バリデーションのみを行います。HTTP URL は `security.url_allowlist.allow_insecure_http` で制御します。信頼できない公開環境では `false` のままにし、開発環境や信頼済みの内部上流でのみ `true` にしてください:
+上流アカウントの `base_url` は任意の公開ホストを利用できますが、プライベート/予約済みアドレスと DNS rebinding はデフォルトで拒否します。公開環境では両方の危険なオプトインを `false` のままにしてください:
 
 ```yaml
 security:
   url_allowlist:
     enabled: false                # 許可リストチェックを無効化
-    allow_insecure_http: true     # HTTP URL を許可（⚠️ セキュリティリスクあり）
+    allow_private_hosts: false    # 公開宛先のみ（安全なデフォルト）
+    allow_insecure_http: false    # HTTPS 必須（安全なデフォルト）
 ```
 
 **または環境変数で設定:**
 
 ```bash
 SECURITY_URL_ALLOWLIST_ENABLED=false
-SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true
+SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=false
+SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=false
 ```
 
 **HTTP を許可するリスク:**

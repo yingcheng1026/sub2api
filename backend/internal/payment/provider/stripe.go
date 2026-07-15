@@ -124,6 +124,10 @@ func (s *Stripe) QueryOrder(ctx context.Context, tradeNo string) (*payment.Query
 	if err != nil {
 		return nil, fmt.Errorf("stripe query order: %w", err)
 	}
+	currency, err := validatedStripeCurrency(pi.Currency)
+	if err != nil {
+		return nil, fmt.Errorf("stripe query order: %w", err)
+	}
 
 	status := payment.ProviderStatusPending
 	switch pi.Status {
@@ -137,6 +141,9 @@ func (s *Stripe) QueryOrder(ctx context.Context, tradeNo string) (*payment.Query
 		TradeNo: pi.ID,
 		Status:  status,
 		Amount:  payment.FenToYuan(pi.Amount),
+		Metadata: map[string]string{
+			"currency": currency,
+		},
 	}, nil
 }
 
@@ -170,8 +177,15 @@ func (s *Stripe) VerifyNotification(_ context.Context, rawBody string, headers m
 }
 
 func parseStripePaymentIntent(event *stripe.Event, status string, rawBody string) (*payment.PaymentNotification, error) {
+	if event == nil || event.Data == nil {
+		return nil, fmt.Errorf("stripe parse payment_intent: event data is missing")
+	}
 	var pi stripe.PaymentIntent
 	if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
+		return nil, fmt.Errorf("stripe parse payment_intent: %w", err)
+	}
+	currency, err := validatedStripeCurrency(pi.Currency)
+	if err != nil {
 		return nil, fmt.Errorf("stripe parse payment_intent: %w", err)
 	}
 	return &payment.PaymentNotification{
@@ -180,7 +194,18 @@ func parseStripePaymentIntent(event *stripe.Event, status string, rawBody string
 		Amount:  payment.FenToYuan(pi.Amount),
 		Status:  status,
 		RawData: rawBody,
+		Metadata: map[string]string{
+			"currency": currency,
+		},
 	}, nil
+}
+
+func validatedStripeCurrency(currency stripe.Currency) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(string(currency)))
+	if normalized != stripeCurrency {
+		return "", fmt.Errorf("unexpected currency %q", normalized)
+	}
+	return strings.ToUpper(normalized), nil
 }
 
 // Refund creates a Stripe refund.
@@ -196,6 +221,9 @@ func (s *Stripe) Refund(ctx context.Context, req payment.RefundRequest) (*paymen
 		PaymentIntent: stripe.String(req.TradeNo),
 		Amount:        stripe.Int64(amountInCents),
 		Reason:        stripe.String(string(stripe.RefundReasonRequestedByCustomer)),
+	}
+	if idempotencyKey := strings.TrimSpace(req.IdempotencyKey); idempotencyKey != "" {
+		params.SetIdempotencyKey(idempotencyKey)
 	}
 	params.Context = ctx
 

@@ -72,7 +72,7 @@ services:
       # =======================================================================
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       - REDIS_DB=${REDIS_DB:-0}
       - REDIS_POOL_SIZE=${REDIS_POOL_SIZE:-1024}
       - REDIS_MIN_IDLE_CONNS=${REDIS_MIN_IDLE_CONNS:-10}
@@ -82,7 +82,7 @@ services:
       # Admin Account (auto-created on first run)
       # =======================================================================
       - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@sub2api.local}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
 
       # =======================================================================
       # JWT Configuration
@@ -91,18 +91,32 @@ services:
       # invalidated after container restarts. If left empty, a random secret
       # will be generated on each startup.
       # Generate a secure secret: openssl rand -hex 32
-      - JWT_SECRET=${JWT_SECRET:-}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - JWT_EXPIRE_HOUR=${JWT_EXPIRE_HOUR:-24}
 
       # =======================================================================
       # TOTP (2FA) Configuration
       # =======================================================================
-      # IMPORTANT: Set a fixed encryption key for TOTP secrets. If left empty,
-      # a random key will be generated on each startup, causing all existing
-      # TOTP configurations to become invalid (users won't be able to login
-      # with 2FA).
+      # REQUIRED: use one stable key on every node and restart. The application
+      # fails closed rather than generating an ephemeral encryption key.
       # Generate a secure key: openssl rand -hex 32
       - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:-}
+      - SECRET_ENCRYPTION_TOTP_SECRET_KEY=${SECRET_ENCRYPTION_TOTP_SECRET_KEY:?SECRET_ENCRYPTION_TOTP_SECRET_KEY is required}
+      - SECRET_ENCRYPTION_TOTP_CACHE_KEY=${SECRET_ENCRYPTION_TOTP_CACHE_KEY:?SECRET_ENCRYPTION_TOTP_CACHE_KEY is required}
+      - SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=${SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY:?SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY is required}
+      - SECRET_ENCRYPTION_BACKUP_S3_KEY=${SECRET_ENCRYPTION_BACKUP_S3_KEY:?SECRET_ENCRYPTION_BACKUP_S3_KEY is required}
+      - SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=${SECRET_ENCRYPTION_CONTENT_MODERATION_KEY:?SECRET_ENCRYPTION_CONTENT_MODERATION_KEY is required}
+      - SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=${SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY:?SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY is required}
+      - SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=${SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY:?SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY is required}
+      - SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=${SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY:?SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY is required}
+      - SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=${SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY:?SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY is required}
+      - SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=${SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY:?SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY is required}
+      - SECRET_ENCRYPTION_JWT_HMAC_KEY=${SECRET_ENCRYPTION_JWT_HMAC_KEY:?SECRET_ENCRYPTION_JWT_HMAC_KEY is required}
+      - SECRET_ENCRYPTION_SETTING_SECRET_KEY=${SECRET_ENCRYPTION_SETTING_SECRET_KEY:?SECRET_ENCRYPTION_SETTING_SECRET_KEY is required}
+      - API_KEY_ENCRYPTION_KEY=${API_KEY_ENCRYPTION_KEY:?API_KEY_ENCRYPTION_KEY is required}
+      - PAYMENT_RESUME_SIGNING_KEY=${PAYMENT_RESUME_SIGNING_KEY:?PAYMENT_RESUME_SIGNING_KEY is required}
+      - PAYMENT_RESUME_LEGACY_VERIFY_UNTIL=${PAYMENT_RESUME_LEGACY_VERIFY_UNTIL:-}
+      - SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED=${SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED:-false}
 
       # =======================================================================
       # Timezone Configuration
@@ -216,17 +230,21 @@ services:
     volumes:
       # Local directory mapping for easy migration
       - ./redis_data:/data
-    command: >
-        sh -c '
-          redis-server
-          --save 60 1
-          --appendonly yes
-          --appendfsync everysec
-          ${REDIS_PASSWORD:+--requirepass "$REDIS_PASSWORD"}'
+    command:
+      - sh
+      - -ec
+      - |
+        test -n "$$REDIS_PASSWORD"
+        exec redis-server \
+          --save 60 1 \
+          --appendonly yes \
+          --appendfsync everysec \
+          --requirepass "$$REDIS_PASSWORD"
     environment:
       - TZ=${TZ:-Asia/Shanghai}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       # REDISCLI_AUTH is used by redis-cli for authentication (safer than -a flag)
-      - REDISCLI_AUTH=${REDIS_PASSWORD:-}
+      - REDISCLI_AUTH=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     networks:
       - sub2api-network
     healthcheck:

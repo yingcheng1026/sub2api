@@ -28,6 +28,8 @@ type SubscriptionWalletLedger struct {
 	BalanceAfter float64 `json:"balance_after,omitempty"`
 	// activation | usage | refund | adjustment | expiration
 	Reason string `json:"reason,omitempty"`
+	// immutable payment source for activation/topup and its refund reversal
+	PaymentOrderID *int64 `json:"payment_order_id,omitempty"`
 	// 仅 reason=usage 时填，关联到 usage_logs.id
 	UsageLogID *int64 `json:"usage_log_id,omitempty"`
 	// 仅 refund/adjustment 时填，操作员 user_id
@@ -95,7 +97,7 @@ func (*SubscriptionWalletLedger) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case subscriptionwalletledger.FieldDeltaUsd, subscriptionwalletledger.FieldBalanceAfter:
 			values[i] = new(sql.NullFloat64)
-		case subscriptionwalletledger.FieldID, subscriptionwalletledger.FieldSubscriptionID, subscriptionwalletledger.FieldUsageLogID, subscriptionwalletledger.FieldOperatorID:
+		case subscriptionwalletledger.FieldID, subscriptionwalletledger.FieldSubscriptionID, subscriptionwalletledger.FieldPaymentOrderID, subscriptionwalletledger.FieldUsageLogID, subscriptionwalletledger.FieldOperatorID:
 			values[i] = new(sql.NullInt64)
 		case subscriptionwalletledger.FieldReason, subscriptionwalletledger.FieldNotes:
 			values[i] = new(sql.NullString)
@@ -145,6 +147,13 @@ func (_m *SubscriptionWalletLedger) assignValues(columns []string, values []any)
 				return fmt.Errorf("unexpected type %T for field reason", values[i])
 			} else if value.Valid {
 				_m.Reason = value.String
+			}
+		case subscriptionwalletledger.FieldPaymentOrderID:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field payment_order_id", values[i])
+			} else if value.Valid {
+				_m.PaymentOrderID = new(int64)
+				*_m.PaymentOrderID = value.Int64
 			}
 		case subscriptionwalletledger.FieldUsageLogID:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -235,6 +244,11 @@ func (_m *SubscriptionWalletLedger) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("reason=")
 	builder.WriteString(_m.Reason)
+	builder.WriteString(", ")
+	if v := _m.PaymentOrderID; v != nil {
+		builder.WriteString("payment_order_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
 	builder.WriteString(", ")
 	if v := _m.UsageLogID; v != nil {
 		builder.WriteString("usage_log_id=")

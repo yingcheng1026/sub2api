@@ -22,8 +22,8 @@ func APIKeyAuthGoogle(apiKeyService *service.APIKeyService, cfg *config.Config) 
 // It is intended for Gemini native endpoints (/v1beta) to match Gemini SDK expectations.
 func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subscriptionService *service.SubscriptionService, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if v := strings.TrimSpace(c.Query("api_key")); v != "" {
-			abortWithGoogleError(c, 400, "Query parameter api_key is deprecated. Use Authorization header or key instead.")
+		if strings.TrimSpace(c.Query("api_key")) != "" || strings.TrimSpace(c.Query("key")) != "" {
+			abortWithGoogleError(c, 400, "API keys in query parameters are not supported. Use an authentication header instead.")
 			return
 		}
 		apiKeyString := extractAPIKeyForGoogle(c)
@@ -52,6 +52,35 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 		}
 		if !apiKey.User.IsActive() {
 			abortWithGoogleError(c, 401, "User account is not active")
+			return
+		}
+		if apiKey.IsExpired() {
+			abortWithGoogleError(c, 403, "API key has expired")
+			return
+		}
+		if apiKey.IsQuotaExhausted() {
+			abortWithGoogleError(c, 429, "API key quota is exhausted")
+			return
+		}
+		// Native Gemini routing has no wallet model-to-group policy equivalent.
+		// Never reinterpret a NULL-group or wallet-purpose key as an unscoped
+		// balance key, even in simple mode.
+		if apiKey.GroupID == nil || apiKey.IsWalletUniversal() {
+			abortWithGoogleError(c, 403, "Ungrouped and wallet universal API keys are not supported on Gemini native endpoints")
+			return
+		}
+		if apiKey.Group == nil || apiKey.Group.ID != *apiKey.GroupID || !apiKey.Group.Hydrated || apiKey.Group.Status != service.StatusActive {
+			abortWithGoogleError(c, 403, "API key group is inactive or authorization was revoked")
+			return
+		}
+		groupName := strings.TrimSpace(apiKey.Group.Name)
+		if groupName == service.WalletDefaultOpenAIGroupName || groupName == service.WalletDefaultVIPGroupName {
+			if !service.CanUseWalletGroup(apiKey.User, apiKey.Group) {
+				abortWithGoogleError(c, 403, "API key group authorization was revoked")
+				return
+			}
+		} else if apiKey.Group.IsExclusive && !apiKey.User.CanBindGroup(apiKey.Group.ID, true) {
+			abortWithGoogleError(c, 403, "API key group authorization was revoked")
 			return
 		}
 
@@ -83,17 +112,12 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 
 			needsMaintenance, err := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
 			if err != nil {
-				if isSubscriptionUsageLimitError(err) && apiKey.User.Balance > 0 {
-					// 月包额度用完但主余额可用时，降级为余额扣费；下游不要再看到订阅上下文。
-					subscription = nil
-				} else {
-					status := 403
-					if isSubscriptionUsageLimitError(err) {
-						status = 429
-					}
-					abortWithGoogleError(c, status, err.Error())
-					return
+				status := 403
+				if isSubscriptionUsageLimitError(err) {
+					status = 429
 				}
+				abortWithGoogleError(c, status, err.Error())
+				return
 			}
 
 			if subscription != nil {
@@ -101,8 +125,18 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			}
 
 			if subscription != nil && needsMaintenance {
-				maintenanceCopy := *subscription
-				subscriptionService.DoWindowMaintenance(&maintenanceCopy)
+				maintained, maintenanceErr := subscriptionService.DoWindowMaintenance(c.Request.Context(), subscription.ID)
+				if maintenanceErr != nil {
+					abortWithGoogleError(c, 503, "Subscription window maintenance is temporarily unavailable")
+					return
+				}
+				subscription = maintained
+				stillNeedsMaintenance, validateErr := subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
+				if validateErr != nil || stillNeedsMaintenance {
+					abortWithGoogleError(c, 503, "Subscription window maintenance did not converge")
+					return
+				}
+				c.Set(string(ContextKeySubscription), subscription)
 			}
 		} else {
 			if apiKey.User.Balance <= 0 {
@@ -124,7 +158,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 }
 
 // extractAPIKeyForGoogle extracts API key for Google/Gemini endpoints.
-// Priority: x-goog-api-key > Authorization: Bearer > x-api-key > query key
+// Priority: x-goog-api-key > Authorization: Bearer > x-api-key
 // This allows OpenClaw and other clients using Bearer auth to work with Gemini endpoints.
 func extractAPIKeyForGoogle(c *gin.Context) string {
 	// 1) preferred: Gemini native header
@@ -148,18 +182,7 @@ func extractAPIKeyForGoogle(c *gin.Context) string {
 		return k
 	}
 
-	// 4) query parameter key (for specific paths)
-	if allowGoogleQueryKey(c.Request.URL.Path) {
-		if v := strings.TrimSpace(c.Query("key")); v != "" {
-			return v
-		}
-	}
-
 	return ""
-}
-
-func allowGoogleQueryKey(path string) bool {
-	return strings.HasPrefix(path, "/v1beta") || strings.HasPrefix(path, "/antigravity/v1beta")
 }
 
 func abortWithGoogleError(c *gin.Context, status int, message string) {

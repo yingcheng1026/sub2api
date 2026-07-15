@@ -293,12 +293,9 @@ func (a *Alipay) VerifyNotification(ctx context.Context, rawBody string, _ map[s
 		}
 	}
 
-	metadata := a.MerchantIdentityMetadata()
-	if appID := strings.TrimSpace(notification.AppId); appID != "" {
-		if metadata == nil {
-			metadata = map[string]string{}
-		}
-		metadata["app_id"] = appID
+	metadata, err := a.notificationMerchantMetadata(notification)
+	if err != nil {
+		return nil, err
 	}
 
 	return &payment.PaymentNotification{
@@ -311,6 +308,24 @@ func (a *Alipay) VerifyNotification(ctx context.Context, rawBody string, _ map[s
 	}, nil
 }
 
+func (a *Alipay) notificationMerchantMetadata(notification *alipay.Notification) (map[string]string, error) {
+	if notification == nil {
+		return nil, fmt.Errorf("alipay notification is missing")
+	}
+	actual := strings.TrimSpace(notification.AppId)
+	if actual == "" {
+		return nil, fmt.Errorf("alipay notification missing signed app_id")
+	}
+	expected := strings.TrimSpace(a.config["appId"])
+	if expected == "" {
+		return nil, fmt.Errorf("alipay configured app_id is missing")
+	}
+	if !strings.EqualFold(expected, actual) {
+		return nil, fmt.Errorf("alipay notification app_id mismatch")
+	}
+	return map[string]string{"app_id": actual}, nil
+}
+
 // Refund requests a refund through Alipay.
 func (a *Alipay) Refund(ctx context.Context, req payment.RefundRequest) (*payment.RefundResponse, error) {
 	client, err := a.getClient()
@@ -318,11 +333,15 @@ func (a *Alipay) Refund(ctx context.Context, req payment.RefundRequest) (*paymen
 		return nil, err
 	}
 
+	outRequestNo := strings.TrimSpace(req.IdempotencyKey)
+	if outRequestNo == "" {
+		outRequestNo = fmt.Sprintf("%s-refund-%d", req.OrderID, time.Now().UnixNano())
+	}
 	result, err := client.TradeRefund(ctx, alipay.TradeRefund{
 		OutTradeNo:   req.OrderID,
 		RefundAmount: req.Amount,
 		RefundReason: req.Reason,
-		OutRequestNo: fmt.Sprintf("%s-refund-%d", req.OrderID, time.Now().UnixNano()),
+		OutRequestNo: outRequestNo,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("alipay TradeRefund: %w", err)

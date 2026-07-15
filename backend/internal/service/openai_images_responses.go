@@ -615,7 +615,8 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 	var createdAt int64
 	clientDisconnected := false
 	lastDownstreamWriteAt := time.Now()
-	var sseData openAISSEDataAccumulator
+	sseLimit := resolveUpstreamResponseReadLimit(s.cfg)
+	sseData := newOpenAISSEDataAccumulator(sseLimit)
 	var processDataErr error
 	processDataDone := false
 
@@ -726,7 +727,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 		if len(line) == 0 {
 			return false, nil
 		}
-		sseData.AddLine(string(line), processData)
+		if err := sseData.AddLine(string(line), processData); err != nil {
+			return true, err
+		}
 		if processDataErr != nil {
 			return true, processDataErr
 		}
@@ -734,7 +737,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 	}
 
 	flushData := func() (bool, error) {
-		sseData.Flush(processData)
+		if err := sseData.Flush(processData); err != nil {
+			return true, err
+		}
 		if processDataErr != nil {
 			return true, processDataErr
 		}
@@ -771,7 +776,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 	if streamInterval <= 0 && keepaliveInterval <= 0 {
 		reader := bufio.NewReader(resp.Body)
 		for {
-			line, err := reader.ReadBytes('\n')
+			line, err := readOpenAISSELineBounded(reader, sseLimit)
 			done, processErr := processLine(line)
 			if processErr != nil {
 				return usage, imageCount, firstTokenMs, processErr
@@ -807,7 +812,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 		line []byte
 		err  error
 	}
-	events := make(chan readEvent, 16)
+	events := make(chan readEvent, 1)
 	done := make(chan struct{})
 	sendEvent := func(ev readEvent) bool {
 		select {
@@ -823,7 +828,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthStreamingResponse(
 		defer close(events)
 		reader := bufio.NewReader(resp.Body)
 		for {
-			line, err := reader.ReadBytes('\n')
+			line, err := readOpenAISSELineBounded(reader, sseLimit)
 			if len(line) > 0 {
 				atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 			}

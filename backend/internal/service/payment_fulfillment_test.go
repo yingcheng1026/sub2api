@@ -7,11 +7,158 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestIsFulfillmentLeaseStale(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.July, 11, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		updatedAt time.Time
+		want      bool
+	}{
+		{name: "fresh", updatedAt: now, want: false},
+		{name: "inside lease window", updatedAt: now.Add(-paymentFulfillmentLeaseTimeout + time.Nanosecond), want: false},
+		{name: "exactly at cutoff", updatedAt: now.Add(-paymentFulfillmentLeaseTimeout), want: true},
+		{name: "older than cutoff", updatedAt: now.Add(-paymentFulfillmentLeaseTimeout - time.Second), want: true},
+		{name: "future timestamp", updatedAt: now.Add(time.Minute), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, isFulfillmentLeaseStale(tt.updatedAt, now))
+		})
+	}
+}
+
+func TestPaymentOrderHasPaidEvidence(t *testing.T) {
+	t.Parallel()
+	paidAt := time.Date(2026, time.July, 12, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		order *dbent.PaymentOrder
+		want  bool
+	}{
+		{name: "nil order", order: nil, want: false},
+		{name: "no evidence", order: &dbent.PaymentOrder{}, want: false},
+		{name: "paid timestamp only", order: &dbent.PaymentOrder{PaidAt: &paidAt}, want: false},
+		{name: "trade number only", order: &dbent.PaymentOrder{PaymentTradeNo: "trade-1"}, want: false},
+		{name: "blank trade number", order: &dbent.PaymentOrder{PaidAt: &paidAt, PaymentTradeNo: "  "}, want: false},
+		{name: "complete evidence", order: &dbent.PaymentOrder{PaidAt: &paidAt, PaymentTradeNo: "trade-1"}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, paymentOrderHasPaidEvidence(tt.order))
+		})
+	}
+}
+
+func TestExecuteSubscriptionFulfillmentRejectsFailedWithoutPaidEvidence(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	order := createPaymentEvidenceTestOrder(t, ctx, client, OrderStatusFailed, false)
+
+	err := (&PaymentService{entClient: client}).ExecuteSubscriptionFulfillment(ctx, order.ID)
+	require.ErrorContains(t, err, "payment is not confirmed")
+	reloaded, reloadErr := client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, reloadErr)
+	require.Equal(t, OrderStatusFailed, reloaded.Status)
+}
+
+func TestMarkPaymentCreateFailedStoresDistinctUnpaidFailure(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	order := createPaymentEvidenceTestOrder(t, ctx, client, OrderStatusPending, false)
+	svc := &PaymentService{entClient: client}
+
+	svc.markPaymentCreateFailed(ctx, order.ID, errors.New("provider unavailable"))
+	reloaded, err := client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, err)
+	require.Equal(t, OrderStatusFailed, reloaded.Status)
+	require.Nil(t, reloaded.PaidAt)
+	require.Empty(t, reloaded.PaymentTradeNo)
+	require.NotNil(t, reloaded.FailedReason)
+	require.Equal(t, paymentCreateFailureReason, *reloaded.FailedReason)
+	require.NotNil(t, reloaded.FailedAt)
+	audit, err := client.PaymentAuditLog.Query().Only(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "PAYMENT_CREATE_FAILED", audit.Action)
+}
+
+func TestMarkPaymentCreateFailedCannotOverwriteConfirmedPayment(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	order := createPaymentEvidenceTestOrder(t, ctx, client, OrderStatusPaid, true)
+	svc := &PaymentService{entClient: client}
+
+	svc.markPaymentCreateFailed(ctx, order.ID, errors.New("late provider response error"))
+	reloaded, err := client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, err)
+	require.Equal(t, OrderStatusPaid, reloaded.Status)
+	require.NotNil(t, reloaded.PaidAt)
+	require.Equal(t, "confirmed-trade", reloaded.PaymentTradeNo)
+	count, err := client.PaymentAuditLog.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
+func createPaymentEvidenceTestOrder(t *testing.T, ctx context.Context, client *dbent.Client, status string, paid bool) *dbent.PaymentOrder {
+	t.Helper()
+	user, err := client.User.Create().
+		SetEmail("paid-evidence@example.com").
+		SetPasswordHash("hash").
+		SetUsername("paid-evidence").
+		Save(ctx)
+	require.NoError(t, err)
+	builder := client.PaymentOrder.Create().
+		SetUserID(user.ID).
+		SetUserEmail(user.Email).
+		SetUserName(user.Username).
+		SetAmount(30).
+		SetPayAmount(30).
+		SetFeeRate(0).
+		SetRechargeCode("PAID-EVIDENCE-CODE").
+		SetOutTradeNo("paid-evidence-order").
+		SetPaymentType(payment.TypeAlipay).
+		SetPaymentTradeNo("").
+		SetOrderType(payment.OrderTypeSubscription).
+		SetPlanID(1).
+		SetSubscriptionDays(36500).
+		SetStatus(status).
+		SetExpiresAt(time.Now().Add(time.Hour)).
+		SetClientIP("127.0.0.1").
+		SetSrcHost("api.example.com")
+	if paid {
+		builder.SetPaidAt(time.Now()).SetPaymentTradeNo("confirmed-trade")
+	}
+	order, err := builder.Save(ctx)
+	require.NoError(t, err)
+	return order
+}
+
+func TestDoSubFailsClosedWhenAuditLookupFails(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	_, err := client.ExecContext(ctx, "DROP TABLE payment_audit_logs")
+	require.NoError(t, err)
+
+	days := 30
+	svc := &PaymentService{entClient: client}
+	err = svc.doSub(ctx, &dbent.PaymentOrder{
+		ID:               991,
+		SubscriptionDays: &days,
+	})
+	require.ErrorContains(t, err, "check subscription fulfillment audit")
+}
 
 type paymentFulfillmentTestProvider struct {
 	key            string
@@ -288,6 +435,25 @@ func TestValidateProviderNotificationMetadataRejectsWxpaySnapshotMismatch(t *tes
 	assert.ErrorContains(t, err, "wxpay appid mismatch")
 }
 
+func TestValidateProviderNotificationMetadataRejectsEmptyMetadataWhenSnapshotRequiresEvidence(t *testing.T) {
+	t.Parallel()
+
+	order := &dbent.PaymentOrder{
+		PaymentType: payment.TypeWxpay,
+		ProviderSnapshot: map[string]any{
+			"schema_version":  2,
+			"merchant_app_id": "wx-app-expected",
+			"merchant_id":     "mch-expected",
+			"currency":        "CNY",
+		},
+	}
+
+	for _, metadata := range []map[string]string{nil, {}} {
+		err := validateProviderNotificationMetadata(order, payment.TypeWxpay, metadata)
+		assert.ErrorContains(t, err, "wxpay notification missing appid")
+	}
+}
+
 func TestValidateProviderNotificationMetadataAllowsLegacyOrdersWithoutSnapshotFields(t *testing.T) {
 	t.Parallel()
 
@@ -365,4 +531,26 @@ func TestValidateProviderNotificationMetadataRejectsEasyPaySnapshotMismatch(t *t
 		"pid": "pid-other",
 	})
 	assert.ErrorContains(t, err, "easypay pid mismatch")
+}
+
+func TestValidateProviderNotificationMetadataRejectsStripeCurrencyMismatchOrOmission(t *testing.T) {
+	t.Parallel()
+
+	order := &dbent.PaymentOrder{
+		PaymentType: payment.TypeStripe,
+		ProviderSnapshot: map[string]any{
+			"schema_version": 2,
+			"provider_key":   payment.TypeStripe,
+			"currency":       "CNY",
+		},
+	}
+
+	for _, metadata := range []map[string]string{
+		{"currency": "USD"},
+		{},
+	} {
+		err := validateProviderNotificationMetadata(order, payment.TypeStripe, metadata)
+		assert.ErrorContains(t, err, "stripe currency")
+	}
+	assert.NoError(t, validateProviderNotificationMetadata(order, payment.TypeStripe, map[string]string{"currency": "CNY"}))
 }

@@ -157,8 +157,14 @@ One-click installation script that downloads pre-built binaries from GitHub Rele
 
 #### Installation Steps
 
+Run the installer only from a reviewed clone or release archive. The installer
+rejects `curl | bash` input.
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api
+git checkout <reviewed-tag-or-commit>
+sudo bash deploy/install.sh
 ```
 
 The script will:
@@ -177,8 +183,9 @@ sudo systemctl start sub2api
 # 2. Enable auto-start on boot
 sudo systemctl enable sub2api
 
-# 3. Open Setup Wizard in browser
-# http://YOUR_SERVER_IP:8080
+# 3. Forward the loopback-only setup listener from your workstation
+ssh -L 18080:127.0.0.1:8080 USER@YOUR_SERVER_IP
+# Then open http://127.0.0.1:18080
 ```
 
 The Setup Wizard will guide you through:
@@ -188,12 +195,10 @@ The Setup Wizard will guide you through:
 
 #### Upgrade
 
-You can upgrade directly from the **Admin Dashboard** by clicking the **Check for Updates** button in the top-left corner.
-
-The web interface will:
-- Check for new versions automatically
-- Download and apply updates with one click
-- Support rollback if needed
+This custom build may check upstream versions, but update and rollback
+application are disabled by default. Keep `SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED=false`
+until the compatibility gate, backup, restore rehearsal, and controlled rollout
+for that exact upstream release have all passed.
 
 #### Useful Commands
 
@@ -207,8 +212,8 @@ sudo journalctl -u sub2api -f
 # Restart service
 sudo systemctl restart sub2api
 
-# Uninstall
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+# Uninstall from the same reviewed checkout
+sudo bash deploy/install.sh uninstall -y
 ```
 
 ---
@@ -224,14 +229,14 @@ Deploy with Docker Compose, including PostgreSQL and Redis containers.
 
 #### Quick Start (One-Click Deployment)
 
-Use the automated deployment script for easy setup:
+Run the deployment script from a reviewed clone or release archive. Mutable
+`curl | bash` deployment is intentionally unsupported.
 
 ```bash
-# Create deployment directory
-mkdir -p sub2api-deploy && cd sub2api-deploy
-
-# Download and run deployment preparation script
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+# Clone a reviewed revision, then run its local script
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api/deploy
+bash docker-deploy.sh
 
 # Start services
 docker compose up -d
@@ -241,11 +246,11 @@ docker compose logs -f sub2api
 ```
 
 **What the script does:**
-- Downloads `docker-compose.local.yml` (saved as `docker-compose.yml`) and `.env.example`
-- Generates secure credentials (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD)
+- Copies the reviewed Compose and environment templates shipped beside the script
+- Generates independent JWT, TOTP, payment-resume, PostgreSQL, Redis, and admin secrets
 - Creates `.env` file with auto-generated secrets
 - Creates data directories (uses local directories for easy backup/migration)
-- Displays generated credentials for your reference
+- Writes secrets only to owner-readable `.env` (mode 0600); credentials are not printed
 
 #### Manual Deployment
 
@@ -269,15 +274,41 @@ nano .env
 # PostgreSQL password (REQUIRED)
 POSTGRES_PASSWORD=your_secure_password_here
 
-# JWT Secret (RECOMMENDED - keeps users logged in after restart)
+# Redis password (REQUIRED; distinct from every other secret)
+REDIS_PASSWORD=your_redis_password_here
+
+# JWT Secret (REQUIRED - keeps users logged in after restart)
 JWT_SECRET=your_jwt_secret_here
 
-# TOTP Encryption Key (RECOMMENDED - preserves 2FA after restart)
-TOTP_ENCRYPTION_KEY=your_totp_key_here
+# Legacy v1/v2 root (migration only; remove after v3 cutover)
+TOTP_ENCRYPTION_KEY=
 
-# Optional: Admin account
+# Independent application-secret roots (REQUIRED; generate every value separately)
+SECRET_ENCRYPTION_TOTP_SECRET_KEY=your_totp_secret_key_here
+SECRET_ENCRYPTION_TOTP_CACHE_KEY=your_totp_cache_key_here
+SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=your_account_credential_key_here
+SECRET_ENCRYPTION_BACKUP_S3_KEY=your_backup_s3_key_here
+SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=your_content_moderation_key_here
+SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=your_channel_monitor_key_here
+SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=your_payment_provider_key_here
+SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=your_proxy_credential_key_here
+SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=your_scheduler_cache_key_here
+SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=your_oauth_token_cache_key_here
+SECRET_ENCRYPTION_JWT_HMAC_KEY=your_jwt_hmac_encryption_key_here
+SECRET_ENCRYPTION_SETTING_SECRET_KEY=your_setting_secret_encryption_key_here
+
+# Customer API key protection master key (REQUIRED; must be independent)
+API_KEY_ENCRYPTION_KEY=your_api_key_encryption_key_here
+
+# Payment resume signing key (REQUIRED; must be independent)
+PAYMENT_RESUME_SIGNING_KEY=your_payment_resume_key_here
+
+# Admin account password (REQUIRED)
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=your_admin_password
+
+# Custom fork: keep official update application disabled
+SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED=false
 
 # Optional: Custom port
 SERVER_PORT=8080
@@ -288,7 +319,19 @@ SERVER_PORT=8080
 # Generate JWT_SECRET
 openssl rand -hex 32
 
-# Generate TOTP_ENCRYPTION_KEY
+# Generate each SECRET_ENCRYPTION_* key separately; retain the old legacy key only when upgrading
+openssl rand -hex 32
+
+# Generate API_KEY_ENCRYPTION_KEY
+openssl rand -hex 32
+
+# Generate PAYMENT_RESUME_SIGNING_KEY
+openssl rand -hex 32
+
+# Generate REDIS_PASSWORD
+openssl rand -hex 32
+
+# Generate ADMIN_PASSWORD
 openssl rand -hex 32
 
 # Generate POSTGRES_PASSWORD
@@ -326,10 +369,8 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 Open `http://YOUR_SERVER_IP:8080` in your browser.
 
-If admin password was auto-generated, find it in logs:
-```bash
-docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
-```
+The administrator password must be configured before startup and is never
+printed to service logs. The bundled deploy script stores it in `.env` mode 0600.
 
 #### Upgrade
 
@@ -469,20 +510,22 @@ Additional security-related options are available in `config.yaml`:
 
 **⚠️ Security Warning: HTTP URL Configuration**
 
-Upstream account `base_url` values use minimal URL validation instead of a host allowlist. HTTP URLs are controlled by `security.url_allowlist.allow_insecure_http`; keep it `false` for untrusted public deployments, and set it to `true` only for development or trusted internal upstreams:
+Upstream account `base_url` values accept arbitrary public hosts without requiring a host allowlist, but private/reserved addresses and DNS rebinding are rejected by default. HTTP URLs are controlled by `security.url_allowlist.allow_insecure_http`; keep both insecure opt-ins `false` for public deployments:
 
 ```yaml
 security:
   url_allowlist:
     enabled: false                # Disable pricing/CRS allowlist checks
-    allow_insecure_http: true     # Allow HTTP URLs (⚠️ INSECURE)
+    allow_private_hosts: false    # Public destinations only (secure default)
+    allow_insecure_http: false    # Require HTTPS (secure default)
 ```
 
 **Or via environment variable:**
 
 ```bash
 SECURITY_URL_ALLOWLIST_ENABLED=false
-SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true
+SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=false
+SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=false
 ```
 
 **Risks of allowing HTTP:**

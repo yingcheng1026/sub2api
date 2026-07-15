@@ -32,6 +32,7 @@ func TestAPIKeyAuth_GroupSwitchCoverage(t *testing.T) {
 	standardGroup := &service.Group{
 		ID:               3,
 		Name:             "openai-default",
+		Platform:         service.PlatformOpenAI,
 		Status:           service.StatusActive,
 		Hydrated:         true,
 		SubscriptionType: service.SubscriptionTypeStandard,
@@ -44,12 +45,13 @@ func TestAPIKeyAuth_GroupSwitchCoverage(t *testing.T) {
 		Concurrency: 3,
 	}
 	apiKey := &service.APIKey{
-		ID:     500,
-		UserID: user.ID,
-		Key:    "switched-key",
-		Status: service.StatusActive,
-		User:   user,
-		Group:  standardGroup,
+		ID:      500,
+		UserID:  user.ID,
+		Key:     "switched-key",
+		Purpose: service.APIKeyPurposeStandard,
+		Status:  service.StatusActive,
+		User:    user,
+		Group:   standardGroup,
 	}
 	apiKey.GroupID = &standardGroup.ID
 
@@ -87,12 +89,16 @@ func TestAPIKeyAuth_GroupSwitchCoverage(t *testing.T) {
 
 	t.Run("link_inside_uses_monthly_quota", func(t *testing.T) {
 		// 月卡覆盖 openai-default → middleware 走月卡 quota，不扣主余额
+		windowStart := time.Now()
 		monthlySub := &service.UserSubscription{
-			ID:        700,
-			UserID:    user.ID,
-			GroupID:   int64Ptr(13), // 订阅主 group = paid-trial-v3
-			Status:    service.SubscriptionStatusActive,
-			ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+			ID:                 700,
+			UserID:             user.ID,
+			GroupID:            int64Ptr(13), // 订阅主 group = paid-trial-v3
+			Status:             service.SubscriptionStatusActive,
+			ExpiresAt:          time.Now().Add(30 * 24 * time.Hour),
+			DailyWindowStart:   &windowStart,
+			WeeklyWindowStart:  &windowStart,
+			MonthlyWindowStart: &windowStart,
 			// 注意：没有 wallet_balance_usd → 月卡模式
 		}
 
@@ -137,6 +143,9 @@ func TestAPIKeyAuth_GroupSwitchCoverage(t *testing.T) {
 			"用户有订阅但当前 group 不在 plan_groups 链内 → 403，不再 fallback balance")
 		require.Contains(t, w.Body.String(), "GROUP_NOT_IN_SUBSCRIPTION",
 			"错误码应为 GROUP_NOT_IN_SUBSCRIPTION")
+		require.Contains(t, w.Body.String(), "联系管理员或客服")
+		require.NotContains(t, w.Body.String(), "微信")
+		require.NotContains(t, w.Body.String(), "aa402837")
 	})
 
 	t.Run("balance_only_user_still_works", func(t *testing.T) {
@@ -149,12 +158,13 @@ func TestAPIKeyAuth_GroupSwitchCoverage(t *testing.T) {
 			Concurrency: 3,
 		}
 		balKey := &service.APIKey{
-			ID:     501,
-			UserID: balUser.ID,
-			Key:    "balance-user-key",
-			Status: service.StatusActive,
-			User:   balUser,
-			Group:  standardGroup,
+			ID:      501,
+			UserID:  balUser.ID,
+			Key:     "balance-user-key",
+			Purpose: service.APIKeyPurposeStandard,
+			Status:  service.StatusActive,
+			User:    balUser,
+			Group:   standardGroup,
 		}
 		balKey.GroupID = &standardGroup.ID
 
@@ -204,6 +214,12 @@ func TestAPIKeyAuth_GroupSwitchCoverage(t *testing.T) {
 	t.Run("no_subscription_no_balance_rejects", func(t *testing.T) {
 		// 既无订阅也无余额 → INSUFFICIENT_BALANCE
 		repo := &stubUserSubscriptionRepo{
+			getActive: func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+				return nil, service.ErrSubscriptionNotFound
+			},
+			getActiveByPlanCover: func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+				return nil, service.ErrSubscriptionNotFound
+			},
 			hasAnyActive: func(ctx context.Context, userID int64) (bool, error) {
 				return false, nil
 			},
@@ -212,6 +228,74 @@ func TestAPIKeyAuth_GroupSwitchCoverage(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, w.Code)
 		require.Contains(t, w.Body.String(), "INSUFFICIENT_BALANCE")
 	})
+}
+
+func TestAPIKeyAuth_RejectsRestrictedGroupBeforePlanCoverage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	vip := &service.Group{
+		ID:               22,
+		Name:             service.WalletDefaultVIPGroupName,
+		Platform:         service.PlatformAnthropic,
+		Status:           service.StatusActive,
+		Hydrated:         true,
+		SubscriptionType: service.SubscriptionTypeStandard,
+		IsExclusive:      true,
+	}
+	user := &service.User{
+		ID:          52,
+		Role:        service.RoleUser,
+		Status:      service.StatusActive,
+		Concurrency: 3,
+	}
+	apiKey := &service.APIKey{
+		ID:      502,
+		UserID:  user.ID,
+		Key:     "vip-plan-coverage-without-grant",
+		Purpose: service.APIKeyPurposeStandard,
+		Status:  service.StatusActive,
+		User:    user,
+		GroupID: &vip.ID,
+		Group:   vip,
+	}
+	apiKeyService := service.NewAPIKeyService(&stubApiKeyRepo{
+		getByKey: func(context.Context, string) (*service.APIKey, error) {
+			clone := *apiKey
+			return &clone, nil
+		},
+	}, nil, nil, nil, nil, nil, &config.Config{RunMode: config.RunModeStandard})
+
+	coverageCalled := false
+	repo := &stubUserSubscriptionRepo{
+		getActive: func(context.Context, int64, int64) (*service.UserSubscription, error) {
+			return nil, service.ErrSubscriptionNotFound
+		},
+		getActiveByPlanCover: func(context.Context, int64, int64) (*service.UserSubscription, error) {
+			coverageCalled = true
+			return &service.UserSubscription{
+				ID:        701,
+				UserID:    user.ID,
+				Status:    service.SubscriptionStatusActive,
+				ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+			}, nil
+		},
+	}
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	cfg.SubscriptionMaintenance.WorkerCount = 1
+	cfg.SubscriptionMaintenance.QueueSize = 1
+	subscriptionService := service.NewSubscriptionService(nil, repo, nil, nil, cfg)
+	t.Cleanup(subscriptionService.Stop)
+
+	router := gin.New()
+	router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(apiKeyService, subscriptionService, cfg)))
+	router.GET("/t", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/t", nil)
+	req.Header.Set("x-api-key", apiKey.Key)
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "GROUP_NOT_ALLOWED")
+	require.False(t, coverageCalled, "restricted-group authorization must run before plan coverage lookup")
 }
 
 func int64Ptr(v int64) *int64 {

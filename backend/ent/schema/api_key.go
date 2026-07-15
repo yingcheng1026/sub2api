@@ -35,14 +35,17 @@ func (APIKey) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("user_id"),
 		field.String("key").
-			MaxLen(128).
+			MaxLen(512).
 			NotEmpty().
-			Unique(),
+			Unique().
+			Sensitive().
+			Comment("Versioned AES-GCM ciphertext for the customer API key; never plaintext"),
 		field.String("key_hash").
 			MaxLen(64).
 			Optional().
 			Nillable().
-			Comment("SHA-256 hash of the API key for non-plaintext authentication lookup"),
+			Sensitive().
+			Comment("HMAC-SHA-256 lookup locator derived from the API-key protection key"),
 		field.String("key_prefix").
 			MaxLen(16).
 			Default("").
@@ -50,6 +53,11 @@ func (APIKey) Fields() []ent.Field {
 		field.String("name").
 			MaxLen(100).
 			NotEmpty(),
+		field.String("purpose").
+			MaxLen(32).
+			Default("standard").
+			Immutable().
+			Comment("Immutable security identity: standard or wallet_universal"),
 		field.Int64("group_id").
 			Optional().
 			Nillable(),
@@ -149,6 +157,9 @@ func (APIKey) Indexes() []ent.Index {
 			Unique().
 			Annotations(entsql.IndexWhere("deleted_at IS NULL AND key_hash IS NOT NULL")),
 		index.Fields("user_id"),
+		index.Fields("user_id", "purpose").
+			Unique().
+			Annotations(entsql.IndexWhere("deleted_at IS NULL AND purpose = 'wallet_universal'")),
 		index.Fields("group_id"),
 		index.Fields("status"),
 		index.Fields("deleted_at"),

@@ -50,6 +50,7 @@ const (
 const (
 	DeductionTypeBalance      = "balance"
 	DeductionTypeSubscription = "subscription"
+	DeductionTypeWallet       = "wallet"
 	DeductionTypeNone         = "none"
 )
 
@@ -168,10 +169,11 @@ type PaymentNotification struct {
 
 // RefundRequest contains the parameters for requesting a refund.
 type RefundRequest struct {
-	TradeNo string
-	OrderID string
-	Amount  string // Refund amount formatted to 2 decimal places
-	Reason  string
+	TradeNo        string
+	OrderID        string
+	Amount         string // Refund amount formatted to 2 decimal places
+	Reason         string
+	IdempotencyKey string // Stable across retries for the same local refund operation.
 }
 
 // RefundResponse is returned after a refund request.

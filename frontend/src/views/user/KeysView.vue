@@ -64,7 +64,7 @@
                 {{ maskApiKey(value) }}
               </code>
               <button
-                @click="copyToClipboard(value, row.id)"
+                @click="copyToClipboard(row.id)"
                 class="rounded-lg p-1 transition-colors hover:bg-gray-100 dark:hover:bg-dark-700"
                 :class="
                   copiedKeyId === row.id
@@ -88,7 +88,7 @@
             <div class="flex items-center gap-1.5">
               <span class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
               <span
-                v-if="isWalletKeyName(value)"
+                v-if="isRowSystemManagedWalletKey(row)"
                 class="inline-flex items-center rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800"
                 :title="t('keys.walletKeyBadgeHint')"
               >
@@ -108,10 +108,10 @@
             <div class="group/dropdown relative">
               <button
                 :ref="(el) => setGroupButtonRef(row.id, el)"
-                @click="!isRowWalletUniversalKey(row) && openGroupSelector(row)"
+                @click="!isRowSystemManagedWalletKey(row) && openGroupSelector(row)"
                 class="-mx-2 -my-1 flex items-center gap-2 rounded-lg px-2 py-1 transition-all duration-200"
-                :class="isRowWalletUniversalKey(row) ? 'cursor-default' : 'cursor-pointer hover:bg-gray-100 dark:hover:bg-dark-700'"
-                :title="isRowWalletUniversalKey(row) ? t('keys.walletAnyKeyHint') : t('keys.clickToChangeGroup')"
+                :class="isRowSystemManagedWalletKey(row) ? 'cursor-default' : 'cursor-pointer hover:bg-gray-100 dark:hover:bg-dark-700'"
+                :title="isRowSystemManagedWalletKey(row) ? t('keys.walletAnyKeyHint') : t('keys.clickToChangeGroup')"
               >
                 <GroupBadge
                   v-if="row.group"
@@ -131,9 +131,9 @@
                 <span v-else class="text-sm text-gray-400 dark:text-dark-500">{{
                   t('keys.noGroup')
                 }}</span>
-                <span v-if="!isRowWalletUniversalKey(row)" class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.selectGroup') }}</span>
+                <span v-if="!isRowSystemManagedWalletKey(row)" class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.selectGroup') }}</span>
                 <svg
-                  v-if="!isRowWalletUniversalKey(row)"
+                  v-if="!isRowSystemManagedWalletKey(row)"
                   class="h-3.5 w-3.5 text-gray-400 opacity-60 transition-opacity group-hover/dropdown:opacity-100"
                   fill="none"
                   stroke="currentColor"
@@ -335,15 +335,6 @@
                 <Icon name="terminal" size="sm" />
                 <span class="text-xs">{{ t('keys.useKey') }}</span>
               </button>
-              <!-- Import to CC Switch Button -->
-              <button
-                v-if="!publicSettings?.hide_ccs_import_button"
-                @click="importToCcswitch(row)"
-                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/20 dark:hover:text-blue-400"
-              >
-                <Icon name="upload" size="sm" />
-                <span class="text-xs">{{ t('keys.importToCcSwitch') }}</span>
-              </button>
               <!-- Toggle Status Button -->
               <button
                 @click="toggleKeyStatus(row)"
@@ -360,6 +351,7 @@
               </button>
               <!-- Edit Button -->
               <button
+                v-if="!isRowSystemManagedWalletKey(row)"
                 @click="editKey(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400"
               >
@@ -368,6 +360,7 @@
               </button>
               <!-- Delete Button -->
               <button
+                v-if="!isRowSystemManagedWalletKey(row)"
                 @click="confirmDelete(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
               >
@@ -422,42 +415,17 @@
 
         <div>
           <label class="input-label">{{ t('keys.groupLabel') }}</label>
-          <label
-            v-if="!showEditModal && hasActiveWalletSubscription"
-            class="mb-3 flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-sm dark:border-emerald-800 dark:bg-emerald-900/20"
-          >
-            <input
-              v-model="formData.wallet_any_key"
-              type="checkbox"
-              class="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 dark:border-dark-600 dark:bg-dark-800"
-            />
-            <span>
-              <span class="block font-medium text-emerald-800 dark:text-emerald-200">
-                {{ t('keys.walletAnyKey') }}
-              </span>
-              <span class="mt-0.5 block text-xs leading-5 text-emerald-700 dark:text-emerald-300">
-                {{ t('keys.walletAnyKeyHint') }}
-              </span>
-            </span>
-          </label>
           <Select
             v-model="formData.group_id"
             :options="groupOptions"
-            :placeholder="formData.wallet_any_key ? t('keys.walletAnyKeySelectPlaceholder') : t('keys.selectGroup')"
-            :disabled="formData.wallet_any_key"
+            :placeholder="t('keys.selectGroup')"
             :searchable="true"
             :search-placeholder="t('keys.searchGroup')"
             data-tour="key-form-group"
           >
             <template #selected="{ option }">
-              <span
-                v-if="formData.wallet_any_key"
-                class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:ring-emerald-800"
-              >
-                {{ t('keys.walletAnyKeyBadge') }}
-              </span>
               <GroupBadge
-                v-else-if="option"
+                v-if="option"
                 :name="(option as unknown as GroupOption).label"
                 :platform="(option as unknown as GroupOption).platform"
                 :subscription-type="(option as unknown as GroupOption).subscriptionType"
@@ -480,39 +448,15 @@
               />
             </template>
           </Select>
-        </div>
-
-        <!-- Custom Key Section (only for create) -->
-        <div v-if="!showEditModal" class="space-y-3">
-          <div class="flex items-center justify-between">
-            <label class="input-label mb-0">{{ t('keys.customKeyLabel') }}</label>
-            <button
-              type="button"
-              @click="formData.use_custom_key = !formData.use_custom_key"
-              :class="[
-                'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
-                formData.use_custom_key ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
-              ]"
-            >
-              <span
-                :class="[
-                  'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
-                  formData.use_custom_key ? 'translate-x-4' : 'translate-x-0'
-                ]"
-              />
-            </button>
-          </div>
-          <div v-if="formData.use_custom_key">
-            <input
-              v-model="formData.custom_key"
-              type="text"
-              class="input font-mono"
-              :placeholder="t('keys.customKeyPlaceholder')"
-              :class="{ 'border-red-500 dark:border-red-500': customKeyError }"
-            />
-            <p v-if="customKeyError" class="mt-1 text-sm text-red-500">{{ customKeyError }}</p>
-            <p v-else class="input-hint">{{ t('keys.customKeyHint') }}</p>
-          </div>
+          <p v-if="walletEntitlementState === 'loading'" class="mt-1.5 text-xs text-gray-500 dark:text-dark-400">
+            {{ t('keys.walletEntitlementsLoading') }}
+          </p>
+          <p v-else-if="walletEntitlementState === 'error'" class="mt-1.5 text-xs text-red-600 dark:text-red-400">
+            {{ t('keys.walletEntitlementsUnavailable') }}
+          </p>
+          <p v-else-if="hasActiveWalletSubscription" class="mt-1.5 text-xs text-gray-500 dark:text-dark-400">
+            {{ t('keys.walletFixedGroupHint') }}
+          </p>
         </div>
 
         <div v-if="showEditModal">
@@ -963,6 +907,55 @@
       @cancel="showResetRateLimitDialog = false"
     />
 
+    <BaseDialog
+      :show="showRevealDialog"
+      :title="t('keys.revealTitle')"
+      width="narrow"
+      :close-on-escape="!revealSubmitting"
+      @close="closeRevealDialog"
+    >
+      <form class="space-y-3" @submit.prevent="submitReveal">
+        <p class="text-sm text-gray-600 dark:text-gray-400">
+          {{ t('keys.revealVerificationPrompt') }}
+        </p>
+        <a
+          href="/forgot-password"
+          data-test="api-key-oauth-password-guidance"
+          class="block text-xs text-primary-600 hover:underline dark:text-primary-400"
+        >
+          {{ t('keys.oauthPasswordGuidance') }}
+        </a>
+        <input
+          v-model="revealVerification"
+          data-test="api-key-reveal-verification"
+          type="password"
+          name="api-key-reveal-verification"
+          autocomplete="current-password"
+          inputmode="text"
+          maxlength="256"
+          class="input"
+          :disabled="revealSubmitting"
+          :aria-label="t('keys.revealVerificationLabel')"
+        />
+      </form>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <button type="button" class="btn btn-secondary" :disabled="revealSubmitting" @click="closeRevealDialog">
+            {{ t('common.cancel') }}
+          </button>
+          <button
+            type="button"
+            data-test="api-key-reveal-submit"
+            class="btn btn-primary"
+            :disabled="revealSubmitting || !revealVerification.trim()"
+            @click="submitReveal"
+          >
+            {{ revealSubmitting ? t('keys.revealSubmitting') : t('keys.revealSubmit') }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
+
     <!-- Use Key Modal -->
     <UseKeyModal
       :show="showUseKeyModal"
@@ -971,55 +964,10 @@
       :platform="selectedKey?.group?.platform || null"
       :group-name="selectedKey?.group?.name || null"
       :allow-messages-dispatch="selectedKey?.group?.allow_messages_dispatch || false"
+      :wallet-universal="selectedKey ? isRowSystemManagedWalletKey(selectedKey) : false"
+      :wallet-vip-access="hasAuthorizedWalletVIPGroup"
       @close="closeUseKeyModal"
     />
-
-    <!-- CCS Client Selection Dialog for Antigravity -->
-    <BaseDialog
-      :show="showCcsClientSelect"
-      :title="t('keys.ccsClientSelect.title')"
-      width="narrow"
-      @close="closeCcsClientSelect"
-    >
-      <div class="space-y-4">
-        <p class="text-sm text-gray-600 dark:text-gray-400">
-          {{ t('keys.ccsClientSelect.description') }}
-	        </p>
-	        <div class="grid grid-cols-2 gap-3">
-	          <button
-	            @click="handleCcsClientSelect('claude')"
-	            class="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-gray-200 dark:border-dark-600 hover:border-primary-500 dark:hover:border-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/20 transition-all"
-	          >
-	            <Icon name="terminal" size="xl" class="text-gray-600 dark:text-gray-400" />
-	            <span class="font-medium text-gray-900 dark:text-white">{{
-	              t('keys.ccsClientSelect.claudeCode')
-	            }}</span>
-	            <span class="text-xs text-gray-500 dark:text-gray-400">{{
-	              t('keys.ccsClientSelect.claudeCodeDesc')
-	            }}</span>
-	          </button>
-	          <button
-	            @click="handleCcsClientSelect('gemini')"
-	            class="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-gray-200 dark:border-dark-600 hover:border-primary-500 dark:hover:border-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/20 transition-all"
-	          >
-	            <Icon name="sparkles" size="xl" class="text-gray-600 dark:text-gray-400" />
-	            <span class="font-medium text-gray-900 dark:text-white">{{
-	              t('keys.ccsClientSelect.geminiCli')
-	            }}</span>
-	            <span class="text-xs text-gray-500 dark:text-gray-400">{{
-	              t('keys.ccsClientSelect.geminiCliDesc')
-	            }}</span>
-	          </button>
-	        </div>
-	      </div>
-      <template #footer>
-        <div class="flex justify-end">
-          <button @click="closeCcsClientSelect" class="btn btn-secondary">
-            {{ t('common.cancel') }}
-          </button>
-        </div>
-      </template>
-    </BaseDialog>
 
     <!-- Group Selector Dropdown (Teleported to body to avoid overflow clipping) -->
     <Teleport to="body">
@@ -1113,13 +1061,14 @@ import UseKeyModal from '@/components/keys/UseKeyModal.vue'
 import EndpointPopover from '@/components/keys/EndpointPopover.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
 import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
-import type { ApiKey, Group, PublicSettings, SubscriptionType, GroupPlatform, UserSubscription } from '@/types'
+import type { ApiKey, Group, PublicSettings, SubscriptionType, GroupPlatform, UserSubscription, UpdateApiKeyRequest } from '@/types'
 import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
-import { getCreateKeyGroupId, isWalletKeyName, isWalletUniversalKey, shouldRequireGroupForKeySubmit } from '@/utils/walletKeys'
+import { filterGroupsForWalletKeySelection, getCreateKeyGroupId, isSystemManagedWalletKey, isWalletUniversalKey, shouldRequireGroupForKeySubmit } from '@/utils/walletKeys'
 import { lockedRatesFromSubscriptions, lockedRateForGroup } from '@/utils/lockedRates'
+import { isActiveCreditsWallet } from '@/utils/subscriptionWallet'
 
 // Helper to format date for datetime-local input
 const formatDateTimeLocal = (isoDate: string): string => {
@@ -1166,9 +1115,19 @@ const usageStats = ref<Record<string, BatchApiKeyUsageStats>>({})
 const userGroupRates = ref<Record<number, number>>({})
 const activeSubscriptions = ref<UserSubscription[]>([])
 const activeWalletSubscription = ref<UserSubscription | null>(null)
+const walletEntitlementState = ref<'loading' | 'ready' | 'error'>('loading')
 const lockedGroupRates = computed(() => lockedRatesFromSubscriptions(activeSubscriptions.value))
 const hasActiveWalletSubscription = computed(() => activeWalletSubscription.value !== null)
+const walletSelectableGroups = computed(() =>
+  walletEntitlementState.value === 'ready'
+    ? filterGroupsForWalletKeySelection(groups.value, hasActiveWalletSubscription.value)
+    : []
+)
+const hasAuthorizedWalletVIPGroup = computed(() => walletSelectableGroups.value.some((group) =>
+  group.name === 'vip' && group.platform === 'anthropic' && group.is_exclusive
+))
 const isRowWalletUniversalKey = (key: ApiKey) => isWalletUniversalKey(key, hasActiveWalletSubscription.value)
+const isRowSystemManagedWalletKey = (key: ApiKey) => isSystemManagedWalletKey(key)
 
 const pagination = ref({
   page: 1,
@@ -1192,8 +1151,12 @@ const showDeleteDialog = ref(false)
 const showResetQuotaDialog = ref(false)
 const showResetRateLimitDialog = ref(false)
 const showUseKeyModal = ref(false)
-const showCcsClientSelect = ref(false)
-const pendingCcsRow = ref<ApiKey | null>(null)
+const showRevealDialog = ref(false)
+const revealVerification = ref('')
+const revealSubmitting = ref(false)
+let pendingStepUpAction: ((verification: string) => void | Promise<void>) | null = null
+let pendingStepUpErrorKey = 'keys.revealFailed'
+let revealRequestGeneration = 0
 const selectedKey = ref<ApiKey | null>(null)
 const copiedKeyId = ref<number | null>(null)
 const groupSelectorKeyId = ref<number | null>(null)
@@ -1222,8 +1185,6 @@ const formData = ref({
   group_id: null as number | null,
   wallet_any_key: false,
   status: 'active' as 'active' | 'inactive',
-  use_custom_key: false,
-  custom_key: '',
   enable_ip_restriction: false,
   ip_whitelist: '',
   ip_blacklist: '',
@@ -1250,22 +1211,6 @@ watch(hasActiveWalletSubscription, (hasWallet) => {
   if (!hasWallet) {
     formData.value.wallet_any_key = false
   }
-})
-
-// 自定义Key验证
-const customKeyError = computed(() => {
-  if (!formData.value.use_custom_key || !formData.value.custom_key) {
-    return ''
-  }
-  const key = formData.value.custom_key
-  if (key.length < 16) {
-    return t('keys.customKeyTooShort')
-  }
-  // 检查字符：只允许字母、数字、下划线、连字符
-  if (!/^[a-zA-Z0-9_-]+$/.test(key)) {
-    return t('keys.customKeyInvalidChars')
-  }
-  return ''
 })
 
 const statusOptions = computed(() => [
@@ -1305,7 +1250,7 @@ const onStatusFilterChange = (value: string | number | boolean | null) => {
 
 // Convert groups to Select options format with rate multiplier and subscription type
 const groupOptions = computed(() =>
-  groups.value.map((group) => ({
+  walletSelectableGroups.value.map((group) => ({
     value: group.id,
     label: group.name,
     description: group.description,
@@ -1328,14 +1273,82 @@ const filteredGroupOptions = computed(() => {
   })
 })
 
-const copyToClipboard = async (text: string, keyId: number) => {
-  const success = await clipboardCopy(text, t('keys.copied'))
-  if (success) {
-    copiedKeyId.value = keyId
-    setTimeout(() => {
-      copiedKeyId.value = null
-    }, 800)
+const requestStepUp = (
+  action: (verification: string) => void | Promise<void>,
+  errorKey = 'keys.revealFailed'
+) => {
+  revealRequestGeneration += 1
+  pendingStepUpAction = action
+  pendingStepUpErrorKey = errorKey
+  revealVerification.value = ''
+  showRevealDialog.value = true
+}
+
+const requestKeyUpdateStepUp = (
+  keyId: number,
+  updates: UpdateApiKeyRequest,
+  onSuccess: () => void | Promise<void>,
+  errorKey: string
+) => {
+  requestStepUp(async (verification) => {
+    await keysAPI.update(keyId, { ...updates, verification })
+    await onSuccess()
+  }, errorKey)
+}
+
+const requestReveal = (keyId: number, action: (plaintext: string) => void | Promise<void>) => {
+  requestStepUp(async (verification) => {
+    const requestGeneration = revealRequestGeneration
+    const plaintext = await keysAPI.reveal(keyId, verification)
+    if (requestGeneration !== revealRequestGeneration || document.hidden) return
+    await action(plaintext)
+  })
+}
+
+const closeRevealDialog = () => {
+  if (revealSubmitting.value) return
+  revealRequestGeneration += 1
+  showRevealDialog.value = false
+  revealVerification.value = ''
+  pendingStepUpAction = null
+  pendingStepUpErrorKey = 'keys.revealFailed'
+}
+
+const submitReveal = async () => {
+  const verification = revealVerification.value
+  const action = pendingStepUpAction
+  if (!action || !verification.trim() || revealSubmitting.value) return
+
+  const requestGeneration = revealRequestGeneration
+  revealSubmitting.value = true
+  try {
+    await action(verification)
+    if (requestGeneration !== revealRequestGeneration || document.hidden) {
+      clearTransientSecrets()
+      return
+    }
+    showRevealDialog.value = false
+    revealVerification.value = ''
+    pendingStepUpAction = null
+    pendingStepUpErrorKey = 'keys.revealFailed'
+  } catch (error: any) {
+    appStore.showError(error?.response?.data?.message || error?.response?.data?.detail || t(pendingStepUpErrorKey))
+  } finally {
+    revealVerification.value = ''
+    revealSubmitting.value = false
   }
+}
+
+const copyToClipboard = (keyId: number) => {
+  requestReveal(keyId, async (plaintext) => {
+    const success = await clipboardCopy(plaintext, t('keys.copied'))
+    if (success) {
+      copiedKeyId.value = keyId
+      setTimeout(() => {
+        copiedKeyId.value = null
+      }, 800)
+    }
+  })
 }
 
 const isAbortError = (error: unknown) => {
@@ -1415,16 +1428,17 @@ const loadUserGroupRates = async () => {
 }
 
 const loadWalletSubscription = async () => {
+  walletEntitlementState.value = 'loading'
   try {
     const subscriptions = await subscriptionsAPI.getActiveSubscriptions()
     activeSubscriptions.value = subscriptions
-    activeWalletSubscription.value = subscriptions.find((sub) =>
-      sub.status === 'active' && sub.wallet_balance_usd != null
-    ) ?? null
+    activeWalletSubscription.value = subscriptions.find(isActiveCreditsWallet) ?? null
+    walletEntitlementState.value = 'ready'
   } catch (error) {
     console.error('Failed to load wallet subscription:', error)
     activeSubscriptions.value = []
     activeWalletSubscription.value = null
+    walletEntitlementState.value = 'error'
   }
 }
 
@@ -1437,8 +1451,10 @@ const loadPublicSettings = async () => {
 }
 
 const openUseKeyModal = (key: ApiKey) => {
-  selectedKey.value = key
-  showUseKeyModal.value = true
+  requestReveal(key.id, (plaintext) => {
+    selectedKey.value = { ...key, key: plaintext }
+    showUseKeyModal.value = true
+  })
 }
 
 const closeUseKeyModal = () => {
@@ -1465,6 +1481,7 @@ const handleSort = (key: string, order: 'asc' | 'desc') => {
 }
 
 const editKey = (key: ApiKey) => {
+  if (isSystemManagedWalletKey(key)) return
   selectedKey.value = key
   const hasIPRestriction = (key.ip_whitelist?.length > 0) || (key.ip_blacklist?.length > 0)
   const hasExpiration = !!key.expires_at
@@ -1473,8 +1490,6 @@ const editKey = (key: ApiKey) => {
     group_id: key.group_id,
     wallet_any_key: false,
     status: key.status === 'quota_exhausted' || key.status === 'expired' ? 'inactive' : key.status,
-    use_custom_key: false,
-    custom_key: '',
     enable_ip_restriction: hasIPRestriction,
     ip_whitelist: (key.ip_whitelist || []).join('\n'),
     ip_blacklist: (key.ip_blacklist || []).join('\n'),
@@ -1493,11 +1508,23 @@ const editKey = (key: ApiKey) => {
 
 const toggleKeyStatus = async (key: ApiKey) => {
   const newStatus = key.status === 'active' ? 'inactive' : 'active'
-  try {
-    await keysAPI.toggleStatus(key.id, newStatus)
-    appStore.showSuccess(
-      newStatus === 'active' ? t('keys.keyEnabledSuccess') : t('keys.keyDisabledSuccess')
+
+  if (newStatus === 'active') {
+    requestKeyUpdateStepUp(
+      key.id,
+      { status: newStatus },
+      async () => {
+        appStore.showSuccess(t('keys.keyEnabledSuccess'))
+        await loadApiKeys()
+      },
+      'keys.failedToUpdateStatus'
     )
+    return
+  }
+
+  try {
+    await keysAPI.update(key.id, { status: newStatus })
+    appStore.showSuccess(t('keys.keyDisabledSuccess'))
     loadApiKeys()
   } catch (error) {
     appStore.showError(t('keys.failedToUpdateStatus'))
@@ -1505,6 +1532,7 @@ const toggleKeyStatus = async (key: ApiKey) => {
 }
 
 const openGroupSelector = (key: ApiKey) => {
+  if (isSystemManagedWalletKey(key)) return
   if (groupSelectorKeyId.value === key.id) {
     groupSelectorKeyId.value = null
     dropdownPosition.value = null
@@ -1538,15 +1566,18 @@ const openGroupSelector = (key: ApiKey) => {
 const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
   groupSelectorKeyId.value = null
   dropdownPosition.value = null
+  if (isSystemManagedWalletKey(key)) return
   if (key.group_id === newGroupId) return
 
-  try {
-    await keysAPI.update(key.id, { group_id: newGroupId })
-    appStore.showSuccess(t('keys.groupChangedSuccess'))
-    loadApiKeys()
-  } catch (error) {
-    appStore.showError(t('keys.failedToChangeGroup'))
-  }
+  requestKeyUpdateStepUp(
+    key.id,
+    { group_id: newGroupId },
+    async () => {
+      appStore.showSuccess(t('keys.groupChangedSuccess'))
+      await loadApiKeys()
+    },
+    'keys.failedToChangeGroup'
+  )
 }
 
 const closeGroupSelector = (event: MouseEvent) => {
@@ -1559,11 +1590,16 @@ const closeGroupSelector = (event: MouseEvent) => {
 }
 
 const confirmDelete = (key: ApiKey) => {
+  if (isSystemManagedWalletKey(key)) return
   selectedKey.value = key
   showDeleteDialog.value = true
 }
 
 const handleSubmit = async () => {
+  if (walletEntitlementState.value !== 'ready') {
+    appStore.showError(t('keys.walletEntitlementsUnavailable'))
+    return
+  }
   const needsGroup = shouldRequireGroupForKeySubmit({
     isEdit: showEditModal.value,
     hasActiveWallet: hasActiveWalletSubscription.value,
@@ -1573,18 +1609,6 @@ const handleSubmit = async () => {
   if (needsGroup) {
     appStore.showError(t('keys.groupRequired'))
     return
-  }
-
-  // Validate custom key if enabled
-  if (!showEditModal.value && formData.value.use_custom_key) {
-    if (!formData.value.custom_key) {
-      appStore.showError(t('keys.customKeyRequired'))
-      return
-    }
-    if (customKeyError.value) {
-      appStore.showError(customKeyError.value)
-      return
-    }
   }
 
   // Parse IP lists only if IP restriction is enabled
@@ -1622,10 +1646,54 @@ const handleSubmit = async () => {
     rate_limit_7d: formData.value.rate_limit_7d && formData.value.rate_limit_7d > 0 ? formData.value.rate_limit_7d : 0,
   } : { rate_limit_5h: 0, rate_limit_1d: 0, rate_limit_7d: 0 }
 
-  submitting.value = true
-  try {
-    if (showEditModal.value && selectedKey.value) {
-      await keysAPI.update(selectedKey.value.id, {
+  if (!showEditModal.value) {
+    const createGroupId = getCreateKeyGroupId({
+      hasActiveWallet: hasActiveWalletSubscription.value,
+      walletAnyKey: formData.value.wallet_any_key,
+      groupId: formData.value.group_id
+    })
+    requestStepUp(async (verification) => {
+      const requestGeneration = revealRequestGeneration
+      submitting.value = true
+      try {
+        const createdKey = await keysAPI.create(
+          formData.value.name,
+          createGroupId,
+          undefined,
+          ipWhitelist,
+          ipBlacklist,
+          quota,
+          expiresInDays,
+          rateLimitData,
+          verification
+        )
+        if (requestGeneration !== revealRequestGeneration || document.hidden) {
+          createdKey.key = ''
+          await loadApiKeys()
+          return
+        }
+        appStore.showSuccess(t('keys.keyCreatedSuccess'))
+        if (onboardingStore.isCurrentStep('[data-tour="key-form-submit"]')) {
+          onboardingStore.nextStep(500)
+        }
+        closeModals()
+        selectedKey.value = createdKey
+        showUseKeyModal.value = true
+        loadApiKeys()
+      } finally {
+        submitting.value = false
+      }
+    }, 'keys.failedToSave')
+    return
+  }
+
+  if (!selectedKey.value) return
+  const keyId = selectedKey.value.id
+  requestStepUp(async (verification) => {
+    submitting.value = true
+    try {
+      await keysAPI.update(keyId, {
+        verification,
         name: formData.value.name,
         group_id: formData.value.group_id,
         status: formData.value.status,
@@ -1638,38 +1706,12 @@ const handleSubmit = async () => {
         rate_limit_7d: rateLimitData.rate_limit_7d,
       })
       appStore.showSuccess(t('keys.keyUpdatedSuccess'))
-    } else {
-      const customKey = formData.value.use_custom_key ? formData.value.custom_key : undefined
-      const createGroupId = getCreateKeyGroupId({
-        hasActiveWallet: hasActiveWalletSubscription.value,
-        walletAnyKey: formData.value.wallet_any_key,
-        groupId: formData.value.group_id
-      })
-      await keysAPI.create(
-        formData.value.name,
-        createGroupId,
-        customKey,
-        ipWhitelist,
-        ipBlacklist,
-        quota,
-        expiresInDays,
-        rateLimitData
-      )
-      appStore.showSuccess(t('keys.keyCreatedSuccess'))
-      // Only advance tour if active, on submit step, and creation succeeded
-      if (onboardingStore.isCurrentStep('[data-tour="key-form-submit"]')) {
-        onboardingStore.nextStep(500)
-      }
+      closeModals()
+      await loadApiKeys()
+    } finally {
+      submitting.value = false
     }
-    closeModals()
-    loadApiKeys()
-  } catch (error: any) {
-    const errorMsg = error.response?.data?.detail || t('keys.failedToSave')
-    appStore.showError(errorMsg)
-    // Don't advance tour on error
-  } finally {
-    submitting.value = false
-  }
+  }, 'keys.failedToSave')
 }
 
 /**
@@ -1679,6 +1721,10 @@ const handleSubmit = async () => {
  */
 const handleDelete = async () => {
   if (!selectedKey.value) return
+  if (isSystemManagedWalletKey(selectedKey.value)) {
+    showDeleteDialog.value = false
+    return
+  }
 
   try {
     await keysAPI.delete(selectedKey.value.id)
@@ -1701,8 +1747,6 @@ const closeModals = () => {
     group_id: null,
     wallet_any_key: false,
     status: 'active',
-    use_custom_key: false,
-    custom_key: '',
     enable_ip_restriction: false,
     ip_whitelist: '',
     ip_blacklist: '',
@@ -1735,17 +1779,18 @@ const setExpirationDays = (days: number) => {
 const resetQuotaUsed = async () => {
   if (!selectedKey.value) return
   showResetQuotaDialog.value = false
-  try {
-    await keysAPI.update(selectedKey.value.id, { reset_quota: true })
-    appStore.showSuccess(t('keys.quotaResetSuccess'))
-    // Update local state
-    if (selectedKey.value) {
-      selectedKey.value.quota_used = 0
-    }
-  } catch (error: any) {
-    const errorMsg = error.response?.data?.detail || t('keys.failedToResetQuota')
-    appStore.showError(errorMsg)
-  }
+  const keyId = selectedKey.value.id
+  requestKeyUpdateStepUp(
+    keyId,
+    { reset_quota: true },
+    async () => {
+      appStore.showSuccess(t('keys.quotaResetSuccess'))
+      await loadApiKeys()
+      const refreshedKey = apiKeys.value.find((key) => key.id === keyId)
+      if (refreshedKey) selectedKey.value = refreshedKey
+    },
+    'keys.failedToResetQuota'
+  )
 }
 
 // Show reset rate limit confirmation dialog (from edit modal)
@@ -1763,126 +1808,34 @@ const confirmResetRateLimitFromTable = (row: ApiKey) => {
 const resetRateLimitUsage = async () => {
   if (!selectedKey.value) return
   showResetRateLimitDialog.value = false
-  try {
-    await keysAPI.update(selectedKey.value.id, { reset_rate_limit_usage: true })
-    appStore.showSuccess(t('keys.rateLimitResetSuccess'))
-    // Refresh key data
-    await loadApiKeys()
-    // Update the editing key with fresh data
-    const refreshedKey = apiKeys.value.find(k => k.id === selectedKey.value!.id)
-    if (refreshedKey) {
-      selectedKey.value = refreshedKey
-    }
-  } catch (error: any) {
-    const errorMsg = error.response?.data?.detail || t('keys.failedToResetRateLimit')
-    appStore.showError(errorMsg)
-  }
-}
-
-const importToCcswitch = (row: ApiKey) => {
-  const platform = row.group?.platform || 'anthropic'
-
-  // For antigravity platform, show client selection dialog
-  if (platform === 'antigravity') {
-    pendingCcsRow.value = row
-    showCcsClientSelect.value = true
-    return
-  }
-
-  // For other platforms, execute directly
-  executeCcsImport(row, platform === 'gemini' ? 'gemini' : 'claude')
-}
-
-const executeCcsImport = (row: ApiKey, clientType: 'claude' | 'gemini') => {
-  const baseUrl = publicSettings.value?.api_base_url || window.location.origin
-  const platform = row.group?.platform || 'anthropic'
-
-  // Determine app name and endpoint based on platform and client type
-  let app: string
-  let endpoint: string
-
-  if (platform === 'antigravity') {
-    // Antigravity always uses /antigravity suffix
-    app = clientType === 'gemini' ? 'gemini' : 'claude'
-    endpoint = `${baseUrl}/antigravity`
-  } else {
-    switch (platform) {
-      case 'openai':
-        app = 'codex'
-        endpoint = baseUrl
-        break
-      case 'gemini':
-        app = 'gemini'
-        endpoint = baseUrl
-        break
-      case 'kiro':
-        app = 'claude'
-        endpoint = `${baseUrl}/kiro`
-        break
-      default: // anthropic
-        app = 'claude'
-        endpoint = baseUrl
-    }
-  }
-
-  const usageScript = `({
-    request: {
-      url: "{{baseUrl}}/v1/usage",
-      method: "GET",
-      headers: { "Authorization": "Bearer {{apiKey}}" }
+  const keyId = selectedKey.value.id
+  requestKeyUpdateStepUp(
+    keyId,
+    { reset_rate_limit_usage: true },
+    async () => {
+      appStore.showSuccess(t('keys.rateLimitResetSuccess'))
+      await loadApiKeys()
+      const refreshedKey = apiKeys.value.find((key) => key.id === keyId)
+      if (refreshedKey) selectedKey.value = refreshedKey
     },
-    extractor: function(response) {
-      const remaining = response?.remaining ?? response?.quota?.remaining ?? response?.balance;
-      const unit = response?.unit ?? response?.quota?.unit ?? "USD";
-      return {
-        isValid: response?.is_active ?? response?.isValid ?? true,
-        remaining,
-        unit
-      };
-    }
-  })`
-  const providerName = (publicSettings.value?.site_name || 'sub2api').trim() || 'sub2api'
+    'keys.failedToResetRateLimit'
+  )
+}
 
-  const params = new URLSearchParams({
-    resource: 'provider',
-    app: app,
-    name: providerName,
-    homepage: baseUrl,
-    endpoint: endpoint,
-    apiKey: row.key,
-    configFormat: 'json',
-    usageEnabled: 'true',
-    usageScript: btoa(usageScript),
-    usageAutoInterval: '30'
-  })
-  const deeplink = `ccswitch://v1/import?${params.toString()}`
-
-  try {
-    window.open(deeplink, '_self')
-
-    // Check if the protocol handler worked by detecting if we're still focused
-    setTimeout(() => {
-      if (document.hasFocus()) {
-        // Still focused means the protocol handler likely failed
-        appStore.showError(t('keys.ccSwitchNotInstalled'))
-      }
-    }, 100)
-  } catch (error) {
-    appStore.showError(t('keys.ccSwitchNotInstalled'))
+const clearTransientSecrets = () => {
+  revealRequestGeneration += 1
+  showRevealDialog.value = false
+  revealVerification.value = ''
+  pendingStepUpAction = null
+  pendingStepUpErrorKey = 'keys.revealFailed'
+  if (showUseKeyModal.value) {
+    showUseKeyModal.value = false
+    selectedKey.value = null
   }
 }
 
-const handleCcsClientSelect = (clientType: 'claude' | 'gemini') => {
-  if (pendingCcsRow.value) {
-    executeCcsImport(pendingCcsRow.value, clientType)
-  }
-  showCcsClientSelect.value = false
-  pendingCcsRow.value = null
-}
-
-const closeCcsClientSelect = () => {
-  showCcsClientSelect.value = false
-  pendingCcsRow.value = null
+const clearSecretsWhenHidden = () => {
+  if (document.hidden) clearTransientSecrets()
 }
 
 function formatResetTime(resetAt: string | null): string {
@@ -1904,11 +1857,14 @@ onMounted(() => {
   loadWalletSubscription()
   loadPublicSettings()
   document.addEventListener('click', closeGroupSelector)
+  document.addEventListener('visibilitychange', clearSecretsWhenHidden)
   resetTimer = setInterval(() => { now.value = new Date() }, 60000)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', closeGroupSelector)
+  document.removeEventListener('visibilitychange', clearSecretsWhenHidden)
+  clearTransientSecrets()
   if (resetTimer) clearInterval(resetTimer)
 })
 </script>

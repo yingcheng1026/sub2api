@@ -24,7 +24,12 @@ func TestUsesOfficialWxpayVisibleMethodDerivesFromEnabledProviderInstance(t *tes
 	}
 
 	svc := &PaymentService{
-		configService: &PaymentConfigService{entClient: client},
+		configService: &PaymentConfigService{
+			entClient: client,
+			settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{
+				SettingPaymentVisibleMethodWxpayEnabled: "true",
+			}},
+		},
 	}
 
 	if !svc.usesOfficialWxpayVisibleMethod(ctx) {
@@ -84,7 +89,8 @@ func TestUsesOfficialWxpayVisibleMethodRespectsConfiguredSourceWhenMultipleProvi
 					entClient: client,
 					settingRepo: &paymentConfigSettingRepoStub{
 						values: map[string]string{
-							SettingPaymentVisibleMethodWxpaySource: tt.source,
+							SettingPaymentVisibleMethodWxpaySource:  tt.source,
+							SettingPaymentVisibleMethodWxpayEnabled: "true",
 						},
 					},
 				},

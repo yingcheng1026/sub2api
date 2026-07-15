@@ -24,7 +24,7 @@ This document provides practical examples of how to use the authentication views
 // - If valid, authStore.login() is called
 // - API request to POST /api/auth/login
 // - On success:
-//   - Token stored in localStorage
+//   - Access token kept in memory; refresh token stored in an HttpOnly cookie
 //   - User data stored in state
 //   - Success toast: "Login successful! Welcome back."
 //   - Redirect to /dashboard (or intended route)
@@ -59,7 +59,7 @@ This document provides practical examples of how to use the authentication views
 // - If valid, authStore.register() is called
 // - API request to POST /api/auth/register
 // - On success:
-//   - Token stored in localStorage
+//   - Access token kept in memory; refresh token stored in an HttpOnly cookie
 //   - User data stored in state
 //   - Success toast: "Account created successfully! Welcome to Sub2API."
 //   - Redirect to /dashboard
@@ -552,7 +552,7 @@ import LoginView from '@/views/auth/LoginView.vue'; // ❌ Eager loaded
 import { useAuthStore } from '@/stores'
 
 const authStore = useAuthStore()
-authStore.checkAuth() // Restore auth from localStorage
+await authStore.checkAuth() // Restore auth through the HttpOnly refresh cookie
 ```
 
 ### Issue: Redirect loop after login

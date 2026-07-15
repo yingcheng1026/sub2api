@@ -62,11 +62,17 @@ var (
 	ErrChannelMonitorTemplateBodyRequired = infraerrors.BadRequest(
 		"CHANNEL_MONITOR_TEMPLATE_BODY_REQUIRED", "body_override is required when body_override_mode is merge or replace",
 	)
+	ErrChannelMonitorTemplateBodyReservedKey = infraerrors.BadRequest(
+		"CHANNEL_MONITOR_TEMPLATE_BODY_RESERVED_KEY", "body_override contains a reserved top-level key",
+	)
 	ErrChannelMonitorTemplateHeaderForbidden = infraerrors.BadRequest(
-		"CHANNEL_MONITOR_TEMPLATE_HEADER_FORBIDDEN", "header name is forbidden (hop-by-hop or computed by HTTP client)",
+		"CHANNEL_MONITOR_TEMPLATE_HEADER_FORBIDDEN", "header name is forbidden (credential, hop-by-hop, or computed by HTTP client)",
 	)
 	ErrChannelMonitorTemplateHeaderInvalidName = infraerrors.BadRequest(
 		"CHANNEL_MONITOR_TEMPLATE_HEADER_INVALID_NAME", "header name contains invalid characters",
+	)
+	ErrChannelMonitorTemplateOfficialClientAttribution = infraerrors.BadRequest(
+		"CHANNEL_MONITOR_TEMPLATE_OFFICIAL_CLIENT_ATTRIBUTION", "monitor customization cannot claim an official provider client identity",
 	)
 	ErrChannelMonitorTemplateProviderMismatch = infraerrors.BadRequest(
 		"CHANNEL_MONITOR_TEMPLATE_PROVIDER_MISMATCH", "monitor provider does not match template provider",

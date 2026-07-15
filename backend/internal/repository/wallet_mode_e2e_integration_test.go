@@ -18,7 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-func TestWalletModeStandardPlanPurchaseKeyRoutingAndSharedDeduction(t *testing.T) {
+func TestCreditsWalletDefaultsToOpenAIAndVIPRequiresExplicitGrant(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
 
@@ -28,40 +28,26 @@ func TestWalletModeStandardPlanPurchaseKeyRoutingAndSharedDeduction(t *testing.T
 		PasswordHash: "hash",
 	})
 
-	gptGroup := mustCreateGroup(t, client, &service.Group{
-		Name:             "gpt-5",
-		Platform:         service.PlatformOpenAI,
-		SubscriptionType: service.SubscriptionTypeStandard,
-		RateMultiplier:   1.0,
-	})
-	sonnetGroup := mustCreateGroup(t, client, &service.Group{
-		Name:             "claude-sonnet",
-		Platform:         service.PlatformAnthropic,
-		SubscriptionType: service.SubscriptionTypeStandard,
-		RateMultiplier:   2.5,
-	})
-	geminiGroup := mustCreateGroup(t, client, &service.Group{
-		Name:             "gemini-2-pro",
-		Platform:         service.PlatformGemini,
-		SubscriptionType: service.SubscriptionTypeStandard,
-		RateMultiplier:   1.8,
-	})
+	gptGroup := mustGetOrCreateWalletBusinessGroup(t, client,
+		service.WalletDefaultOpenAIGroupName, service.PlatformOpenAI, false, 1)
+	vipGroup := mustGetOrCreateWalletBusinessGroup(t, client,
+		service.WalletDefaultVIPGroupName, service.PlatformAnthropic, true, 2.5)
 
 	walletQuota := 1500.0
 	plan, err := client.SubscriptionPlan.Create().
-		SetName("Standard Wallet E2E").
+		SetName("Credits Wallet E2E").
 		SetPrice(299).
 		SetWalletQuotaUsd(walletQuota).
-		SetValidityDays(30).
+		SetValidityDays(36500).
 		SetValidityUnit("day").
+		SetPlanType(service.PlanTypeCredits).
 		Save(ctx)
 	require.NoError(t, err)
 
-	bindWalletPlanGroup(t, client, plan.ID, gptGroup.ID)
-	bindWalletPlanGroup(t, client, plan.ID, sonnetGroup.ID)
-	bindWalletPlanGroup(t, client, plan.ID, geminiGroup.ID)
-
-	order, err := client.PaymentOrder.Create().
+	tx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	order, err := tx.Client().PaymentOrder.Create().
 		SetUserID(user.ID).
 		SetUserEmail(user.Email).
 		SetUserName(user.Username).
@@ -74,22 +60,27 @@ func TestWalletModeStandardPlanPurchaseKeyRoutingAndSharedDeduction(t *testing.T
 		SetPaymentTradeNo("trade-wallet-e2e-" + uuid.NewString()).
 		SetOrderType(payment.OrderTypeSubscription).
 		SetPlanID(plan.ID).
-		SetSubscriptionDays(30).
+		SetSubscriptionDays(36500).
 		SetStatus(service.OrderStatusPaid).
+		SetPaidAt(time.Now()).
 		SetExpiresAt(time.Now().Add(time.Hour)).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
 		Save(ctx)
 	require.NoError(t, err)
+	insertCreditsPlanFulfillmentSnapshot(t, ctx, tx.Client(), order.ID, user.ID, plan.ID, 299, 36500, walletQuota)
+	require.NoError(t, tx.Commit())
 	require.Nil(t, order.SubscriptionGroupID)
 
 	groupRepo := NewGroupRepository(client, integrationDB)
 	userRepo := NewUserRepository(client, integrationDB)
-	apiKeyRepo := NewAPIKeyRepository(client, integrationDB)
+	apiKeyRepo := NewAPIKeyRepository(client, integrationDB, strictAPIKeyTestProtector{})
 	subRepo := NewUserSubscriptionRepository(client)
+	walletRepo := NewWalletRepository(client, integrationDB)
 	apiKeySvc := service.NewAPIKeyService(apiKeyRepo, userRepo, groupRepo, subRepo, nil, nil, &config.Config{})
 	subSvc := service.NewSubscriptionService(groupRepo, subRepo, nil, client, nil)
 	subSvc.SetWalletGroupKeyService(apiKeySvc)
+	subSvc.SetWalletTopupService(service.NewWalletService(walletRepo))
 	paymentSvc := service.NewPaymentService(client, nil, nil, nil, subSvc, nil, userRepo, groupRepo, nil)
 
 	require.NoError(t, paymentSvc.ExecuteSubscriptionFulfillment(ctx, order.ID))
@@ -102,40 +93,54 @@ func TestWalletModeStandardPlanPurchaseKeyRoutingAndSharedDeduction(t *testing.T
 	require.InDelta(t, walletQuota, *sub.WalletInitialUSD, 0.000001)
 	require.InDelta(t, walletQuota, *sub.WalletBalanceUSD, 0.000001)
 
-	// 5/14 反转决策：钱包激活走单 key 路径，建 1 把通用 key（group_id=NULL），
-	// 不再为每个 plan_group 建独立 key。跨平台调度靠 model_router (B1.1/B1.2)。
-	// 参见 docs/plans/2026-05-14-wallet-single-key-reversal.md。
 	keys, _, err := apiKeyRepo.ListByUserID(ctx, user.ID, defaultWalletE2EPagination(), service.APIKeyListFilters{Status: service.StatusAPIKeyActive})
 	require.NoError(t, err)
-	require.Len(t, keys, 1, "应只建 1 把 universal key，跨平台调度靠 model_router")
+	require.Len(t, keys, 1, "credits wallet must create exactly one universal key")
 
 	universalKey := keys[0]
 	require.True(t, service.IsWalletUniversalKeyName(universalKey.Name), "key 名应为 universal key 名，实际 %q", universalKey.Name)
 	require.Equal(t, service.WalletUniversalAPIKeyName, universalKey.Name)
 	require.Nil(t, universalKey.GroupID, "universal key 的 group_id 必须为 NULL（跨平台）")
 
-	// 同一把 universal key 调 3 个不同平台模型，由 ModelRouter 在 gateway 层路由到对应 group；
-	// 这里集成测试直传 WalletCost (= group.RateMultiplier) 模拟路由后的扣费金额。
-	// 余额按 wallet_balance_usd 整体扣减，不分 group。
+	routePolicy := []service.ModelRoute{
+		{Pattern: "gpt-*", GroupName: service.WalletDefaultOpenAIGroupName, ExampleModel: "gpt-5.6-high"},
+		{Pattern: "claude-*", GroupName: service.WalletDefaultVIPGroupName, ExampleModel: "claude-sonnet-4-6"},
+	}
+	routes, err := apiKeySvc.GetWalletModelRoutes(ctx, user.ID, routePolicy)
+	require.NoError(t, err)
+	require.Len(t, routes, 1, "credits users must not see Claude before an explicit vip grant")
+	require.Equal(t, gptGroup.ID, routes[0].GroupID)
+
 	billingRepo := NewUsageBillingRepository(client, integrationDB)
 	requireWalletChargeApplied(t, billingRepo, user.ID, universalKey.ID, sub.ID, "gpt-5", gptGroup.RateMultiplier)
-	requireWalletChargeApplied(t, billingRepo, user.ID, universalKey.ID, sub.ID, "claude-sonnet-4-6", sonnetGroup.RateMultiplier)
-	requireWalletChargeApplied(t, billingRepo, user.ID, universalKey.ID, sub.ID, "gemini-2.5-pro", geminiGroup.RateMultiplier)
 
-	expectedBalance := walletQuota - gptGroup.RateMultiplier - sonnetGroup.RateMultiplier - geminiGroup.RateMultiplier
+	require.NoError(t, userRepo.AddGroupToAllowedGroups(ctx, user.ID, vipGroup.ID),
+		"the explicit admin-style vip grant must persist before Claude becomes visible")
+	routes, err = apiKeySvc.GetWalletModelRoutes(ctx, user.ID, routePolicy)
+	require.NoError(t, err)
+	require.Len(t, routes, 2)
+	requireWalletChargeApplied(t, billingRepo, user.ID, universalKey.ID, sub.ID, "claude-sonnet-4-6", vipGroup.RateMultiplier)
+
+	expectedBalance := walletQuota - gptGroup.RateMultiplier - vipGroup.RateMultiplier
 	var balance float64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT wallet_balance_usd FROM user_subscriptions WHERE id = $1", sub.ID).Scan(&balance))
 	require.InDelta(t, expectedBalance, balance, 0.000001)
 
-	var ledgerCount int
-	var ledgerDeltaSum float64
+	var activationCount, usageCount int
+	var ledgerDeltaSum, usageDeltaSum float64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(SUM(delta_usd), 0)
+		SELECT
+			COUNT(*) FILTER (WHERE reason = 'activation'),
+			COUNT(*) FILTER (WHERE reason = 'usage'),
+			COALESCE(SUM(delta_usd), 0),
+			COALESCE(SUM(delta_usd) FILTER (WHERE reason = 'usage'), 0)
 		FROM subscription_wallet_ledger
 		WHERE subscription_id = $1
-	`, sub.ID).Scan(&ledgerCount, &ledgerDeltaSum))
-	require.Equal(t, 3, ledgerCount)
-	require.InDelta(t, -(gptGroup.RateMultiplier + sonnetGroup.RateMultiplier + geminiGroup.RateMultiplier), ledgerDeltaSum, 0.000001)
+	`, sub.ID).Scan(&activationCount, &usageCount, &ledgerDeltaSum, &usageDeltaSum))
+	require.Equal(t, 1, activationCount)
+	require.Equal(t, 2, usageCount)
+	require.InDelta(t, expectedBalance, ledgerDeltaSum, 0.000001)
+	require.InDelta(t, -(gptGroup.RateMultiplier + vipGroup.RateMultiplier), usageDeltaSum, 0.000001)
 
 	reloadedOrder, err := client.PaymentOrder.Get(ctx, order.ID)
 	require.NoError(t, err)

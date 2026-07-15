@@ -291,6 +291,61 @@ func TestAdminService_UpdateGroup_PreservesImageGenerationControlsWhenOmitted(t 
 	require.InDelta(t, 0.5, repo.updated.ImageRateMultiplier, 1e-12)
 }
 
+func TestAdminService_UpdateGroup_PreservesUsageLimitsWhenOmitted(t *testing.T) {
+	daily := 10.0
+	weekly := 50.0
+	monthly := 100.0
+	existingGroup := &Group{
+		ID: 1, Name: "limited-group", Platform: PlatformAnthropic, Status: StatusActive,
+		DailyLimitUSD: &daily, WeeklyLimitUSD: &weekly, MonthlyLimitUSD: &monthly,
+	}
+	repo := &groupRepoStubForAdmin{getByID: existingGroup}
+	svc := &adminServiceImpl{groupRepo: repo}
+
+	group, err := svc.UpdateGroup(context.Background(), 1, &UpdateGroupInput{Description: "metadata only"})
+
+	require.NoError(t, err)
+	require.NotNil(t, group)
+	require.NotNil(t, repo.updated.DailyLimitUSD)
+	require.NotNil(t, repo.updated.WeeklyLimitUSD)
+	require.NotNil(t, repo.updated.MonthlyLimitUSD)
+	require.Equal(t, 10.0, *repo.updated.DailyLimitUSD)
+	require.Equal(t, 50.0, *repo.updated.WeeklyLimitUSD)
+	require.Equal(t, 100.0, *repo.updated.MonthlyLimitUSD)
+}
+
+func TestAdminService_UpdateGroup_AllowsExplicitUsageLimitRemoval(t *testing.T) {
+	daily := 10.0
+	clear := -1.0
+	existingGroup := &Group{
+		ID: 1, Name: "limited-group", Platform: PlatformAnthropic, Status: StatusActive,
+		DailyLimitUSD: &daily,
+	}
+	repo := &groupRepoStubForAdmin{getByID: existingGroup}
+	svc := &adminServiceImpl{groupRepo: repo}
+
+	group, err := svc.UpdateGroup(context.Background(), 1, &UpdateGroupInput{DailyLimitUSD: &clear})
+
+	require.NoError(t, err)
+	require.NotNil(t, group)
+	require.Nil(t, repo.updated.DailyLimitUSD)
+}
+
+func TestAdminService_UpdateGroup_CopyAccountsRequiresAtomicTransactionBeforeWrites(t *testing.T) {
+	existingGroup := &Group{ID: 1, Name: "group", Platform: PlatformAnthropic, Status: StatusActive}
+	repo := &groupRepoStubForAdmin{getByID: existingGroup}
+	svc := &adminServiceImpl{groupRepo: repo}
+
+	_, err := svc.UpdateGroup(context.Background(), 1, &UpdateGroupInput{
+		Description:              "must not persist",
+		CopyAccountsFromGroupIDs: []int64{1},
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "atomic group account binding transaction is not configured")
+	require.Nil(t, repo.updated)
+}
+
 func TestAdminService_UpdateGroup_RejectsNegativeImageRateMultiplier(t *testing.T) {
 	existingGroup := &Group{
 		ID:                  1,

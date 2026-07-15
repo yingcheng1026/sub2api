@@ -99,6 +99,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	billingCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+	if err != nil {
+		h.errorResponse(c, http.StatusServiceUnavailable, "billing_service_error", "Billing service temporarily unavailable")
+		return
+	}
+	c.Request = c.Request.WithContext(billingCtx)
+	usageBillingAdmission := &service.OpenAIUsageBillingAdmissionInput{
+		APIKey: apiKey, User: apiKey.User, Subscription: subscription,
+		RequestBody: append([]byte(nil), body...), RequestPayloadHash: service.HashUsageRequestPayload(body),
+	}
+	defer h.finalizeOpenAIUsageBillingLifecycle(c.Request.Context(), usageBillingAdmission, reqLog)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -206,6 +217,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			GroupID:                 apiKey.GroupID,
 			ImagePriceConfig:        openAIImagePriceConfig(apiKey.Group),
 			RequirePricingPreflight: true,
+			RequireBillingAdmission: true,
+			UsageBilling:            usageBillingAdmission,
 		})
 
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
@@ -222,6 +235,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			if h.handleOpenAIUsageBillingAdmissionError(c, err, streamStarted, false) {
+				return
+			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_chat_completions.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
@@ -231,6 +247,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					h.markOpenAIUsageBillingAttemptFailed(c.Request.Context(), usageBillingAdmission, reqLog)
 					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 					// Pool mode: retry on the same account
 					if failoverErr.RetryableOnSameAccount {
@@ -282,6 +299,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 		}
+		h.gatewayService.MarkOpenAIUsageBillingAccepted(usageBillingAdmission)
 		if result != nil {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
 		} else {
@@ -293,7 +311,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		inboundEndpoint := GetInboundEndpoint(c)
 		upstreamEndpoint := resolveRawCCUpstreamEndpoint(c, account)
 
-		h.submitOpenAIUsageRecordTask(result, func(ctx context.Context) {
+		h.submitOpenAIUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -304,9 +322,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				UpstreamEndpoint:   upstreamEndpoint,
 				UserAgent:          userAgent,
 				IPAddress:          clientIP,
+				RequestPayloadHash: service.HashUsageRequestPayload(body),
 				APIKeyService:      h.apiKeyService,
 				ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 			}); err != nil {
+				h.markOpenAIUsageBillingResultOrphaned(ctx, result, reqLog)
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.chat_completions"),
 					zap.Int64("user_id", subject.UserID),

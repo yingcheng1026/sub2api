@@ -5,6 +5,19 @@ import (
 	"strings"
 )
 
+const (
+	maxJSONSchemaDepth         = 64
+	maxJSONSchemaNodes         = 4096
+	maxJSONSchemaRefExpansions = 256
+	maxJSONSchemaExpansionWork = maxJSONSchemaNodes * 4
+)
+
+type jsonSchemaExpansionState struct {
+	work          int
+	refExpansions int
+	activeRefs    map[string]struct{}
+}
+
 // CleanJSONSchema 清理 JSON Schema，移除 Antigravity/Gemini 不支持的字段
 // 参考 Antigravity-Manager/src-tauri/src/proxy/common/json_schema.rs 实现
 // 确保 schema 符合 JSON Schema draft 2020-12 且适配 Gemini v1internal
@@ -12,9 +25,15 @@ func CleanJSONSchema(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
 	}
+	if !jsonSchemaWithinLimits(schema) {
+		return safeJSONSchemaFallback()
+	}
 	// 0. 预处理：展开 $ref (Schema Flattening)
 	// (Go map 是引用的，直接修改 schema)
-	flattenRefs(schema, extractDefs(schema))
+	state := &jsonSchemaExpansionState{activeRefs: make(map[string]struct{})}
+	if !flattenRefs(schema, extractDefs(schema), state, 0) || !jsonSchemaWithinLimits(schema) {
+		return safeJSONSchemaFallback()
+	}
 
 	// 递归清理
 	cleaned := cleanJSONSchemaRecursive(schema)
@@ -24,6 +43,50 @@ func CleanJSONSchema(schema map[string]any) map[string]any {
 	}
 
 	return result
+}
+
+func safeJSONSchemaFallback() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"reason": map[string]any{
+				"type":        "string",
+				"description": "Reason for calling this tool",
+			},
+		},
+		"required": []any{"reason"},
+	}
+}
+
+func jsonSchemaWithinLimits(root any) bool {
+	type frame struct {
+		value any
+		depth int
+	}
+	stack := []frame{{value: root}}
+	nodes := 0
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if current.depth > maxJSONSchemaDepth {
+			return false
+		}
+		nodes++
+		if nodes > maxJSONSchemaNodes {
+			return false
+		}
+		switch value := current.value.(type) {
+		case map[string]any:
+			for _, child := range value {
+				stack = append(stack, frame{value: child, depth: current.depth + 1})
+			}
+		case []any:
+			for _, child := range value {
+				stack = append(stack, frame{value: child, depth: current.depth + 1})
+			}
+		}
+	}
+	return true
 }
 
 // extractDefs 提取并移除定义的 helper
@@ -44,10 +107,20 @@ func extractDefs(schema map[string]any) map[string]any {
 	return defs
 }
 
-// flattenRefs 递归展开 $ref
-func flattenRefs(schema map[string]any, defs map[string]any) {
+// flattenRefs recursively expands local references while enforcing a strict
+// work, depth and active-reference budget. Returning false makes the caller
+// replace the untrusted schema with a safe fallback instead of partially using
+// a cyclic or explosively expanding graph.
+func flattenRefs(schema map[string]any, defs map[string]any, state *jsonSchemaExpansionState, depth int) bool {
 	if len(defs) == 0 {
-		return // 无需展开
+		return true
+	}
+	if state == nil || depth > maxJSONSchemaDepth {
+		return false
+	}
+	state.work++
+	if state.work > maxJSONSchemaExpansionWork {
+		return false
 	}
 
 	// 检查并替换 $ref
@@ -57,31 +130,87 @@ func flattenRefs(schema map[string]any, defs map[string]any) {
 		parts := strings.Split(ref, "/")
 		refName := parts[len(parts)-1]
 
-		if defSchema, exists := defs[refName]; exists {
-			if defMap, ok := defSchema.(map[string]any); ok {
-				// 合并定义内容 (不覆盖现有 key)
-				for k, v := range defMap {
-					if _, has := schema[k]; !has {
-						schema[k] = deepCopy(v) // 需深拷贝避免共享引用
-					}
-				}
-				// 递归处理刚刚合并进来的内容
-				flattenRefs(schema, defs)
-			}
+		defSchema, exists := defs[refName]
+		defMap, isMap := defSchema.(map[string]any)
+		if !exists || !isMap {
+			return flattenRefChildren(schema, defs, state, depth)
 		}
+		if _, active := state.activeRefs[ref]; active {
+			return false
+		}
+		state.refExpansions++
+		if state.refExpansions > maxJSONSchemaRefExpansions {
+			return false
+		}
+		state.activeRefs[ref] = struct{}{}
+		for key, value := range defMap {
+			if _, has := schema[key]; has {
+				continue
+			}
+			copied, ok := deepCopyJSONSchemaWithBudget(value, state, depth+1)
+			if !ok {
+				delete(state.activeRefs, ref)
+				return false
+			}
+			schema[key] = copied
+		}
+		ok := flattenRefs(schema, defs, state, depth+1)
+		delete(state.activeRefs, ref)
+		return ok
 	}
+	return flattenRefChildren(schema, defs, state, depth)
+}
 
-	// 遍历子节点
+func flattenRefChildren(schema map[string]any, defs map[string]any, state *jsonSchemaExpansionState, depth int) bool {
 	for _, v := range schema {
 		if subMap, ok := v.(map[string]any); ok {
-			flattenRefs(subMap, defs)
+			if !flattenRefs(subMap, defs, state, depth+1) {
+				return false
+			}
 		} else if subArr, ok := v.([]any); ok {
 			for _, item := range subArr {
 				if itemMap, ok := item.(map[string]any); ok {
-					flattenRefs(itemMap, defs)
+					if !flattenRefs(itemMap, defs, state, depth+1) {
+						return false
+					}
 				}
 			}
 		}
+	}
+	return true
+}
+
+func deepCopyJSONSchemaWithBudget(src any, state *jsonSchemaExpansionState, depth int) (any, bool) {
+	if state == nil || depth > maxJSONSchemaDepth {
+		return nil, false
+	}
+	state.work++
+	if state.work > maxJSONSchemaExpansionWork {
+		return nil, false
+	}
+	switch value := src.(type) {
+	case map[string]any:
+		copied := make(map[string]any, len(value))
+		for key, child := range value {
+			childCopy, ok := deepCopyJSONSchemaWithBudget(child, state, depth+1)
+			if !ok {
+				return nil, false
+			}
+			copied[key] = childCopy
+		}
+		return copied, true
+	case []any:
+		copied := make([]any, len(value))
+		for i, child := range value {
+			childCopy, ok := deepCopyJSONSchemaWithBudget(child, state, depth+1)
+			if !ok {
+				return nil, false
+			}
+			copied[i] = childCopy
+		}
+		return copied, true
+	default:
+		return src, true
 	}
 }
 

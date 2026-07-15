@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
@@ -15,14 +17,15 @@ import (
 )
 
 var (
-	ErrTotpNotEnabled      = infraerrors.BadRequest("TOTP_NOT_ENABLED", "totp feature is not enabled")
-	ErrTotpAlreadyEnabled  = infraerrors.BadRequest("TOTP_ALREADY_ENABLED", "totp is already enabled for this account")
-	ErrTotpNotSetup        = infraerrors.BadRequest("TOTP_NOT_SETUP", "totp is not set up for this account")
-	ErrTotpInvalidCode     = infraerrors.BadRequest("TOTP_INVALID_CODE", "invalid totp code")
-	ErrTotpSetupExpired    = infraerrors.BadRequest("TOTP_SETUP_EXPIRED", "totp setup session expired")
-	ErrTotpTooManyAttempts = infraerrors.TooManyRequests("TOTP_TOO_MANY_ATTEMPTS", "too many verification attempts, please try again later")
-	ErrVerifyCodeRequired  = infraerrors.BadRequest("VERIFY_CODE_REQUIRED", "email verification code is required")
-	ErrPasswordRequired    = infraerrors.BadRequest("PASSWORD_REQUIRED", "password is required")
+	ErrTotpNotEnabled        = infraerrors.BadRequest("TOTP_NOT_ENABLED", "totp feature is not enabled")
+	ErrTotpAlreadyEnabled    = infraerrors.BadRequest("TOTP_ALREADY_ENABLED", "totp is already enabled for this account")
+	ErrTotpNotSetup          = infraerrors.BadRequest("TOTP_NOT_SETUP", "totp is not set up for this account")
+	ErrTotpInvalidCode       = infraerrors.BadRequest("TOTP_INVALID_CODE", "invalid totp code")
+	ErrTotpSetupExpired      = infraerrors.BadRequest("TOTP_SETUP_EXPIRED", "totp setup session expired")
+	ErrTotpTooManyAttempts   = infraerrors.TooManyRequests("TOTP_TOO_MANY_ATTEMPTS", "too many verification attempts, please try again later")
+	ErrTotpVerifyUnavailable = infraerrors.ServiceUnavailable("TOTP_VERIFY_UNAVAILABLE", "totp verification is temporarily unavailable")
+	ErrVerifyCodeRequired    = infraerrors.BadRequest("VERIFY_CODE_REQUIRED", "email verification code is required")
+	ErrPasswordRequired      = infraerrors.BadRequest("PASSWORD_REQUIRED", "password is required")
 )
 
 // TotpCache defines cache operations for TOTP service
@@ -43,10 +46,31 @@ type TotpCache interface {
 	ClearVerifyAttempts(ctx context.Context, userID int64) error
 }
 
+// TotpScopedVerifyCache isolates high-sensitivity re-authentication attempts
+// from the login limiter so one flow cannot lock out the other.
+type TotpScopedVerifyCache interface {
+	IncrementScopedVerifyAttempts(ctx context.Context, purpose string, userID int64) (int, error)
+	ClearScopedVerifyAttempts(ctx context.Context, purpose string, userID int64) error
+	ConsumeScopedVerification(ctx context.Context, purpose string, userID int64, fingerprint string, ttl time.Duration) (bool, error)
+}
+
+type TotpLoginSessionConsumer interface {
+	ConsumeLoginSession(ctx context.Context, tempToken string) (*TotpLoginSession, error)
+}
+
 // SecretEncryptor defines encryption operations for TOTP secrets
 type SecretEncryptor interface {
 	Encrypt(plaintext string) (string, error)
 	Decrypt(ciphertext string) (string, error)
+}
+
+// DomainSecretEncryptor binds new ciphertext to an explicit secret domain.
+// Generic Encrypt/Decrypt remain available only for controlled legacy migration;
+// runtime secret consumers must use the domain-aware methods.
+type DomainSecretEncryptor interface {
+	SecretEncryptor
+	EncryptForDomain(domain, plaintext string) (string, error)
+	DecryptForDomain(domain, ciphertext string) (string, error)
 }
 
 // TotpSetupSession represents a TOTP setup session
@@ -85,11 +109,15 @@ type TotpSetupResponse struct {
 }
 
 const (
-	totpSetupTTL    = 5 * time.Minute
-	totpLoginTTL    = 5 * time.Minute
-	totpAttemptsTTL = 15 * time.Minute
-	maxTotpAttempts = 5
-	totpIssuer      = "Sub2API"
+	totpSetupTTL                  = 5 * time.Minute
+	totpLoginTTL                  = 5 * time.Minute
+	totpAttemptsTTL               = 15 * time.Minute
+	maxTotpAttempts               = 5
+	totpIssuer                    = "Sub2API"
+	TotpVerifyPurposeAPIKeyReveal = "api_key_reveal"
+	TotpVerifyPurposeAPIKeyCreate = "api_key_create"
+	TotpVerifyPurposeAPIKeyUpdate = "api_key_update"
+	totpVerifyPurposeManagement   = "totp_management_password"
 )
 
 // TotpService handles TOTP operations
@@ -166,11 +194,8 @@ func (s *TotpService) InitiateSetup(ctx context.Context, userID int64, emailCode
 		}
 	} else {
 		// Email verification disabled - verify password
-		if password == "" {
-			return nil, ErrPasswordRequired
-		}
-		if !user.CheckPassword(password) {
-			return nil, ErrPasswordIncorrect
+		if err := s.verifyManagementPassword(ctx, user, password); err != nil {
+			return nil, err
 		}
 	}
 
@@ -235,19 +260,20 @@ func (s *TotpService) CompleteSetup(ctx context.Context, userID int64, totpCode,
 		return ErrTotpInvalidCode
 	}
 
-	setupSecretPrefix := "N/A"
-	if len(session.Secret) >= 4 {
-		setupSecretPrefix = session.Secret[:4]
-	}
 	slog.Debug("totp_complete_setup_before_encrypt",
 		"user_id", userID,
-		"secret_len", len(session.Secret),
-		"secret_prefix", setupSecretPrefix)
+		"secret_len", len(session.Secret))
 
 	// Encrypt the secret
-	encryptedSecret, err := s.encryptor.Encrypt(session.Secret)
+	if s.encryptor == nil {
+		return fmt.Errorf("encrypt totp secret: encryptor is not configured")
+	}
+	encryptedSecret, err := EncryptForSecretDomain(s.encryptor, SecretDomainTOTP, session.Secret)
 	if err != nil {
 		return fmt.Errorf("encrypt totp secret: %w", err)
+	}
+	if encryptedSecret == "" {
+		return fmt.Errorf("encrypt totp secret: encryptor returned empty ciphertext")
 	}
 
 	slog.Debug("totp_complete_setup_encrypted",
@@ -255,23 +281,17 @@ func (s *TotpService) CompleteSetup(ctx context.Context, userID int64, totpCode,
 		"encrypted_len", len(encryptedSecret))
 
 	// Verify encryption by decrypting
-	decrypted, decErr := s.encryptor.Decrypt(encryptedSecret)
+	decrypted, decErr := DecryptForSecretDomain(s.encryptor, SecretDomainTOTP, encryptedSecret)
 	if decErr != nil {
-		slog.Debug("totp_complete_setup_verify_failed",
-			"user_id", userID,
-			"error", decErr)
-	} else {
-		decryptedPrefix := "N/A"
-		if len(decrypted) >= 4 {
-			decryptedPrefix = decrypted[:4]
-		}
-		slog.Debug("totp_complete_setup_verified",
-			"user_id", userID,
-			"original_len", len(session.Secret),
-			"decrypted_len", len(decrypted),
-			"match", session.Secret == decrypted,
-			"decrypted_prefix", decryptedPrefix)
+		return fmt.Errorf("verify encrypted totp secret: %w", decErr)
 	}
+	if subtle.ConstantTimeCompare([]byte(session.Secret), []byte(decrypted)) != 1 {
+		return fmt.Errorf("verify encrypted totp secret: decrypted secret mismatch")
+	}
+	slog.Debug("totp_complete_setup_verified",
+		"user_id", userID,
+		"original_len", len(session.Secret),
+		"decrypted_len", len(decrypted))
 
 	// Update user with encrypted TOTP secret
 	if err := s.userRepo.UpdateTotpSecret(ctx, userID, &encryptedSecret); err != nil {
@@ -313,11 +333,8 @@ func (s *TotpService) Disable(ctx context.Context, userID int64, emailCode, pass
 		}
 	} else {
 		// Email verification disabled - verify password
-		if password == "" {
-			return ErrPasswordRequired
-		}
-		if !user.CheckPassword(password) {
-			return ErrPasswordIncorrect
+		if err := s.verifyManagementPassword(ctx, user, password); err != nil {
+			return err
 		}
 	}
 
@@ -329,15 +346,91 @@ func (s *TotpService) Disable(ctx context.Context, userID int64, emailCode, pass
 	return nil
 }
 
+func (s *TotpService) verifyManagementPassword(ctx context.Context, user *User, password string) error {
+	if password == "" {
+		return ErrPasswordRequired
+	}
+	if s == nil || s.cache == nil || user == nil {
+		return ErrTotpVerifyUnavailable
+	}
+	scoped, ok := s.cache.(TotpScopedVerifyCache)
+	if !ok {
+		return ErrTotpVerifyUnavailable
+	}
+	attempts, err := scoped.IncrementScopedVerifyAttempts(ctx, totpVerifyPurposeManagement, user.ID)
+	if err != nil {
+		return ErrTotpVerifyUnavailable
+	}
+	if attempts > maxTotpAttempts {
+		return ErrTotpTooManyAttempts
+	}
+	if !user.CheckPassword(password) {
+		return ErrPasswordIncorrect
+	}
+	if err := scoped.ClearScopedVerifyAttempts(ctx, totpVerifyPurposeManagement, user.ID); err != nil {
+		return ErrTotpVerifyUnavailable
+	}
+	return nil
+}
+
 // VerifyCode verifies a TOTP code for a user
 func (s *TotpService) VerifyCode(ctx context.Context, userID int64, code string) error {
+	if s == nil || s.cache == nil {
+		return ErrTotpVerifyUnavailable
+	}
+	return s.verifyCodeWithLimiter(
+		ctx,
+		userID,
+		code,
+		s.cache.IncrementVerifyAttempts,
+		s.cache.ClearVerifyAttempts,
+		nil,
+	)
+}
+
+// VerifyCodeForPurpose keeps API-key reveal failures out of the login limiter.
+func (s *TotpService) VerifyCodeForPurpose(ctx context.Context, userID int64, code, purpose string) error {
+	if (purpose != TotpVerifyPurposeAPIKeyReveal && purpose != TotpVerifyPurposeAPIKeyCreate && purpose != TotpVerifyPurposeAPIKeyUpdate) || s == nil || s.cache == nil {
+		return ErrTotpVerifyUnavailable
+	}
+	scoped, ok := s.cache.(TotpScopedVerifyCache)
+	if !ok {
+		return ErrTotpVerifyUnavailable
+	}
+	return s.verifyCodeWithLimiter(
+		ctx,
+		userID,
+		code,
+		func(ctx context.Context, userID int64) (int, error) {
+			return scoped.IncrementScopedVerifyAttempts(ctx, purpose, userID)
+		},
+		func(ctx context.Context, userID int64) error {
+			return scoped.ClearScopedVerifyAttempts(ctx, purpose, userID)
+		},
+		func(ctx context.Context, userID int64, fingerprint string) (bool, error) {
+			return scoped.ConsumeScopedVerification(ctx, purpose, userID, fingerprint, 2*time.Minute)
+		},
+	)
+}
+
+func (s *TotpService) verifyCodeWithLimiter(
+	ctx context.Context,
+	userID int64,
+	code string,
+	increment func(context.Context, int64) (int, error),
+	clear func(context.Context, int64) error,
+	consume func(context.Context, int64, string) (bool, error),
+) error {
 	slog.Debug("totp_verify_code_called",
 		"user_id", userID,
 		"code_len", len(code))
 
 	// Check rate limiting
-	attempts, err := s.cache.GetVerifyAttempts(ctx, userID)
-	if err == nil && attempts >= maxTotpAttempts {
+	attempts, err := increment(ctx, userID)
+	if err != nil {
+		return ErrTotpVerifyUnavailable
+	}
+	if attempts > maxTotpAttempts {
 		return ErrTotpTooManyAttempts
 	}
 
@@ -363,7 +456,7 @@ func (s *TotpService) VerifyCode(ctx context.Context, userID int64, code string)
 		"encrypted_len", len(*user.TotpSecretEncrypted))
 
 	// Decrypt the secret
-	secret, err := s.encryptor.Decrypt(*user.TotpSecretEncrypted)
+	secret, err := DecryptForSecretDomain(s.encryptor, SecretDomainTOTP, *user.TotpSecretEncrypted)
 	if err != nil {
 		slog.Debug("totp_verify_decrypt_failed",
 			"user_id", userID,
@@ -371,14 +464,9 @@ func (s *TotpService) VerifyCode(ctx context.Context, userID int64, code string)
 		return infraerrors.InternalServer("TOTP_VERIFY_ERROR", "failed to verify totp code")
 	}
 
-	secretPrefix := "N/A"
-	if len(secret) >= 4 {
-		secretPrefix = secret[:4]
-	}
 	slog.Debug("totp_verify_decrypted",
 		"user_id", userID,
-		"secret_len", len(secret),
-		"secret_prefix", secretPrefix)
+		"secret_len", len(secret))
 
 	// Verify the code
 	valid := totp.Validate(code, secret)
@@ -386,19 +474,34 @@ func (s *TotpService) VerifyCode(ctx context.Context, userID int64, code string)
 		"user_id", userID,
 		"valid", valid,
 		"secret_len", len(secret),
-		"secret_prefix", secretPrefix,
 		"server_time", time.Now().UTC().Format(time.RFC3339))
 
 	if !valid {
-		// Increment failed attempts
-		_, _ = s.cache.IncrementVerifyAttempts(ctx, userID)
 		return ErrTotpInvalidCode
+	}
+	if consume != nil {
+		fingerprint := totpScopedVerificationFingerprint(secret, code, userID)
+		consumed, err := consume(ctx, userID, fingerprint)
+		if err != nil {
+			return ErrTotpVerifyUnavailable
+		}
+		if !consumed {
+			return ErrTotpInvalidCode
+		}
 	}
 
 	// Clear attempt counter on success
-	_ = s.cache.ClearVerifyAttempts(ctx, userID)
+	if err := clear(ctx, userID); err != nil {
+		return ErrTotpVerifyUnavailable
+	}
 
 	return nil
+}
+
+func totpScopedVerificationFingerprint(secret, code string, userID int64) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = fmt.Fprintf(mac, "%d\n%s", userID, code)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // CreateLoginSession creates a temporary login session for 2FA
@@ -450,6 +553,16 @@ func (s *TotpService) createLoginSession(
 // GetLoginSession retrieves a login session
 func (s *TotpService) GetLoginSession(ctx context.Context, tempToken string) (*TotpLoginSession, error) {
 	return s.cache.GetLoginSession(ctx, tempToken)
+}
+
+// ConsumeLoginSession atomically claims a verified 2FA session. Only the
+// winning request may continue to token issuance or pending OAuth binding.
+func (s *TotpService) ConsumeLoginSession(ctx context.Context, tempToken string) (*TotpLoginSession, error) {
+	consumer, ok := s.cache.(TotpLoginSessionConsumer)
+	if !ok {
+		return nil, ErrTotpVerifyUnavailable
+	}
+	return consumer.ConsumeLoginSession(ctx, tempToken)
 }
 
 // DeleteLoginSession deletes a login session

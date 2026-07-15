@@ -151,15 +151,16 @@ func (h *GatewayHandler) CursorChatCompletions(c *gin.Context) {
 }
 
 type cursorSidecarRequest struct {
-	Method       string
-	Path         string
-	Model        string
-	UpstreamBody []byte
-	RequestBody  []byte
-	Stream       bool
-	RecordUsage  bool
-	Parsed       *service.ParsedRequest
-	Mapping      service.ChannelMappingResult
+	Method                string
+	Path                  string
+	Model                 string
+	UpstreamBody          []byte
+	RequestBody           []byte
+	Stream                bool
+	RecordUsage           bool
+	RejectUnmeteredStream bool
+	Parsed                *service.ParsedRequest
+	Mapping               service.ChannelMappingResult
 }
 
 func (h *GatewayHandler) handleCursorSidecarPost(c *gin.Context, sidecarPath string, recordUsage bool) {
@@ -257,12 +258,26 @@ func (h *GatewayHandler) handleCursorSidecar(c *gin.Context, req cursorSidecarRe
 	} else {
 		setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(false, false)))
 	}
+	if req.RecordUsage && h.blockSidecarContentModeration(c, reqLog, apiKey, subject, req.Path, req.Model, req.RequestBody) {
+		return
+	}
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 	if req.RecordUsage {
+		billingRequestCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+		if err != nil {
+			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "billing_service_error", "Billing service temporarily unavailable", streamStarted)
+			return
+		}
+		c.Request = c.Request.WithContext(billingRequestCtx)
+		if subscription != nil && subscription.IsWalletMode() && req.Stream {
+			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "billing_service_error", "Wallet billing for Cursor streaming is unavailable", streamStarted)
+			return
+		}
+		req.RejectUnmeteredStream = subscription != nil && subscription.IsWalletMode()
 		userRelease, ok := h.acquireCursorUserSlot(c, subject, req.Stream, &streamStarted, reqLog)
 		if !ok {
 			return
@@ -303,7 +318,7 @@ func (h *GatewayHandler) handleCursorSidecar(c *gin.Context, req cursorSidecarRe
 		if err != nil {
 			if len(fs.FailedAccountIDs) == 0 {
 				reqLog.Warn("gateway.cursor.select_account_no_available", zap.Error(err))
-				h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available Cursor accounts: "+err.Error(), streamStarted)
+				h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available Cursor accounts", streamStarted)
 				return
 			}
 			action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -337,33 +352,87 @@ func (h *GatewayHandler) handleCursorSidecar(c *gin.Context, req cursorSidecarRe
 			return
 		}
 
+		requestCtx := c.Request.Context()
+		if fs.SwitchCount > 0 {
+			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
+		}
+		var usageBillingIdentity *service.GatewayUsageBillingIdentity
+		if req.RecordUsage && subscription != nil && subscription.IsWalletMode() {
+			usageBillingIdentity, err = h.gatewayService.PrepareGatewayWalletUsageBillingAdmission(
+				requestCtx, apiKey, apiKey.User, account, subscription, req.Parsed,
+			)
+			if err != nil {
+				if accountRelease != nil {
+					accountRelease()
+				}
+				status := http.StatusServiceUnavailable
+				code := "billing_service_error"
+				message := "Billing service temporarily unavailable"
+				switch {
+				case errors.Is(err, service.ErrWalletInsufficient):
+					status, code, message, _ = billingErrorDetails(err)
+				case errors.Is(err, service.ErrUsageBillingRequestConflict),
+					errors.Is(err, service.ErrUsageBillingAdmissionFinalized):
+					status = http.StatusConflict
+					code = "billing_request_conflict"
+					message = "Billing request identity conflict"
+				}
+				h.handleStreamingAwareError(c, status, code, message, streamStarted)
+				return
+			}
+		}
+		markBillingAttemptFailed := func() {
+			if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingAttemptFailed(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gateway.cursor.billing_attempt_fail_mark_failed", zap.Error(lifecycleErr))
+			}
+		}
+		markBillingOrphaned := func() {
+			if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gateway.cursor.billing_attempt_orphan_mark_failed", zap.Error(lifecycleErr))
+			}
+		}
+		abandonBilling := func() {
+			if lifecycleErr := h.gatewayService.AbandonGatewayUsageBilling(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gateway.cursor.billing_attempt_abandon_failed", zap.Error(lifecycleErr))
+			}
+		}
+
 		writerSizeBeforeForward := c.Writer.Size()
 		result, err := h.forwardCursorSidecar(c, account, req)
 		if accountRelease != nil {
 			accountRelease()
 		}
 
-		if err != nil {
+		deliveryFailed := err != nil && result != nil && errors.Is(err, errSidecarClientDelivery)
+		if err != nil && !deliveryFailed {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				if c.Writer.Size() != writerSizeBeforeForward {
+					markBillingOrphaned()
 					h.handleFailoverExhausted(c, failoverErr, service.PlatformCursor, true)
 					return
 				}
+				markBillingAttemptFailed()
 				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, failoverErr)
 				switch action {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
+					abandonBilling()
 					h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformCursor, streamStarted)
 					return
 				case FailoverCanceled:
+					abandonBilling()
 					return
 				}
 			}
+			markBillingOrphaned()
 			h.ensureForwardErrorResponse(c, streamStarted)
 			reqLog.Error("gateway.cursor.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			return
+		}
+		if result != nil {
+			result.UsageBillingIdentity = usageBillingIdentity
 		}
 
 		if req.RecordUsage {
@@ -374,7 +443,7 @@ func (h *GatewayHandler) handleCursorSidecar(c *gin.Context, req cursorSidecarRe
 			upstreamEndpoint := req.Path
 			mappingFields := req.Mapping.ToUsageFields(req.Model, result.UpstreamModel)
 
-			h.submitUsageRecordTask(func(ctx context.Context) {
+			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 					Result:             result,
 					ParsedRequest:      req.Parsed,
@@ -391,9 +460,15 @@ func (h *GatewayHandler) handleCursorSidecar(c *gin.Context, req cursorSidecarRe
 					APIKeyService:      h.apiKeyService,
 					ChannelUsageFields: mappingFields,
 				}); err != nil {
+					if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(ctx, result.UsageBillingIdentity); lifecycleErr != nil {
+						reqLog.Error("gateway.cursor.billing_result_orphan_mark_failed", zap.Error(lifecycleErr))
+					}
 					reqLog.Error("gateway.cursor.record_usage_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				}
 			})
+		}
+		if deliveryFailed {
+			reqLog.Warn("gateway.cursor.client_delivery_failed_after_metered_upstream_completion", zap.Error(err))
 		}
 
 		service.SetOpsLatencyMs(c, service.OpsUpstreamLatencyMsKey, time.Since(requestStart).Milliseconds())
@@ -511,7 +586,7 @@ func (h *GatewayHandler) forwardCursorSidecar(c *gin.Context, account *service.A
 	}
 
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(c.Request.Context(), cfg.requestTimeout())
+	ctx, cancel := context.WithTimeout(sidecarUpstreamContext(c.Request.Context(), req.RecordUsage), cfg.requestTimeout())
 	defer cancel()
 
 	var bodyReader io.Reader = http.NoBody
@@ -546,33 +621,45 @@ func (h *GatewayHandler) forwardCursorSidecar(c *gin.Context, account *service.A
 		body, _ := readCursorSidecarBody(resp.Body)
 		upstreamMsg := service.ExtractUpstreamErrorMessage(body)
 		service.SetOpsUpstreamError(c, resp.StatusCode, upstreamMsg, "")
-		copyCursorSidecarHeaders(c.Writer.Header(), resp.Header)
-		c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
-		if upstreamMsg != "" {
-			return nil, fmt.Errorf("cursor sidecar upstream error: %d %s", resp.StatusCode, upstreamMsg)
-		}
+		h.handleStreamingAwareError(c, resp.StatusCode, "upstream_error", "Upstream request failed", false)
 		return nil, fmt.Errorf("cursor sidecar upstream error: %d", resp.StatusCode)
 	}
 
-	copyCursorSidecarHeaders(c.Writer.Header(), resp.Header)
-	c.Status(resp.StatusCode)
-	if req.Stream || isCursorStreamingContentType(resp.Header.Get("Content-Type")) {
-		if _, err := io.Copy(c.Writer, resp.Body); err != nil {
+	isStreamingResponse := req.Stream || isCursorStreamingContentType(resp.Header.Get("Content-Type"))
+	if isStreamingResponse && req.RejectUnmeteredStream {
+		return nil, errors.New("wallet billing for Cursor streaming is unavailable")
+	}
+	if isStreamingResponse {
+		body, usage, err := readMeteredSidecarStream(
+			resp.Body,
+			cursorMaxSidecarResponseBytes,
+			extractCursorUsage,
+			req.RecordUsage,
+		)
+		if err != nil {
 			return nil, err
 		}
-		if flusher, ok := c.Writer.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		return &service.ForwardResult{
+		result := &service.ForwardResult{
 			RequestID:     resp.Header.Get("X-Request-ID"),
-			Usage:         service.ClaudeUsage{},
+			Usage:         usage,
 			Model:         req.Model,
 			UpstreamModel: resolvedCursorUpstreamModel(req),
 			Stream:        true,
 			Duration:      time.Since(start),
-		}, nil
+		}
+		copyCursorSidecarHeaders(c.Writer.Header(), resp.Header)
+		c.Status(resp.StatusCode)
+		if err := writeBufferedSidecarStream(c.Writer, body); err != nil {
+			return result, err
+		}
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return result, nil
 	}
 
+	copyCursorSidecarHeaders(c.Writer.Header(), resp.Header)
+	c.Status(resp.StatusCode)
 	body, err := readCursorSidecarBody(resp.Body)
 	if err != nil {
 		return nil, err
@@ -864,12 +951,7 @@ func readCursorSidecarBody(body io.Reader) ([]byte, error) {
 }
 
 func extractCursorUsage(body []byte) service.ClaudeUsage {
-	return service.ClaudeUsage{
-		InputTokens:              firstKiroInt(body, "usage.input_tokens", "usage.prompt_tokens", "usage.inputTokens", "usage.promptTokenCount"),
-		OutputTokens:             firstKiroInt(body, "usage.output_tokens", "usage.completion_tokens", "usage.outputTokens", "usage.candidatesTokenCount"),
-		CacheCreationInputTokens: firstKiroInt(body, "usage.cache_creation_input_tokens", "usage.cache_creation_tokens"),
-		CacheReadInputTokens:     firstKiroInt(body, "usage.cache_read_input_tokens", "usage.cache_read_tokens"),
-	}
+	return extractCommonSidecarUsage(body)
 }
 
 func copyCursorSidecarHeaders(dst, src http.Header) {

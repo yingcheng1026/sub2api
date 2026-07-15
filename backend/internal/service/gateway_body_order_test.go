@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -107,37 +106,6 @@ func TestReplaceModelInBody_PreservesTopLevelFieldOrder(t *testing.T) {
 
 	assertJSONTokenOrder(t, resultStr, `"alpha"`, `"model"`, `"messages"`, `"omega"`)
 	require.Contains(t, resultStr, `"model":"claude-3-5-sonnet-20241022"`)
-}
-
-func TestNormalizeClaudeOAuthRequestBody_PreservesTopLevelFieldOrder(t *testing.T) {
-	body := []byte(`{"alpha":1,"model":"claude-3-5-sonnet-latest","temperature":0.2,"system":"You are OpenCode, the best coding agent on the planet.","messages":[],"tool_choice":{"type":"auto"},"omega":2}`)
-
-	result, modelID := normalizeClaudeOAuthRequestBody(body, "claude-3-5-sonnet-latest", claudeOAuthNormalizeOptions{
-		injectMetadata: true,
-		metadataUserID: "user-1",
-	})
-	resultStr := string(result)
-
-	require.Equal(t, claude.NormalizeModelID("claude-3-5-sonnet-latest"), modelID)
-	assertJSONTokenOrder(t, resultStr, `"alpha"`, `"model"`, `"temperature"`, `"system"`, `"messages"`, `"omega"`, `"tools"`, `"metadata"`, `"max_tokens"`)
-	require.Contains(t, resultStr, `"temperature":0.2`)
-	require.NotContains(t, resultStr, `"tool_choice"`)
-	require.Contains(t, resultStr, `"system":"`+claudeCodeSystemPrompt+`"`)
-	require.Contains(t, resultStr, `"tools":[]`)
-	require.Contains(t, resultStr, `"metadata":{"user_id":"user-1"}`)
-	require.Contains(t, resultStr, `"max_tokens":128000`)
-}
-
-func TestInjectClaudeCodePrompt_PreservesFieldOrder(t *testing.T) {
-	body := []byte(`{"alpha":1,"system":[{"id":"block-1","type":"text","text":"Custom"}],"messages":[],"omega":2}`)
-
-	result := injectClaudeCodePrompt(body, []any{
-		map[string]any{"id": "block-1", "type": "text", "text": "Custom"},
-	})
-	resultStr := string(result)
-
-	assertJSONTokenOrder(t, resultStr, `"alpha"`, `"system"`, `"messages"`, `"omega"`)
-	require.Contains(t, resultStr, `{"id":"block-1","type":"text","text":"`+claudeCodeSystemPrompt+`\n\nCustom"}`)
 }
 
 func TestEnforceCacheControlLimit_PreservesTopLevelFieldOrder(t *testing.T) {

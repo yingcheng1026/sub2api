@@ -79,6 +79,8 @@ func (e *refreshAPIExecutorStub) CacheKey(account *Account) string {
 type refreshAPICacheStub struct {
 	lockResult   bool
 	lockErr      error
+	lockToken    string
+	releaseToken string
 	releaseCalls int
 }
 
@@ -92,12 +94,19 @@ func (c *refreshAPICacheStub) SetAccessToken(context.Context, string, string, ti
 
 func (c *refreshAPICacheStub) DeleteAccessToken(context.Context, string) error { return nil }
 
-func (c *refreshAPICacheStub) AcquireRefreshLock(context.Context, string, time.Duration) (bool, error) {
-	return c.lockResult, c.lockErr
+func (c *refreshAPICacheStub) AcquireRefreshLock(context.Context, string, time.Duration) (bool, string, error) {
+	if !c.lockResult || c.lockErr != nil {
+		return c.lockResult, "", c.lockErr
+	}
+	if c.lockToken == "" {
+		c.lockToken = "refresh-api-owner"
+	}
+	return true, c.lockToken, nil
 }
 
-func (c *refreshAPICacheStub) ReleaseRefreshLock(context.Context, string) error {
+func (c *refreshAPICacheStub) ReleaseRefreshLock(_ context.Context, _ string, ownershipToken string) error {
 	c.releaseCalls++
+	c.releaseToken = ownershipToken
 	return nil
 }
 
@@ -123,6 +132,7 @@ func TestRefreshIfNeeded_Success(t *testing.T) {
 	require.Equal(t, 1, repo.updateCalls)                      // DB updated
 	require.Equal(t, 1, repo.updateCredentialsCalls)
 	require.Equal(t, 1, cache.releaseCalls) // lock released
+	require.Equal(t, cache.lockToken, cache.releaseToken)
 	require.Equal(t, 1, executor.refreshCalls)
 }
 
@@ -259,7 +269,7 @@ func TestRefreshIfNeeded_DBUpdateError(t *testing.T) {
 	require.Equal(t, 1, repo.updateCalls) // attempted
 }
 
-func TestRefreshIfNeeded_DBRereadFails(t *testing.T) {
+func TestRefreshIfNeeded_DBRereadFailsClosed(t *testing.T) {
 	account := &Account{ID: 8, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 	repo := &refreshAPIAccountRepo{
 		account:    nil, // GetByID returns nil
@@ -274,9 +284,48 @@ func TestRefreshIfNeeded_DBRereadFails(t *testing.T) {
 	api := NewOAuthRefreshAPI(repo, cache)
 	result, err := api.RefreshIfNeeded(context.Background(), account, executor, 3*time.Minute)
 
-	require.NoError(t, err)
-	require.True(t, result.Refreshed)
-	require.Equal(t, 1, executor.refreshCalls) // still refreshes using passed-in account
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "authoritative account")
+	require.Equal(t, 0, executor.refreshCalls)
+	require.Equal(t, 0, repo.updateCalls)
+	require.Equal(t, 1, cache.releaseCalls)
+}
+
+func TestRefreshIfNeeded_DBRereadReturnsNilFailsClosed(t *testing.T) {
+	account := &Account{ID: 81, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
+	repo := &refreshAPIAccountRepo{account: nil}
+	cache := &refreshAPICacheStub{lockResult: true}
+	executor := &refreshAPIExecutorStub{
+		needsRefresh: true,
+		credentials:  map[string]any{"access_token": "must-not-be-used"},
+	}
+
+	api := NewOAuthRefreshAPI(repo, cache)
+	result, err := api.RefreshIfNeeded(context.Background(), account, executor, 3*time.Minute)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "authoritative account")
+	require.Equal(t, 0, executor.refreshCalls)
+	require.Equal(t, 0, repo.updateCalls)
+	require.Equal(t, 1, cache.releaseCalls)
+}
+
+func TestRefreshIfNeeded_NilRepoFailsClosed(t *testing.T) {
+	account := &Account{ID: 82, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
+	executor := &refreshAPIExecutorStub{
+		needsRefresh: true,
+		credentials:  map[string]any{"access_token": "must-not-be-used"},
+	}
+
+	api := NewOAuthRefreshAPI(nil, nil)
+	result, err := api.RefreshIfNeeded(context.Background(), account, executor, 3*time.Minute)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "authoritative account")
+	require.Equal(t, 0, executor.refreshCalls)
 }
 
 func TestRefreshIfNeeded_NilCredentials(t *testing.T) {

@@ -281,14 +281,14 @@ describe('WechatCallbackView', () => {
     expect(locationState.current.href).toContain('mode=open')
   })
 
-  it('accepts the legacy fragment token success callback without pending-session exchange', async () => {
+  it('rejects a fragment token that is not backed by a pending browser session', async () => {
     locationState.current.hash =
       '#access_token=legacy-access-token&refresh_token=legacy-refresh-token&expires_in=3600&token_type=Bearer&redirect=%2Flegacy-dashboard'
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: locationState.current,
     })
-    setTokenMock.mockResolvedValue({})
+    exchangePendingOAuthCompletionMock.mockRejectedValue(new Error('pending session not found'))
 
     mount(WechatCallbackView, {
       global: {
@@ -303,12 +303,12 @@ describe('WechatCallbackView', () => {
 
     await flushPromises()
 
-    expect(exchangePendingOAuthCompletionMock).not.toHaveBeenCalled()
-    expect(setTokenMock).toHaveBeenCalledWith('legacy-access-token')
-    expect(localStorage.getItem('refresh_token')).toBe('legacy-refresh-token')
-    expect(localStorage.getItem('token_expires_at')).not.toBeNull()
-    expect(showSuccessMock).toHaveBeenCalledWith('Login success')
-    expect(replaceMock).toHaveBeenCalledWith('/legacy-dashboard')
+    expect(exchangePendingOAuthCompletionMock).toHaveBeenCalledTimes(1)
+    expect(setTokenMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('refresh_token')).toBeNull()
+    expect(localStorage.getItem('token_expires_at')).toBeNull()
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(replaceMock).not.toHaveBeenCalled()
   })
 
   it('accepts the legacy pending oauth invitation fragment without pending-session exchange', async () => {
@@ -433,7 +433,7 @@ describe('WechatCallbackView', () => {
     })
     expect(setTokenMock).toHaveBeenCalledWith('wechat-access-token')
     expect(replaceMock).toHaveBeenCalledWith('/dashboard')
-    expect(localStorage.getItem('refresh_token')).toBe('wechat-refresh-token')
+    expect(localStorage.getItem('refresh_token')).toBeNull()
   })
 
   it('supports bind completion after adoption confirmation', async () => {
@@ -1026,7 +1026,7 @@ describe('WechatCallbackView', () => {
     })
     expect(setTokenMock).toHaveBeenCalledWith('2fa-access-token')
     expect(replaceMock).toHaveBeenCalledWith('/profile')
-    expect(localStorage.getItem('refresh_token')).toBe('2fa-refresh-token')
+    expect(localStorage.getItem('refresh_token')).toBeNull()
   })
 
   it('restarts the current-user bind flow after returning from login', async () => {

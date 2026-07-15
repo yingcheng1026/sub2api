@@ -65,9 +65,10 @@ export async function create(
   ipBlacklist?: string[],
   quota?: number,
   expiresInDays?: number,
-  rateLimitData?: { rate_limit_5h?: number; rate_limit_1d?: number; rate_limit_7d?: number }
+  rateLimitData?: { rate_limit_5h?: number; rate_limit_1d?: number; rate_limit_7d?: number },
+  verification: string = ''
 ): Promise<ApiKey> {
-  const payload: CreateApiKeyRequest = { name }
+  const payload: CreateApiKeyRequest = { name, verification }
   if (groupId !== undefined) {
     payload.group_id = groupId
   }
@@ -131,13 +132,20 @@ export async function toggleStatus(id: number, status: 'active' | 'inactive'): P
   return update(id, { status })
 }
 
+/** Reveal one API key after fresh password/TOTP verification. */
+export async function reveal(id: number, verification: string): Promise<string> {
+  const { data } = await apiClient.post<{ api_key: string }>(`/keys/${id}/reveal`, { verification })
+  return data.api_key
+}
+
 export const keysAPI = {
   list,
   getById,
   create,
   update,
   delete: deleteKey,
-  toggleStatus
+  toggleStatus,
+  reveal
 }
 
 export default keysAPI

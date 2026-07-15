@@ -25,9 +25,6 @@ type PaymentWebhookHandler struct {
 // maxWebhookBodySize is the maximum allowed webhook request body size (1 MB).
 const maxWebhookBodySize = 1 << 20
 
-// webhookLogTruncateLen is the maximum length of raw body logged on verify failure.
-const webhookLogTruncateLen = 200
-
 // NewPaymentWebhookHandler creates a new PaymentWebhookHandler.
 func NewPaymentWebhookHandler(paymentService *service.PaymentService, registry *payment.Registry) *PaymentWebhookHandler {
 	return &PaymentWebhookHandler{
@@ -98,12 +95,9 @@ func (h *PaymentWebhookHandler) handleNotify(c *gin.Context, providerKey string)
 
 	resolvedProviderKey, notification, err := verifyNotificationWithProviders(c.Request.Context(), providers, rawBody, headers)
 	if err != nil {
-		truncatedBody := rawBody
-		if len(truncatedBody) > webhookLogTruncateLen {
-			truncatedBody = truncatedBody[:webhookLogTruncateLen] + "...(truncated)"
-		}
-		slog.Error("[Payment Webhook] verify failed", "provider", providerKey, "error", err, "method", c.Request.Method, "bodyLen", len(rawBody))
-		slog.Debug("[Payment Webhook] verify failed body", "provider", providerKey, "rawBody", truncatedBody)
+		attrs := webhookVerifyFailureLogAttributes(providerKey, c.Request.Method, len(rawBody))
+		attrs = append(attrs, "error", err)
+		slog.Error("[Payment Webhook] verify failed", attrs...)
 		c.String(http.StatusBadRequest, "verify failed")
 		return
 	}
@@ -135,6 +129,14 @@ func (h *PaymentWebhookHandler) handleNotify(c *gin.Context, providerKey string)
 	}
 
 	writeSuccessResponse(c, resolvedProviderKey)
+}
+
+func webhookVerifyFailureLogAttributes(providerKey, method string, bodyLen int) []any {
+	return []any{
+		"provider", providerKey,
+		"method", method,
+		"bodyLen", bodyLen,
+	}
 }
 
 // extractOutTradeNo parses the webhook body to find the out_trade_no.

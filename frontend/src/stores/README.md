@@ -22,7 +22,7 @@ Manages user authentication state, login/logout, and token persistence.
 - `login(credentials)` - Authenticate user with username/password
 - `register(userData)` - Register new user account
 - `logout()` - Clear authentication and logout
-- `checkAuth()` - Restore session from localStorage
+- `checkAuth()` - Restore the browser session through the HttpOnly refresh cookie
 - `refreshUser()` - Fetch latest user data from server
 
 ### 2. App Store (`app.ts`)
@@ -171,9 +171,9 @@ async function handleLogout() {
 
 ## Persistence
 
-- **Auth Store**: Token and user data are automatically persisted to `localStorage`
-  - Keys: `auth_token`, `auth_user`
-  - Restored on `checkAuth()` call
+- **Auth Store**: access tokens and user auth state are memory-only; refresh credentials are host-only HttpOnly cookies
+  - Legacy `auth_token`, `refresh_token`, `token_expires_at`, and `auth_user` keys are removed during startup
+  - `checkAuth()` rotates the cookie-backed session and reloads the current user
 - **App Store**: No persistence (UI state resets on page reload)
 
 ## TypeScript Support

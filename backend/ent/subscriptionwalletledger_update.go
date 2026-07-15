@@ -100,6 +100,33 @@ func (_u *SubscriptionWalletLedgerUpdate) SetNillableReason(v *string) *Subscrip
 	return _u
 }
 
+// SetPaymentOrderID sets the "payment_order_id" field.
+func (_u *SubscriptionWalletLedgerUpdate) SetPaymentOrderID(v int64) *SubscriptionWalletLedgerUpdate {
+	_u.mutation.ResetPaymentOrderID()
+	_u.mutation.SetPaymentOrderID(v)
+	return _u
+}
+
+// SetNillablePaymentOrderID sets the "payment_order_id" field if the given value is not nil.
+func (_u *SubscriptionWalletLedgerUpdate) SetNillablePaymentOrderID(v *int64) *SubscriptionWalletLedgerUpdate {
+	if v != nil {
+		_u.SetPaymentOrderID(*v)
+	}
+	return _u
+}
+
+// AddPaymentOrderID adds value to the "payment_order_id" field.
+func (_u *SubscriptionWalletLedgerUpdate) AddPaymentOrderID(v int64) *SubscriptionWalletLedgerUpdate {
+	_u.mutation.AddPaymentOrderID(v)
+	return _u
+}
+
+// ClearPaymentOrderID clears the value of the "payment_order_id" field.
+func (_u *SubscriptionWalletLedgerUpdate) ClearPaymentOrderID() *SubscriptionWalletLedgerUpdate {
+	_u.mutation.ClearPaymentOrderID()
+	return _u
+}
+
 // SetUsageLogID sets the "usage_log_id" field.
 func (_u *SubscriptionWalletLedgerUpdate) SetUsageLogID(v int64) *SubscriptionWalletLedgerUpdate {
 	_u.mutation.SetUsageLogID(v)
@@ -264,6 +291,15 @@ func (_u *SubscriptionWalletLedgerUpdate) sqlSave(ctx context.Context) (_node in
 	}
 	if value, ok := _u.mutation.Reason(); ok {
 		_spec.SetField(subscriptionwalletledger.FieldReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.PaymentOrderID(); ok {
+		_spec.SetField(subscriptionwalletledger.FieldPaymentOrderID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPaymentOrderID(); ok {
+		_spec.AddField(subscriptionwalletledger.FieldPaymentOrderID, field.TypeInt64, value)
+	}
+	if _u.mutation.PaymentOrderIDCleared() {
+		_spec.ClearField(subscriptionwalletledger.FieldPaymentOrderID, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.Notes(); ok {
 		_spec.SetField(subscriptionwalletledger.FieldNotes, field.TypeString, value)
@@ -445,6 +481,33 @@ func (_u *SubscriptionWalletLedgerUpdateOne) SetNillableReason(v *string) *Subsc
 	if v != nil {
 		_u.SetReason(*v)
 	}
+	return _u
+}
+
+// SetPaymentOrderID sets the "payment_order_id" field.
+func (_u *SubscriptionWalletLedgerUpdateOne) SetPaymentOrderID(v int64) *SubscriptionWalletLedgerUpdateOne {
+	_u.mutation.ResetPaymentOrderID()
+	_u.mutation.SetPaymentOrderID(v)
+	return _u
+}
+
+// SetNillablePaymentOrderID sets the "payment_order_id" field if the given value is not nil.
+func (_u *SubscriptionWalletLedgerUpdateOne) SetNillablePaymentOrderID(v *int64) *SubscriptionWalletLedgerUpdateOne {
+	if v != nil {
+		_u.SetPaymentOrderID(*v)
+	}
+	return _u
+}
+
+// AddPaymentOrderID adds value to the "payment_order_id" field.
+func (_u *SubscriptionWalletLedgerUpdateOne) AddPaymentOrderID(v int64) *SubscriptionWalletLedgerUpdateOne {
+	_u.mutation.AddPaymentOrderID(v)
+	return _u
+}
+
+// ClearPaymentOrderID clears the value of the "payment_order_id" field.
+func (_u *SubscriptionWalletLedgerUpdateOne) ClearPaymentOrderID() *SubscriptionWalletLedgerUpdateOne {
+	_u.mutation.ClearPaymentOrderID()
 	return _u
 }
 
@@ -642,6 +705,15 @@ func (_u *SubscriptionWalletLedgerUpdateOne) sqlSave(ctx context.Context) (_node
 	}
 	if value, ok := _u.mutation.Reason(); ok {
 		_spec.SetField(subscriptionwalletledger.FieldReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.PaymentOrderID(); ok {
+		_spec.SetField(subscriptionwalletledger.FieldPaymentOrderID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPaymentOrderID(); ok {
+		_spec.AddField(subscriptionwalletledger.FieldPaymentOrderID, field.TypeInt64, value)
+	}
+	if _u.mutation.PaymentOrderIDCleared() {
+		_spec.ClearField(subscriptionwalletledger.FieldPaymentOrderID, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.Notes(); ok {
 		_spec.SetField(subscriptionwalletledger.FieldNotes, field.TypeString, value)

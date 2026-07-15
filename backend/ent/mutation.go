@@ -112,6 +112,7 @@ type APIKeyMutation struct {
 	key_hash           *string
 	key_prefix         *string
 	name               *string
+	purpose            *string
 	status             *string
 	last_used_at       *time.Time
 	ip_whitelist       *[]string
@@ -561,6 +562,42 @@ func (m *APIKeyMutation) OldName(ctx context.Context) (v string, err error) {
 // ResetName resets all changes to the "name" field.
 func (m *APIKeyMutation) ResetName() {
 	m.name = nil
+}
+
+// SetPurpose sets the "purpose" field.
+func (m *APIKeyMutation) SetPurpose(s string) {
+	m.purpose = &s
+}
+
+// Purpose returns the value of the "purpose" field in the mutation.
+func (m *APIKeyMutation) Purpose() (r string, exists bool) {
+	v := m.purpose
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPurpose returns the old "purpose" field's value of the APIKey entity.
+// If the APIKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *APIKeyMutation) OldPurpose(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPurpose is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPurpose requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPurpose: %w", err)
+	}
+	return oldValue.Purpose, nil
+}
+
+// ResetPurpose resets all changes to the "purpose" field.
+func (m *APIKeyMutation) ResetPurpose() {
+	m.purpose = nil
 }
 
 // SetGroupID sets the "group_id" field.
@@ -1613,7 +1650,7 @@ func (m *APIKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *APIKeyMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 26)
 	if m.created_at != nil {
 		fields = append(fields, apikey.FieldCreatedAt)
 	}
@@ -1637,6 +1674,9 @@ func (m *APIKeyMutation) Fields() []string {
 	}
 	if m.name != nil {
 		fields = append(fields, apikey.FieldName)
+	}
+	if m.purpose != nil {
+		fields = append(fields, apikey.FieldPurpose)
 	}
 	if m.group != nil {
 		fields = append(fields, apikey.FieldGroupID)
@@ -1713,6 +1753,8 @@ func (m *APIKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.KeyPrefix()
 	case apikey.FieldName:
 		return m.Name()
+	case apikey.FieldPurpose:
+		return m.Purpose()
 	case apikey.FieldGroupID:
 		return m.GroupID()
 	case apikey.FieldStatus:
@@ -1772,6 +1814,8 @@ func (m *APIKeyMutation) OldField(ctx context.Context, name string) (ent.Value, 
 		return m.OldKeyPrefix(ctx)
 	case apikey.FieldName:
 		return m.OldName(ctx)
+	case apikey.FieldPurpose:
+		return m.OldPurpose(ctx)
 	case apikey.FieldGroupID:
 		return m.OldGroupID(ctx)
 	case apikey.FieldStatus:
@@ -1870,6 +1914,13 @@ func (m *APIKeyMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetName(v)
+		return nil
+	case apikey.FieldPurpose:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPurpose(v)
 		return nil
 	case apikey.FieldGroupID:
 		v, ok := value.(int64)
@@ -2224,6 +2275,9 @@ func (m *APIKeyMutation) ResetField(name string) error {
 		return nil
 	case apikey.FieldName:
 		m.ResetName()
+		return nil
+	case apikey.FieldPurpose:
+		m.ResetPurpose()
 		return nil
 	case apikey.FieldGroupID:
 		m.ResetGroupID()
@@ -32891,6 +32945,8 @@ type SubscriptionWalletLedgerMutation struct {
 	balance_after       *float64
 	addbalance_after    *float64
 	reason              *string
+	payment_order_id    *int64
+	addpayment_order_id *int64
 	notes               *string
 	created_at          *time.Time
 	clearedFields       map[string]struct{}
@@ -33185,6 +33241,76 @@ func (m *SubscriptionWalletLedgerMutation) OldReason(ctx context.Context) (v str
 // ResetReason resets all changes to the "reason" field.
 func (m *SubscriptionWalletLedgerMutation) ResetReason() {
 	m.reason = nil
+}
+
+// SetPaymentOrderID sets the "payment_order_id" field.
+func (m *SubscriptionWalletLedgerMutation) SetPaymentOrderID(i int64) {
+	m.payment_order_id = &i
+	m.addpayment_order_id = nil
+}
+
+// PaymentOrderID returns the value of the "payment_order_id" field in the mutation.
+func (m *SubscriptionWalletLedgerMutation) PaymentOrderID() (r int64, exists bool) {
+	v := m.payment_order_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPaymentOrderID returns the old "payment_order_id" field's value of the SubscriptionWalletLedger entity.
+// If the SubscriptionWalletLedger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SubscriptionWalletLedgerMutation) OldPaymentOrderID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPaymentOrderID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPaymentOrderID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPaymentOrderID: %w", err)
+	}
+	return oldValue.PaymentOrderID, nil
+}
+
+// AddPaymentOrderID adds i to the "payment_order_id" field.
+func (m *SubscriptionWalletLedgerMutation) AddPaymentOrderID(i int64) {
+	if m.addpayment_order_id != nil {
+		*m.addpayment_order_id += i
+	} else {
+		m.addpayment_order_id = &i
+	}
+}
+
+// AddedPaymentOrderID returns the value that was added to the "payment_order_id" field in this mutation.
+func (m *SubscriptionWalletLedgerMutation) AddedPaymentOrderID() (r int64, exists bool) {
+	v := m.addpayment_order_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearPaymentOrderID clears the value of the "payment_order_id" field.
+func (m *SubscriptionWalletLedgerMutation) ClearPaymentOrderID() {
+	m.payment_order_id = nil
+	m.addpayment_order_id = nil
+	m.clearedFields[subscriptionwalletledger.FieldPaymentOrderID] = struct{}{}
+}
+
+// PaymentOrderIDCleared returns if the "payment_order_id" field was cleared in this mutation.
+func (m *SubscriptionWalletLedgerMutation) PaymentOrderIDCleared() bool {
+	_, ok := m.clearedFields[subscriptionwalletledger.FieldPaymentOrderID]
+	return ok
+}
+
+// ResetPaymentOrderID resets all changes to the "payment_order_id" field.
+func (m *SubscriptionWalletLedgerMutation) ResetPaymentOrderID() {
+	m.payment_order_id = nil
+	m.addpayment_order_id = nil
+	delete(m.clearedFields, subscriptionwalletledger.FieldPaymentOrderID)
 }
 
 // SetUsageLogID sets the "usage_log_id" field.
@@ -33485,7 +33611,7 @@ func (m *SubscriptionWalletLedgerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *SubscriptionWalletLedgerMutation) Fields() []string {
-	fields := make([]string, 0, 8)
+	fields := make([]string, 0, 9)
 	if m.subscription != nil {
 		fields = append(fields, subscriptionwalletledger.FieldSubscriptionID)
 	}
@@ -33497,6 +33623,9 @@ func (m *SubscriptionWalletLedgerMutation) Fields() []string {
 	}
 	if m.reason != nil {
 		fields = append(fields, subscriptionwalletledger.FieldReason)
+	}
+	if m.payment_order_id != nil {
+		fields = append(fields, subscriptionwalletledger.FieldPaymentOrderID)
 	}
 	if m.usage_log != nil {
 		fields = append(fields, subscriptionwalletledger.FieldUsageLogID)
@@ -33526,6 +33655,8 @@ func (m *SubscriptionWalletLedgerMutation) Field(name string) (ent.Value, bool) 
 		return m.BalanceAfter()
 	case subscriptionwalletledger.FieldReason:
 		return m.Reason()
+	case subscriptionwalletledger.FieldPaymentOrderID:
+		return m.PaymentOrderID()
 	case subscriptionwalletledger.FieldUsageLogID:
 		return m.UsageLogID()
 	case subscriptionwalletledger.FieldOperatorID:
@@ -33551,6 +33682,8 @@ func (m *SubscriptionWalletLedgerMutation) OldField(ctx context.Context, name st
 		return m.OldBalanceAfter(ctx)
 	case subscriptionwalletledger.FieldReason:
 		return m.OldReason(ctx)
+	case subscriptionwalletledger.FieldPaymentOrderID:
+		return m.OldPaymentOrderID(ctx)
 	case subscriptionwalletledger.FieldUsageLogID:
 		return m.OldUsageLogID(ctx)
 	case subscriptionwalletledger.FieldOperatorID:
@@ -33596,6 +33729,13 @@ func (m *SubscriptionWalletLedgerMutation) SetField(name string, value ent.Value
 		}
 		m.SetReason(v)
 		return nil
+	case subscriptionwalletledger.FieldPaymentOrderID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPaymentOrderID(v)
+		return nil
 	case subscriptionwalletledger.FieldUsageLogID:
 		v, ok := value.(int64)
 		if !ok {
@@ -33638,6 +33778,9 @@ func (m *SubscriptionWalletLedgerMutation) AddedFields() []string {
 	if m.addbalance_after != nil {
 		fields = append(fields, subscriptionwalletledger.FieldBalanceAfter)
 	}
+	if m.addpayment_order_id != nil {
+		fields = append(fields, subscriptionwalletledger.FieldPaymentOrderID)
+	}
 	return fields
 }
 
@@ -33650,6 +33793,8 @@ func (m *SubscriptionWalletLedgerMutation) AddedField(name string) (ent.Value, b
 		return m.AddedDeltaUsd()
 	case subscriptionwalletledger.FieldBalanceAfter:
 		return m.AddedBalanceAfter()
+	case subscriptionwalletledger.FieldPaymentOrderID:
+		return m.AddedPaymentOrderID()
 	}
 	return nil, false
 }
@@ -33673,6 +33818,13 @@ func (m *SubscriptionWalletLedgerMutation) AddField(name string, value ent.Value
 		}
 		m.AddBalanceAfter(v)
 		return nil
+	case subscriptionwalletledger.FieldPaymentOrderID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPaymentOrderID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown SubscriptionWalletLedger numeric field %s", name)
 }
@@ -33681,6 +33833,9 @@ func (m *SubscriptionWalletLedgerMutation) AddField(name string, value ent.Value
 // mutation.
 func (m *SubscriptionWalletLedgerMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(subscriptionwalletledger.FieldPaymentOrderID) {
+		fields = append(fields, subscriptionwalletledger.FieldPaymentOrderID)
+	}
 	if m.FieldCleared(subscriptionwalletledger.FieldUsageLogID) {
 		fields = append(fields, subscriptionwalletledger.FieldUsageLogID)
 	}
@@ -33704,6 +33859,9 @@ func (m *SubscriptionWalletLedgerMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *SubscriptionWalletLedgerMutation) ClearField(name string) error {
 	switch name {
+	case subscriptionwalletledger.FieldPaymentOrderID:
+		m.ClearPaymentOrderID()
+		return nil
 	case subscriptionwalletledger.FieldUsageLogID:
 		m.ClearUsageLogID()
 		return nil
@@ -33732,6 +33890,9 @@ func (m *SubscriptionWalletLedgerMutation) ResetField(name string) error {
 		return nil
 	case subscriptionwalletledger.FieldReason:
 		m.ResetReason()
+		return nil
+	case subscriptionwalletledger.FieldPaymentOrderID:
+		m.ResetPaymentOrderID()
 		return nil
 	case subscriptionwalletledger.FieldUsageLogID:
 		m.ResetUsageLogID()
@@ -40138,6 +40299,16 @@ type UserMutation struct {
 	addtotal_recharged              *float64
 	rpm_limit                       *int
 	addrpm_limit                    *int
+	signup_ip                       *string
+	signup_ip_prefix                *string
+	signup_user_agent_hash          *string
+	signup_device_fingerprint_hash  *string
+	trial_bonus_eligible            *bool
+	trial_bonus_hold_reason         *string
+	trial_bonus_risk_score          *int
+	addtrial_bonus_risk_score       *int
+	token_version                   *int64
+	addtoken_version                *int64
 	clearedFields                   map[string]struct{}
 	api_keys                        map[int64]struct{}
 	removedapi_keys                 map[int64]struct{}
@@ -41288,6 +41459,334 @@ func (m *UserMutation) ResetRpmLimit() {
 	m.addrpm_limit = nil
 }
 
+// SetSignupIP sets the "signup_ip" field.
+func (m *UserMutation) SetSignupIP(s string) {
+	m.signup_ip = &s
+}
+
+// SignupIP returns the value of the "signup_ip" field in the mutation.
+func (m *UserMutation) SignupIP() (r string, exists bool) {
+	v := m.signup_ip
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSignupIP returns the old "signup_ip" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldSignupIP(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSignupIP is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSignupIP requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSignupIP: %w", err)
+	}
+	return oldValue.SignupIP, nil
+}
+
+// ResetSignupIP resets all changes to the "signup_ip" field.
+func (m *UserMutation) ResetSignupIP() {
+	m.signup_ip = nil
+}
+
+// SetSignupIPPrefix sets the "signup_ip_prefix" field.
+func (m *UserMutation) SetSignupIPPrefix(s string) {
+	m.signup_ip_prefix = &s
+}
+
+// SignupIPPrefix returns the value of the "signup_ip_prefix" field in the mutation.
+func (m *UserMutation) SignupIPPrefix() (r string, exists bool) {
+	v := m.signup_ip_prefix
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSignupIPPrefix returns the old "signup_ip_prefix" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldSignupIPPrefix(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSignupIPPrefix is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSignupIPPrefix requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSignupIPPrefix: %w", err)
+	}
+	return oldValue.SignupIPPrefix, nil
+}
+
+// ResetSignupIPPrefix resets all changes to the "signup_ip_prefix" field.
+func (m *UserMutation) ResetSignupIPPrefix() {
+	m.signup_ip_prefix = nil
+}
+
+// SetSignupUserAgentHash sets the "signup_user_agent_hash" field.
+func (m *UserMutation) SetSignupUserAgentHash(s string) {
+	m.signup_user_agent_hash = &s
+}
+
+// SignupUserAgentHash returns the value of the "signup_user_agent_hash" field in the mutation.
+func (m *UserMutation) SignupUserAgentHash() (r string, exists bool) {
+	v := m.signup_user_agent_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSignupUserAgentHash returns the old "signup_user_agent_hash" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldSignupUserAgentHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSignupUserAgentHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSignupUserAgentHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSignupUserAgentHash: %w", err)
+	}
+	return oldValue.SignupUserAgentHash, nil
+}
+
+// ResetSignupUserAgentHash resets all changes to the "signup_user_agent_hash" field.
+func (m *UserMutation) ResetSignupUserAgentHash() {
+	m.signup_user_agent_hash = nil
+}
+
+// SetSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field.
+func (m *UserMutation) SetSignupDeviceFingerprintHash(s string) {
+	m.signup_device_fingerprint_hash = &s
+}
+
+// SignupDeviceFingerprintHash returns the value of the "signup_device_fingerprint_hash" field in the mutation.
+func (m *UserMutation) SignupDeviceFingerprintHash() (r string, exists bool) {
+	v := m.signup_device_fingerprint_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSignupDeviceFingerprintHash returns the old "signup_device_fingerprint_hash" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldSignupDeviceFingerprintHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSignupDeviceFingerprintHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSignupDeviceFingerprintHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSignupDeviceFingerprintHash: %w", err)
+	}
+	return oldValue.SignupDeviceFingerprintHash, nil
+}
+
+// ResetSignupDeviceFingerprintHash resets all changes to the "signup_device_fingerprint_hash" field.
+func (m *UserMutation) ResetSignupDeviceFingerprintHash() {
+	m.signup_device_fingerprint_hash = nil
+}
+
+// SetTrialBonusEligible sets the "trial_bonus_eligible" field.
+func (m *UserMutation) SetTrialBonusEligible(b bool) {
+	m.trial_bonus_eligible = &b
+}
+
+// TrialBonusEligible returns the value of the "trial_bonus_eligible" field in the mutation.
+func (m *UserMutation) TrialBonusEligible() (r bool, exists bool) {
+	v := m.trial_bonus_eligible
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrialBonusEligible returns the old "trial_bonus_eligible" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldTrialBonusEligible(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrialBonusEligible is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrialBonusEligible requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrialBonusEligible: %w", err)
+	}
+	return oldValue.TrialBonusEligible, nil
+}
+
+// ResetTrialBonusEligible resets all changes to the "trial_bonus_eligible" field.
+func (m *UserMutation) ResetTrialBonusEligible() {
+	m.trial_bonus_eligible = nil
+}
+
+// SetTrialBonusHoldReason sets the "trial_bonus_hold_reason" field.
+func (m *UserMutation) SetTrialBonusHoldReason(s string) {
+	m.trial_bonus_hold_reason = &s
+}
+
+// TrialBonusHoldReason returns the value of the "trial_bonus_hold_reason" field in the mutation.
+func (m *UserMutation) TrialBonusHoldReason() (r string, exists bool) {
+	v := m.trial_bonus_hold_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrialBonusHoldReason returns the old "trial_bonus_hold_reason" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldTrialBonusHoldReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrialBonusHoldReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrialBonusHoldReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrialBonusHoldReason: %w", err)
+	}
+	return oldValue.TrialBonusHoldReason, nil
+}
+
+// ResetTrialBonusHoldReason resets all changes to the "trial_bonus_hold_reason" field.
+func (m *UserMutation) ResetTrialBonusHoldReason() {
+	m.trial_bonus_hold_reason = nil
+}
+
+// SetTrialBonusRiskScore sets the "trial_bonus_risk_score" field.
+func (m *UserMutation) SetTrialBonusRiskScore(i int) {
+	m.trial_bonus_risk_score = &i
+	m.addtrial_bonus_risk_score = nil
+}
+
+// TrialBonusRiskScore returns the value of the "trial_bonus_risk_score" field in the mutation.
+func (m *UserMutation) TrialBonusRiskScore() (r int, exists bool) {
+	v := m.trial_bonus_risk_score
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrialBonusRiskScore returns the old "trial_bonus_risk_score" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldTrialBonusRiskScore(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrialBonusRiskScore is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrialBonusRiskScore requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrialBonusRiskScore: %w", err)
+	}
+	return oldValue.TrialBonusRiskScore, nil
+}
+
+// AddTrialBonusRiskScore adds i to the "trial_bonus_risk_score" field.
+func (m *UserMutation) AddTrialBonusRiskScore(i int) {
+	if m.addtrial_bonus_risk_score != nil {
+		*m.addtrial_bonus_risk_score += i
+	} else {
+		m.addtrial_bonus_risk_score = &i
+	}
+}
+
+// AddedTrialBonusRiskScore returns the value that was added to the "trial_bonus_risk_score" field in this mutation.
+func (m *UserMutation) AddedTrialBonusRiskScore() (r int, exists bool) {
+	v := m.addtrial_bonus_risk_score
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTrialBonusRiskScore resets all changes to the "trial_bonus_risk_score" field.
+func (m *UserMutation) ResetTrialBonusRiskScore() {
+	m.trial_bonus_risk_score = nil
+	m.addtrial_bonus_risk_score = nil
+}
+
+// SetTokenVersion sets the "token_version" field.
+func (m *UserMutation) SetTokenVersion(i int64) {
+	m.token_version = &i
+	m.addtoken_version = nil
+}
+
+// TokenVersion returns the value of the "token_version" field in the mutation.
+func (m *UserMutation) TokenVersion() (r int64, exists bool) {
+	v := m.token_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTokenVersion returns the old "token_version" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldTokenVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTokenVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTokenVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTokenVersion: %w", err)
+	}
+	return oldValue.TokenVersion, nil
+}
+
+// AddTokenVersion adds i to the "token_version" field.
+func (m *UserMutation) AddTokenVersion(i int64) {
+	if m.addtoken_version != nil {
+		*m.addtoken_version += i
+	} else {
+		m.addtoken_version = &i
+	}
+}
+
+// AddedTokenVersion returns the value that was added to the "token_version" field in this mutation.
+func (m *UserMutation) AddedTokenVersion() (r int64, exists bool) {
+	v := m.addtoken_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTokenVersion resets all changes to the "token_version" field.
+func (m *UserMutation) ResetTokenVersion() {
+	m.token_version = nil
+	m.addtoken_version = nil
+}
+
 // AddAPIKeyIDs adds the "api_keys" edge to the APIKey entity by ids.
 func (m *UserMutation) AddAPIKeyIDs(ids ...int64) {
 	if m.api_keys == nil {
@@ -42024,7 +42523,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 31)
 	if m.created_at != nil {
 		fields = append(fields, user.FieldCreatedAt)
 	}
@@ -42094,6 +42593,30 @@ func (m *UserMutation) Fields() []string {
 	if m.rpm_limit != nil {
 		fields = append(fields, user.FieldRpmLimit)
 	}
+	if m.signup_ip != nil {
+		fields = append(fields, user.FieldSignupIP)
+	}
+	if m.signup_ip_prefix != nil {
+		fields = append(fields, user.FieldSignupIPPrefix)
+	}
+	if m.signup_user_agent_hash != nil {
+		fields = append(fields, user.FieldSignupUserAgentHash)
+	}
+	if m.signup_device_fingerprint_hash != nil {
+		fields = append(fields, user.FieldSignupDeviceFingerprintHash)
+	}
+	if m.trial_bonus_eligible != nil {
+		fields = append(fields, user.FieldTrialBonusEligible)
+	}
+	if m.trial_bonus_hold_reason != nil {
+		fields = append(fields, user.FieldTrialBonusHoldReason)
+	}
+	if m.trial_bonus_risk_score != nil {
+		fields = append(fields, user.FieldTrialBonusRiskScore)
+	}
+	if m.token_version != nil {
+		fields = append(fields, user.FieldTokenVersion)
+	}
 	return fields
 }
 
@@ -42148,6 +42671,22 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.TotalRecharged()
 	case user.FieldRpmLimit:
 		return m.RpmLimit()
+	case user.FieldSignupIP:
+		return m.SignupIP()
+	case user.FieldSignupIPPrefix:
+		return m.SignupIPPrefix()
+	case user.FieldSignupUserAgentHash:
+		return m.SignupUserAgentHash()
+	case user.FieldSignupDeviceFingerprintHash:
+		return m.SignupDeviceFingerprintHash()
+	case user.FieldTrialBonusEligible:
+		return m.TrialBonusEligible()
+	case user.FieldTrialBonusHoldReason:
+		return m.TrialBonusHoldReason()
+	case user.FieldTrialBonusRiskScore:
+		return m.TrialBonusRiskScore()
+	case user.FieldTokenVersion:
+		return m.TokenVersion()
 	}
 	return nil, false
 }
@@ -42203,6 +42742,22 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldTotalRecharged(ctx)
 	case user.FieldRpmLimit:
 		return m.OldRpmLimit(ctx)
+	case user.FieldSignupIP:
+		return m.OldSignupIP(ctx)
+	case user.FieldSignupIPPrefix:
+		return m.OldSignupIPPrefix(ctx)
+	case user.FieldSignupUserAgentHash:
+		return m.OldSignupUserAgentHash(ctx)
+	case user.FieldSignupDeviceFingerprintHash:
+		return m.OldSignupDeviceFingerprintHash(ctx)
+	case user.FieldTrialBonusEligible:
+		return m.OldTrialBonusEligible(ctx)
+	case user.FieldTrialBonusHoldReason:
+		return m.OldTrialBonusHoldReason(ctx)
+	case user.FieldTrialBonusRiskScore:
+		return m.OldTrialBonusRiskScore(ctx)
+	case user.FieldTokenVersion:
+		return m.OldTokenVersion(ctx)
 	}
 	return nil, fmt.Errorf("unknown User field %s", name)
 }
@@ -42373,6 +42928,62 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRpmLimit(v)
 		return nil
+	case user.FieldSignupIP:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSignupIP(v)
+		return nil
+	case user.FieldSignupIPPrefix:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSignupIPPrefix(v)
+		return nil
+	case user.FieldSignupUserAgentHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSignupUserAgentHash(v)
+		return nil
+	case user.FieldSignupDeviceFingerprintHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSignupDeviceFingerprintHash(v)
+		return nil
+	case user.FieldTrialBonusEligible:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrialBonusEligible(v)
+		return nil
+	case user.FieldTrialBonusHoldReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrialBonusHoldReason(v)
+		return nil
+	case user.FieldTrialBonusRiskScore:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrialBonusRiskScore(v)
+		return nil
+	case user.FieldTokenVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTokenVersion(v)
+		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)
 }
@@ -42396,6 +43007,12 @@ func (m *UserMutation) AddedFields() []string {
 	if m.addrpm_limit != nil {
 		fields = append(fields, user.FieldRpmLimit)
 	}
+	if m.addtrial_bonus_risk_score != nil {
+		fields = append(fields, user.FieldTrialBonusRiskScore)
+	}
+	if m.addtoken_version != nil {
+		fields = append(fields, user.FieldTokenVersion)
+	}
 	return fields
 }
 
@@ -42414,6 +43031,10 @@ func (m *UserMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedTotalRecharged()
 	case user.FieldRpmLimit:
 		return m.AddedRpmLimit()
+	case user.FieldTrialBonusRiskScore:
+		return m.AddedTrialBonusRiskScore()
+	case user.FieldTokenVersion:
+		return m.AddedTokenVersion()
 	}
 	return nil, false
 }
@@ -42457,6 +43078,20 @@ func (m *UserMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddRpmLimit(v)
+		return nil
+	case user.FieldTrialBonusRiskScore:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTrialBonusRiskScore(v)
+		return nil
+	case user.FieldTokenVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTokenVersion(v)
 		return nil
 	}
 	return fmt.Errorf("unknown User numeric field %s", name)
@@ -42592,6 +43227,30 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldRpmLimit:
 		m.ResetRpmLimit()
+		return nil
+	case user.FieldSignupIP:
+		m.ResetSignupIP()
+		return nil
+	case user.FieldSignupIPPrefix:
+		m.ResetSignupIPPrefix()
+		return nil
+	case user.FieldSignupUserAgentHash:
+		m.ResetSignupUserAgentHash()
+		return nil
+	case user.FieldSignupDeviceFingerprintHash:
+		m.ResetSignupDeviceFingerprintHash()
+		return nil
+	case user.FieldTrialBonusEligible:
+		m.ResetTrialBonusEligible()
+		return nil
+	case user.FieldTrialBonusHoldReason:
+		m.ResetTrialBonusHoldReason()
+		return nil
+	case user.FieldTrialBonusRiskScore:
+		m.ResetTrialBonusRiskScore()
+		return nil
+	case user.FieldTokenVersion:
+		m.ResetTokenVersion()
 		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)

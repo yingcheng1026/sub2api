@@ -340,6 +340,118 @@ func (_c *UserCreate) SetNillableRpmLimit(v *int) *UserCreate {
 	return _c
 }
 
+// SetSignupIP sets the "signup_ip" field.
+func (_c *UserCreate) SetSignupIP(v string) *UserCreate {
+	_c.mutation.SetSignupIP(v)
+	return _c
+}
+
+// SetNillableSignupIP sets the "signup_ip" field if the given value is not nil.
+func (_c *UserCreate) SetNillableSignupIP(v *string) *UserCreate {
+	if v != nil {
+		_c.SetSignupIP(*v)
+	}
+	return _c
+}
+
+// SetSignupIPPrefix sets the "signup_ip_prefix" field.
+func (_c *UserCreate) SetSignupIPPrefix(v string) *UserCreate {
+	_c.mutation.SetSignupIPPrefix(v)
+	return _c
+}
+
+// SetNillableSignupIPPrefix sets the "signup_ip_prefix" field if the given value is not nil.
+func (_c *UserCreate) SetNillableSignupIPPrefix(v *string) *UserCreate {
+	if v != nil {
+		_c.SetSignupIPPrefix(*v)
+	}
+	return _c
+}
+
+// SetSignupUserAgentHash sets the "signup_user_agent_hash" field.
+func (_c *UserCreate) SetSignupUserAgentHash(v string) *UserCreate {
+	_c.mutation.SetSignupUserAgentHash(v)
+	return _c
+}
+
+// SetNillableSignupUserAgentHash sets the "signup_user_agent_hash" field if the given value is not nil.
+func (_c *UserCreate) SetNillableSignupUserAgentHash(v *string) *UserCreate {
+	if v != nil {
+		_c.SetSignupUserAgentHash(*v)
+	}
+	return _c
+}
+
+// SetSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field.
+func (_c *UserCreate) SetSignupDeviceFingerprintHash(v string) *UserCreate {
+	_c.mutation.SetSignupDeviceFingerprintHash(v)
+	return _c
+}
+
+// SetNillableSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field if the given value is not nil.
+func (_c *UserCreate) SetNillableSignupDeviceFingerprintHash(v *string) *UserCreate {
+	if v != nil {
+		_c.SetSignupDeviceFingerprintHash(*v)
+	}
+	return _c
+}
+
+// SetTrialBonusEligible sets the "trial_bonus_eligible" field.
+func (_c *UserCreate) SetTrialBonusEligible(v bool) *UserCreate {
+	_c.mutation.SetTrialBonusEligible(v)
+	return _c
+}
+
+// SetNillableTrialBonusEligible sets the "trial_bonus_eligible" field if the given value is not nil.
+func (_c *UserCreate) SetNillableTrialBonusEligible(v *bool) *UserCreate {
+	if v != nil {
+		_c.SetTrialBonusEligible(*v)
+	}
+	return _c
+}
+
+// SetTrialBonusHoldReason sets the "trial_bonus_hold_reason" field.
+func (_c *UserCreate) SetTrialBonusHoldReason(v string) *UserCreate {
+	_c.mutation.SetTrialBonusHoldReason(v)
+	return _c
+}
+
+// SetNillableTrialBonusHoldReason sets the "trial_bonus_hold_reason" field if the given value is not nil.
+func (_c *UserCreate) SetNillableTrialBonusHoldReason(v *string) *UserCreate {
+	if v != nil {
+		_c.SetTrialBonusHoldReason(*v)
+	}
+	return _c
+}
+
+// SetTrialBonusRiskScore sets the "trial_bonus_risk_score" field.
+func (_c *UserCreate) SetTrialBonusRiskScore(v int) *UserCreate {
+	_c.mutation.SetTrialBonusRiskScore(v)
+	return _c
+}
+
+// SetNillableTrialBonusRiskScore sets the "trial_bonus_risk_score" field if the given value is not nil.
+func (_c *UserCreate) SetNillableTrialBonusRiskScore(v *int) *UserCreate {
+	if v != nil {
+		_c.SetTrialBonusRiskScore(*v)
+	}
+	return _c
+}
+
+// SetTokenVersion sets the "token_version" field.
+func (_c *UserCreate) SetTokenVersion(v int64) *UserCreate {
+	_c.mutation.SetTokenVersion(v)
+	return _c
+}
+
+// SetNillableTokenVersion sets the "token_version" field if the given value is not nil.
+func (_c *UserCreate) SetNillableTokenVersion(v *int64) *UserCreate {
+	if v != nil {
+		_c.SetTokenVersion(*v)
+	}
+	return _c
+}
+
 // AddAPIKeyIDs adds the "api_keys" edge to the APIKey entity by IDs.
 func (_c *UserCreate) AddAPIKeyIDs(ids ...int64) *UserCreate {
 	_c.mutation.AddAPIKeyIDs(ids...)
@@ -638,6 +750,38 @@ func (_c *UserCreate) defaults() error {
 		v := user.DefaultRpmLimit
 		_c.mutation.SetRpmLimit(v)
 	}
+	if _, ok := _c.mutation.SignupIP(); !ok {
+		v := user.DefaultSignupIP
+		_c.mutation.SetSignupIP(v)
+	}
+	if _, ok := _c.mutation.SignupIPPrefix(); !ok {
+		v := user.DefaultSignupIPPrefix
+		_c.mutation.SetSignupIPPrefix(v)
+	}
+	if _, ok := _c.mutation.SignupUserAgentHash(); !ok {
+		v := user.DefaultSignupUserAgentHash
+		_c.mutation.SetSignupUserAgentHash(v)
+	}
+	if _, ok := _c.mutation.SignupDeviceFingerprintHash(); !ok {
+		v := user.DefaultSignupDeviceFingerprintHash
+		_c.mutation.SetSignupDeviceFingerprintHash(v)
+	}
+	if _, ok := _c.mutation.TrialBonusEligible(); !ok {
+		v := user.DefaultTrialBonusEligible
+		_c.mutation.SetTrialBonusEligible(v)
+	}
+	if _, ok := _c.mutation.TrialBonusHoldReason(); !ok {
+		v := user.DefaultTrialBonusHoldReason
+		_c.mutation.SetTrialBonusHoldReason(v)
+	}
+	if _, ok := _c.mutation.TrialBonusRiskScore(); !ok {
+		v := user.DefaultTrialBonusRiskScore
+		_c.mutation.SetTrialBonusRiskScore(v)
+	}
+	if _, ok := _c.mutation.TokenVersion(); !ok {
+		v := user.DefaultTokenVersion
+		_c.mutation.SetTokenVersion(v)
+	}
 	return nil
 }
 
@@ -723,6 +867,60 @@ func (_c *UserCreate) check() error {
 	}
 	if _, ok := _c.mutation.RpmLimit(); !ok {
 		return &ValidationError{Name: "rpm_limit", err: errors.New(`ent: missing required field "User.rpm_limit"`)}
+	}
+	if _, ok := _c.mutation.SignupIP(); !ok {
+		return &ValidationError{Name: "signup_ip", err: errors.New(`ent: missing required field "User.signup_ip"`)}
+	}
+	if v, ok := _c.mutation.SignupIP(); ok {
+		if err := user.SignupIPValidator(v); err != nil {
+			return &ValidationError{Name: "signup_ip", err: fmt.Errorf(`ent: validator failed for field "User.signup_ip": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.SignupIPPrefix(); !ok {
+		return &ValidationError{Name: "signup_ip_prefix", err: errors.New(`ent: missing required field "User.signup_ip_prefix"`)}
+	}
+	if v, ok := _c.mutation.SignupIPPrefix(); ok {
+		if err := user.SignupIPPrefixValidator(v); err != nil {
+			return &ValidationError{Name: "signup_ip_prefix", err: fmt.Errorf(`ent: validator failed for field "User.signup_ip_prefix": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.SignupUserAgentHash(); !ok {
+		return &ValidationError{Name: "signup_user_agent_hash", err: errors.New(`ent: missing required field "User.signup_user_agent_hash"`)}
+	}
+	if v, ok := _c.mutation.SignupUserAgentHash(); ok {
+		if err := user.SignupUserAgentHashValidator(v); err != nil {
+			return &ValidationError{Name: "signup_user_agent_hash", err: fmt.Errorf(`ent: validator failed for field "User.signup_user_agent_hash": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.SignupDeviceFingerprintHash(); !ok {
+		return &ValidationError{Name: "signup_device_fingerprint_hash", err: errors.New(`ent: missing required field "User.signup_device_fingerprint_hash"`)}
+	}
+	if v, ok := _c.mutation.SignupDeviceFingerprintHash(); ok {
+		if err := user.SignupDeviceFingerprintHashValidator(v); err != nil {
+			return &ValidationError{Name: "signup_device_fingerprint_hash", err: fmt.Errorf(`ent: validator failed for field "User.signup_device_fingerprint_hash": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.TrialBonusEligible(); !ok {
+		return &ValidationError{Name: "trial_bonus_eligible", err: errors.New(`ent: missing required field "User.trial_bonus_eligible"`)}
+	}
+	if _, ok := _c.mutation.TrialBonusHoldReason(); !ok {
+		return &ValidationError{Name: "trial_bonus_hold_reason", err: errors.New(`ent: missing required field "User.trial_bonus_hold_reason"`)}
+	}
+	if v, ok := _c.mutation.TrialBonusHoldReason(); ok {
+		if err := user.TrialBonusHoldReasonValidator(v); err != nil {
+			return &ValidationError{Name: "trial_bonus_hold_reason", err: fmt.Errorf(`ent: validator failed for field "User.trial_bonus_hold_reason": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.TrialBonusRiskScore(); !ok {
+		return &ValidationError{Name: "trial_bonus_risk_score", err: errors.New(`ent: missing required field "User.trial_bonus_risk_score"`)}
+	}
+	if _, ok := _c.mutation.TokenVersion(); !ok {
+		return &ValidationError{Name: "token_version", err: errors.New(`ent: missing required field "User.token_version"`)}
+	}
+	if v, ok := _c.mutation.TokenVersion(); ok {
+		if err := user.TokenVersionValidator(v); err != nil {
+			return &ValidationError{Name: "token_version", err: fmt.Errorf(`ent: validator failed for field "User.token_version": %w`, err)}
+		}
 	}
 	return nil
 }
@@ -842,6 +1040,38 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RpmLimit(); ok {
 		_spec.SetField(user.FieldRpmLimit, field.TypeInt, value)
 		_node.RpmLimit = value
+	}
+	if value, ok := _c.mutation.SignupIP(); ok {
+		_spec.SetField(user.FieldSignupIP, field.TypeString, value)
+		_node.SignupIP = value
+	}
+	if value, ok := _c.mutation.SignupIPPrefix(); ok {
+		_spec.SetField(user.FieldSignupIPPrefix, field.TypeString, value)
+		_node.SignupIPPrefix = value
+	}
+	if value, ok := _c.mutation.SignupUserAgentHash(); ok {
+		_spec.SetField(user.FieldSignupUserAgentHash, field.TypeString, value)
+		_node.SignupUserAgentHash = value
+	}
+	if value, ok := _c.mutation.SignupDeviceFingerprintHash(); ok {
+		_spec.SetField(user.FieldSignupDeviceFingerprintHash, field.TypeString, value)
+		_node.SignupDeviceFingerprintHash = value
+	}
+	if value, ok := _c.mutation.TrialBonusEligible(); ok {
+		_spec.SetField(user.FieldTrialBonusEligible, field.TypeBool, value)
+		_node.TrialBonusEligible = value
+	}
+	if value, ok := _c.mutation.TrialBonusHoldReason(); ok {
+		_spec.SetField(user.FieldTrialBonusHoldReason, field.TypeString, value)
+		_node.TrialBonusHoldReason = value
+	}
+	if value, ok := _c.mutation.TrialBonusRiskScore(); ok {
+		_spec.SetField(user.FieldTrialBonusRiskScore, field.TypeInt, value)
+		_node.TrialBonusRiskScore = value
+	}
+	if value, ok := _c.mutation.TokenVersion(); ok {
+		_spec.SetField(user.FieldTokenVersion, field.TypeInt64, value)
+		_node.TokenVersion = value
 	}
 	if nodes := _c.mutation.APIKeysIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -1437,6 +1667,114 @@ func (u *UserUpsert) AddRpmLimit(v int) *UserUpsert {
 	return u
 }
 
+// SetSignupIP sets the "signup_ip" field.
+func (u *UserUpsert) SetSignupIP(v string) *UserUpsert {
+	u.Set(user.FieldSignupIP, v)
+	return u
+}
+
+// UpdateSignupIP sets the "signup_ip" field to the value that was provided on create.
+func (u *UserUpsert) UpdateSignupIP() *UserUpsert {
+	u.SetExcluded(user.FieldSignupIP)
+	return u
+}
+
+// SetSignupIPPrefix sets the "signup_ip_prefix" field.
+func (u *UserUpsert) SetSignupIPPrefix(v string) *UserUpsert {
+	u.Set(user.FieldSignupIPPrefix, v)
+	return u
+}
+
+// UpdateSignupIPPrefix sets the "signup_ip_prefix" field to the value that was provided on create.
+func (u *UserUpsert) UpdateSignupIPPrefix() *UserUpsert {
+	u.SetExcluded(user.FieldSignupIPPrefix)
+	return u
+}
+
+// SetSignupUserAgentHash sets the "signup_user_agent_hash" field.
+func (u *UserUpsert) SetSignupUserAgentHash(v string) *UserUpsert {
+	u.Set(user.FieldSignupUserAgentHash, v)
+	return u
+}
+
+// UpdateSignupUserAgentHash sets the "signup_user_agent_hash" field to the value that was provided on create.
+func (u *UserUpsert) UpdateSignupUserAgentHash() *UserUpsert {
+	u.SetExcluded(user.FieldSignupUserAgentHash)
+	return u
+}
+
+// SetSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field.
+func (u *UserUpsert) SetSignupDeviceFingerprintHash(v string) *UserUpsert {
+	u.Set(user.FieldSignupDeviceFingerprintHash, v)
+	return u
+}
+
+// UpdateSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field to the value that was provided on create.
+func (u *UserUpsert) UpdateSignupDeviceFingerprintHash() *UserUpsert {
+	u.SetExcluded(user.FieldSignupDeviceFingerprintHash)
+	return u
+}
+
+// SetTrialBonusEligible sets the "trial_bonus_eligible" field.
+func (u *UserUpsert) SetTrialBonusEligible(v bool) *UserUpsert {
+	u.Set(user.FieldTrialBonusEligible, v)
+	return u
+}
+
+// UpdateTrialBonusEligible sets the "trial_bonus_eligible" field to the value that was provided on create.
+func (u *UserUpsert) UpdateTrialBonusEligible() *UserUpsert {
+	u.SetExcluded(user.FieldTrialBonusEligible)
+	return u
+}
+
+// SetTrialBonusHoldReason sets the "trial_bonus_hold_reason" field.
+func (u *UserUpsert) SetTrialBonusHoldReason(v string) *UserUpsert {
+	u.Set(user.FieldTrialBonusHoldReason, v)
+	return u
+}
+
+// UpdateTrialBonusHoldReason sets the "trial_bonus_hold_reason" field to the value that was provided on create.
+func (u *UserUpsert) UpdateTrialBonusHoldReason() *UserUpsert {
+	u.SetExcluded(user.FieldTrialBonusHoldReason)
+	return u
+}
+
+// SetTrialBonusRiskScore sets the "trial_bonus_risk_score" field.
+func (u *UserUpsert) SetTrialBonusRiskScore(v int) *UserUpsert {
+	u.Set(user.FieldTrialBonusRiskScore, v)
+	return u
+}
+
+// UpdateTrialBonusRiskScore sets the "trial_bonus_risk_score" field to the value that was provided on create.
+func (u *UserUpsert) UpdateTrialBonusRiskScore() *UserUpsert {
+	u.SetExcluded(user.FieldTrialBonusRiskScore)
+	return u
+}
+
+// AddTrialBonusRiskScore adds v to the "trial_bonus_risk_score" field.
+func (u *UserUpsert) AddTrialBonusRiskScore(v int) *UserUpsert {
+	u.Add(user.FieldTrialBonusRiskScore, v)
+	return u
+}
+
+// SetTokenVersion sets the "token_version" field.
+func (u *UserUpsert) SetTokenVersion(v int64) *UserUpsert {
+	u.Set(user.FieldTokenVersion, v)
+	return u
+}
+
+// UpdateTokenVersion sets the "token_version" field to the value that was provided on create.
+func (u *UserUpsert) UpdateTokenVersion() *UserUpsert {
+	u.SetExcluded(user.FieldTokenVersion)
+	return u
+}
+
+// AddTokenVersion adds v to the "token_version" field.
+func (u *UserUpsert) AddTokenVersion(v int64) *UserUpsert {
+	u.Add(user.FieldTokenVersion, v)
+	return u
+}
+
 // UpdateNewValues updates the mutable fields using the new values that were set on create.
 // Using this option is equivalent to using:
 //
@@ -1864,6 +2202,132 @@ func (u *UserUpsertOne) AddRpmLimit(v int) *UserUpsertOne {
 func (u *UserUpsertOne) UpdateRpmLimit() *UserUpsertOne {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdateRpmLimit()
+	})
+}
+
+// SetSignupIP sets the "signup_ip" field.
+func (u *UserUpsertOne) SetSignupIP(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupIP(v)
+	})
+}
+
+// UpdateSignupIP sets the "signup_ip" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateSignupIP() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupIP()
+	})
+}
+
+// SetSignupIPPrefix sets the "signup_ip_prefix" field.
+func (u *UserUpsertOne) SetSignupIPPrefix(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupIPPrefix(v)
+	})
+}
+
+// UpdateSignupIPPrefix sets the "signup_ip_prefix" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateSignupIPPrefix() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupIPPrefix()
+	})
+}
+
+// SetSignupUserAgentHash sets the "signup_user_agent_hash" field.
+func (u *UserUpsertOne) SetSignupUserAgentHash(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupUserAgentHash(v)
+	})
+}
+
+// UpdateSignupUserAgentHash sets the "signup_user_agent_hash" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateSignupUserAgentHash() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupUserAgentHash()
+	})
+}
+
+// SetSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field.
+func (u *UserUpsertOne) SetSignupDeviceFingerprintHash(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupDeviceFingerprintHash(v)
+	})
+}
+
+// UpdateSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateSignupDeviceFingerprintHash() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupDeviceFingerprintHash()
+	})
+}
+
+// SetTrialBonusEligible sets the "trial_bonus_eligible" field.
+func (u *UserUpsertOne) SetTrialBonusEligible(v bool) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTrialBonusEligible(v)
+	})
+}
+
+// UpdateTrialBonusEligible sets the "trial_bonus_eligible" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateTrialBonusEligible() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTrialBonusEligible()
+	})
+}
+
+// SetTrialBonusHoldReason sets the "trial_bonus_hold_reason" field.
+func (u *UserUpsertOne) SetTrialBonusHoldReason(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTrialBonusHoldReason(v)
+	})
+}
+
+// UpdateTrialBonusHoldReason sets the "trial_bonus_hold_reason" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateTrialBonusHoldReason() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTrialBonusHoldReason()
+	})
+}
+
+// SetTrialBonusRiskScore sets the "trial_bonus_risk_score" field.
+func (u *UserUpsertOne) SetTrialBonusRiskScore(v int) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTrialBonusRiskScore(v)
+	})
+}
+
+// AddTrialBonusRiskScore adds v to the "trial_bonus_risk_score" field.
+func (u *UserUpsertOne) AddTrialBonusRiskScore(v int) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.AddTrialBonusRiskScore(v)
+	})
+}
+
+// UpdateTrialBonusRiskScore sets the "trial_bonus_risk_score" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateTrialBonusRiskScore() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTrialBonusRiskScore()
+	})
+}
+
+// SetTokenVersion sets the "token_version" field.
+func (u *UserUpsertOne) SetTokenVersion(v int64) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTokenVersion(v)
+	})
+}
+
+// AddTokenVersion adds v to the "token_version" field.
+func (u *UserUpsertOne) AddTokenVersion(v int64) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.AddTokenVersion(v)
+	})
+}
+
+// UpdateTokenVersion sets the "token_version" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateTokenVersion() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTokenVersion()
 	})
 }
 
@@ -2460,6 +2924,132 @@ func (u *UserUpsertBulk) AddRpmLimit(v int) *UserUpsertBulk {
 func (u *UserUpsertBulk) UpdateRpmLimit() *UserUpsertBulk {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdateRpmLimit()
+	})
+}
+
+// SetSignupIP sets the "signup_ip" field.
+func (u *UserUpsertBulk) SetSignupIP(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupIP(v)
+	})
+}
+
+// UpdateSignupIP sets the "signup_ip" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateSignupIP() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupIP()
+	})
+}
+
+// SetSignupIPPrefix sets the "signup_ip_prefix" field.
+func (u *UserUpsertBulk) SetSignupIPPrefix(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupIPPrefix(v)
+	})
+}
+
+// UpdateSignupIPPrefix sets the "signup_ip_prefix" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateSignupIPPrefix() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupIPPrefix()
+	})
+}
+
+// SetSignupUserAgentHash sets the "signup_user_agent_hash" field.
+func (u *UserUpsertBulk) SetSignupUserAgentHash(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupUserAgentHash(v)
+	})
+}
+
+// UpdateSignupUserAgentHash sets the "signup_user_agent_hash" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateSignupUserAgentHash() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupUserAgentHash()
+	})
+}
+
+// SetSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field.
+func (u *UserUpsertBulk) SetSignupDeviceFingerprintHash(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetSignupDeviceFingerprintHash(v)
+	})
+}
+
+// UpdateSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateSignupDeviceFingerprintHash() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateSignupDeviceFingerprintHash()
+	})
+}
+
+// SetTrialBonusEligible sets the "trial_bonus_eligible" field.
+func (u *UserUpsertBulk) SetTrialBonusEligible(v bool) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTrialBonusEligible(v)
+	})
+}
+
+// UpdateTrialBonusEligible sets the "trial_bonus_eligible" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateTrialBonusEligible() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTrialBonusEligible()
+	})
+}
+
+// SetTrialBonusHoldReason sets the "trial_bonus_hold_reason" field.
+func (u *UserUpsertBulk) SetTrialBonusHoldReason(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTrialBonusHoldReason(v)
+	})
+}
+
+// UpdateTrialBonusHoldReason sets the "trial_bonus_hold_reason" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateTrialBonusHoldReason() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTrialBonusHoldReason()
+	})
+}
+
+// SetTrialBonusRiskScore sets the "trial_bonus_risk_score" field.
+func (u *UserUpsertBulk) SetTrialBonusRiskScore(v int) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTrialBonusRiskScore(v)
+	})
+}
+
+// AddTrialBonusRiskScore adds v to the "trial_bonus_risk_score" field.
+func (u *UserUpsertBulk) AddTrialBonusRiskScore(v int) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.AddTrialBonusRiskScore(v)
+	})
+}
+
+// UpdateTrialBonusRiskScore sets the "trial_bonus_risk_score" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateTrialBonusRiskScore() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTrialBonusRiskScore()
+	})
+}
+
+// SetTokenVersion sets the "token_version" field.
+func (u *UserUpsertBulk) SetTokenVersion(v int64) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetTokenVersion(v)
+	})
+}
+
+// AddTokenVersion adds v to the "token_version" field.
+func (u *UserUpsertBulk) AddTokenVersion(v int64) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.AddTokenVersion(v)
+	})
+}
+
+// UpdateTokenVersion sets the "token_version" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateTokenVersion() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateTokenVersion()
 	})
 }
 

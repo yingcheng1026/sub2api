@@ -10,7 +10,19 @@
           />
           <WalletModelRouteList />
         </div>
-        <UserDashboardStats :stats="stats" :balance="user?.balance || 0" :is-simple="authStore.isSimpleMode" />
+        <div
+          v-if="walletLookupFailed"
+          data-hfc-wallet-status-unavailable
+          class="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+        >
+          {{ t('dashboard.walletStatusUnavailable') }}
+        </div>
+        <UserDashboardStats
+          :stats="stats"
+          :balance="user?.balance || 0"
+          :is-simple="authStore.isSimpleMode"
+          :hide-legacy-balance="hideLegacyBalance"
+        />
         <UserDashboardCharts v-model:startDate="startDate" v-model:endDate="endDate" v-model:granularity="granularity" :loading="loadingCharts" :trend="trendData" :models="modelStats" @dateRangeChange="loadCharts" @granularityChange="loadCharts" @refresh="refreshAll" />
         <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div class="lg:col-span-2"><UserDashboardRecentUsage :data="recentUsage" :loading="loadingUsage" /></div>
@@ -20,7 +32,6 @@
     </div>
     <RenewLiandongModal
       :show="renewModalSub !== null"
-      :subscription="renewModalSub"
       @close="closeRenewModal"
     />
   </AppLayout>
@@ -28,6 +39,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { usageAPI, type UserDashboardStats as UserStatsType } from '@/api/usage'
 import subscriptionsAPI from '@/api/subscriptions'
@@ -41,8 +53,10 @@ import WalletBalanceCard from '@/components/user/WalletBalanceCard.vue'
 import WalletModelRouteList from '@/components/user/WalletModelRouteList.vue'
 import RenewLiandongModal from '@/components/user/RenewLiandongModal.vue'
 import type { UsageLog, TrendDataPoint, ModelStat, UserSubscription } from '@/types'
+import { isActiveCreditsWallet } from '@/utils/subscriptionWallet'
 
 const authStore = useAuthStore()
+const { t } = useI18n()
 const user = computed(() => authStore.user)
 const stats = ref<UserStatsType | null>(null)
 const loading = ref(false)
@@ -52,6 +66,11 @@ const trendData = ref<TrendDataPoint[]>([])
 const modelStats = ref<ModelStat[]>([])
 const recentUsage = ref<UsageLog[]>([])
 const walletSubscription = ref<UserSubscription | null>(null)
+const walletLoading = ref(true)
+const walletLookupFailed = ref(false)
+const hideLegacyBalance = computed(
+  () => walletLoading.value || walletLookupFailed.value || walletSubscription.value !== null
+)
 const renewModalSub = ref<UserSubscription | null>(null)
 
 const formatLD = (d: Date) => d.toISOString().split('T')[0]
@@ -104,14 +123,17 @@ const loadRecent = async () => {
 }
 
 const loadWalletSubscription = async () => {
+  walletLoading.value = true
+  walletLookupFailed.value = false
   try {
     const subscriptions = await subscriptionsAPI.getActiveSubscriptions()
-    walletSubscription.value = subscriptions.find((sub) =>
-      sub.status === 'active' && sub.wallet_balance_usd != null
-    ) || null
+    walletSubscription.value = subscriptions.find(isActiveCreditsWallet) || null
   } catch (error) {
     console.error('Failed to load wallet subscription:', error)
     walletSubscription.value = null
+    walletLookupFailed.value = true
+  } finally {
+    walletLoading.value = false
   }
 }
 

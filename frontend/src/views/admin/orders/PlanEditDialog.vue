@@ -6,7 +6,7 @@
           <label class="input-label">{{ t('payment.admin.planName') }} <span class="text-red-500">*</span></label>
           <input v-model="planForm.name" type="text" class="input" required />
         </div>
-        <div v-if="!isWalletPlan">
+        <div v-if="planForm.plan_type !== 'credits'">
           <label class="input-label">{{ t('payment.admin.group') }} <span class="text-red-500">*</span></label>
           <Select v-model="planForm.group_id" :options="groupOptions" :placeholder="t('payment.admin.selectGroup')" class="w-full">
             <template #selected="{ option }">
@@ -152,7 +152,7 @@ const planForm = reactive({
   validity_unit: 'days',
   sort_order: 0,
   for_sale: true,
-  plan_type: 'subscription' as 'subscription' | 'credits',
+  plan_type: 'credits' as 'subscription' | 'credits',
   wallet_quota_usd: null as number | null,
   plan_group_ids: [] as number[],
 })
@@ -165,15 +165,10 @@ const validityUnitOptions = computed(() => [
 ])
 
 const planTypeOptions = computed(() => [
-  { value: 'subscription', label: t('payment.admin.planTypeSubscription') },
   { value: 'credits', label: t('payment.admin.planTypeCredits') },
 ])
 
-const planTypeHint = computed(() =>
-  planForm.plan_type === 'credits'
-    ? t('payment.admin.planTypeCreditsHint')
-    : t('payment.admin.planTypeSubscriptionHint'),
-)
+const planTypeHint = computed(() => t('payment.admin.planTypeCreditsHint'))
 
 const groupOptions = computed(() =>
   props.groups
@@ -215,13 +210,13 @@ watch(() => props.show, (visible) => {
       validity_unit: props.plan.validity_unit || 'days',
       sort_order: props.plan.sort_order || 0,
       for_sale: props.plan.for_sale,
-      plan_type: props.plan.plan_type || 'subscription',
+      plan_type: props.plan.plan_type || 'credits',
       wallet_quota_usd: props.plan.wallet_quota_usd ?? null,
       plan_group_ids: [...(props.plan.plan_group_ids || [])],
     })
     planFeaturesText.value = (props.plan.features || []).join('\n')
   } else {
-    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true, plan_type: 'subscription', wallet_quota_usd: null, plan_group_ids: [] })
+    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true, plan_type: 'credits', wallet_quota_usd: null, plan_group_ids: [] })
     planFeaturesText.value = ''
   }
 })
@@ -230,7 +225,7 @@ watch(() => props.show, (visible) => {
 function buildPlanPayload() {
   const features = planFeaturesText.value.split('\n').map(f => f.trim()).filter(Boolean).join('\n')
   // 额度卡永久有效，后端 expires_at = MaxExpiresAt（2099）；validity_days 字段仍写一个
-  // 远大于普通月卡的占位（36500 ≈ 100 年），让后端 NOT NULL CHECK 通过。
+  // 使用 36500 天占位，让后端 NOT NULL CHECK 通过；实际到账按长期额度处理。
   const isCredits = planForm.plan_type === 'credits'
   const walletQuota = Number(planForm.wallet_quota_usd || 0)
   return {
@@ -251,24 +246,16 @@ function buildPlanPayload() {
 }
 
 async function handleSavePlan() {
-  if (!isWalletPlan.value && !planForm.group_id) {
+  if (planForm.plan_type !== 'credits' && !isWalletPlan.value && !planForm.group_id) {
     appStore.showError(t('payment.admin.groupRequired'))
     return
   }
-  if (isWalletPlan.value && Number(planForm.wallet_quota_usd || 0) <= 0) {
+  if (planForm.plan_type === 'credits' && Number(planForm.wallet_quota_usd || 0) <= 0) {
     appStore.showError(t('payment.admin.walletQuotaRequired'))
-    return
-  }
-  if (isWalletPlan.value && planForm.plan_type === 'subscription' && !planForm.plan_group_ids.length) {
-    appStore.showError(t('payment.admin.coveredGroupsRequired'))
     return
   }
   if (!planForm.price || planForm.price <= 0) {
     appStore.showError(t('payment.admin.priceRequired'))
-    return
-  }
-  if (planForm.plan_type !== 'credits' && (!planForm.validity_days || planForm.validity_days < 1)) {
-    appStore.showError(t('payment.admin.validityDaysRequired'))
     return
   }
   saving.value = true

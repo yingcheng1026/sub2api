@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -28,11 +29,17 @@ func TestWalletRepo_Deduct_HappyPath(t *testing.T) {
 	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
 		WithArgs(int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(100.0))
+	mock.ExpectQuery("SELECT id, subscription_id, delta_usd").
+		WithArgs(usageLogID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "subscription_id", "delta_usd", "balance_after", "reason",
+			"payment_order_id", "usage_log_id", "operator_id", "notes",
+		}))
 	mock.ExpectExec("UPDATE user_subscriptions").
 		WithArgs(75.5, int64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("INSERT INTO subscription_wallet_ledger").
-		WithArgs(int64(42), -24.5, 75.5, "usage", sql.NullInt64{Int64: usageLogID, Valid: true}, sql.NullInt64{}, sql.NullString{}).
+		WithArgs(int64(42), -24.5, 75.5, "usage", sql.NullInt64{}, sql.NullInt64{Int64: usageLogID, Valid: true}, sql.NullInt64{}, sql.NullString{}).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(99)))
 	mock.ExpectCommit()
 
@@ -46,6 +53,103 @@ func TestWalletRepo_Deduct_HappyPath(t *testing.T) {
 	require.Equal(t, 75.5, entry.BalanceAfter)
 	require.Equal(t, -24.5, entry.DeltaUSD)
 	require.Equal(t, "usage", entry.Reason)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestWalletRepo_Deduct_ReplayReturnsOriginalLedgerWithoutSecondDebit(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	usageLogID := int64(7777)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(75.5))
+	mock.ExpectQuery("SELECT id, subscription_id, delta_usd").
+		WithArgs(usageLogID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "subscription_id", "delta_usd", "balance_after", "reason",
+			"payment_order_id", "usage_log_id", "operator_id", "notes",
+		}).AddRow(int64(99), int64(42), -24.5, 75.5, "usage", nil, usageLogID, nil, ""))
+	mock.ExpectCommit()
+
+	entry, err := repo.Deduct(context.Background(), service.WalletDeductCommand{
+		SubscriptionID: 42,
+		CostUSD:        99, // Retries keep the first committed amount authoritative.
+		UsageLogID:     &usageLogID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(99), entry.ID)
+	require.Equal(t, int64(42), entry.SubscriptionID)
+	require.InDelta(t, -24.5, entry.DeltaUSD, 0.000001)
+	require.InDelta(t, 75.5, entry.BalanceAfter, 0.000001)
+	require.Equal(t, &usageLogID, entry.UsageLogID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestWalletRepo_Deduct_RejectsUsageReplayAcrossSubscriptions(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	usageLogID := int64(7777)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(75.5))
+	mock.ExpectQuery("SELECT id, subscription_id, delta_usd").
+		WithArgs(usageLogID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "subscription_id", "delta_usd", "balance_after", "reason",
+			"payment_order_id", "usage_log_id", "operator_id", "notes",
+		}).AddRow(int64(99), int64(43), -24.5, 75.5, "usage", nil, usageLogID, nil, ""))
+	mock.ExpectRollback()
+
+	_, err := repo.Deduct(context.Background(), service.WalletDeductCommand{
+		SubscriptionID: 42,
+		CostUSD:        24.5,
+		UsageLogID:     &usageLogID,
+	})
+	require.ErrorContains(t, err, "another subscription")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestWalletRepo_Deduct_UniqueRaceRollsBackDebitAndReturnsWinner(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	usageLogID := int64(7777)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(100.0))
+	mock.ExpectQuery("SELECT id, subscription_id, delta_usd").
+		WithArgs(usageLogID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "subscription_id", "delta_usd", "balance_after", "reason",
+			"payment_order_id", "usage_log_id", "operator_id", "notes",
+		}))
+	mock.ExpectExec("UPDATE user_subscriptions").
+		WithArgs(75.5, int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO subscription_wallet_ledger").
+		WithArgs(int64(42), -24.5, 75.5, "usage", sql.NullInt64{}, sql.NullInt64{Int64: usageLogID, Valid: true}, sql.NullInt64{}, sql.NullString{}).
+		WillReturnError(&pq.Error{Code: "23505"})
+	mock.ExpectRollback()
+	mock.ExpectQuery("SELECT id, subscription_id, delta_usd").
+		WithArgs(usageLogID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "subscription_id", "delta_usd", "balance_after", "reason",
+			"payment_order_id", "usage_log_id", "operator_id", "notes",
+		}).AddRow(int64(101), int64(42), -24.5, 75.5, "usage", nil, usageLogID, nil, ""))
+
+	entry, err := repo.Deduct(context.Background(), service.WalletDeductCommand{
+		SubscriptionID: 42,
+		CostUSD:        24.5,
+		UsageLogID:     &usageLogID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(101), entry.ID)
+	require.InDelta(t, 75.5, entry.BalanceAfter, 0.000001)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -64,6 +168,33 @@ func TestWalletRepo_Deduct_InsufficientBalance(t *testing.T) {
 		CostUSD:        50.0,
 	})
 	require.ErrorIs(t, err, service.ErrWalletInsufficient)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestWalletRepo_Deduct_PostpaidSettlementPersistsFullDebt(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(10.0))
+	mock.ExpectExec("UPDATE user_subscriptions").
+		WithArgs(-40.0, int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO subscription_wallet_ledger").
+		WithArgs(int64(42), -50.0, -40.0, "usage", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullString{}).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(100)))
+	mock.ExpectCommit()
+
+	entry, err := repo.Deduct(context.Background(), service.WalletDeductCommand{
+		SubscriptionID:     42,
+		CostUSD:            50,
+		PostpaidSettlement: true,
+	})
+	require.NoError(t, err)
+	require.InDelta(t, -40, entry.BalanceAfter, 0.000001)
+	require.InDelta(t, -50, entry.DeltaUSD, 0.000001)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -128,7 +259,7 @@ func TestWalletRepo_Adjust_RefundIncreasesBalance(t *testing.T) {
 		WithArgs(70.0, int64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("INSERT INTO subscription_wallet_ledger").
-		WithArgs(int64(42), 20.0, 70.0, "refund", sql.NullInt64{}, sql.NullInt64{Int64: operatorID, Valid: true}, sql.NullString{String: "credited back", Valid: true}).
+		WithArgs(int64(42), 20.0, 70.0, "refund", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{Int64: operatorID, Valid: true}, sql.NullString{String: "credited back", Valid: true}).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(101)))
 	mock.ExpectCommit()
 
@@ -164,6 +295,32 @@ func TestWalletRepo_Adjust_NegativeDeltaCannotGoBelowZero(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestWalletRepo_Adjust_PositiveCreditCanReduceExistingWalletDebt(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(-2.0))
+	mock.ExpectExec("UPDATE user_subscriptions").
+		WithArgs(-1.0, int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO subscription_wallet_ledger").
+		WithArgs(int64(42), 1.0, -1.0, "refund", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullString{}).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(102)))
+	mock.ExpectCommit()
+
+	entry, err := repo.Adjust(context.Background(), service.WalletAdjustCommand{
+		SubscriptionID: 42,
+		DeltaUSD:       1.0,
+		Reason:         service.WalletLedgerReasonRefund,
+	})
+	require.NoError(t, err)
+	require.InDelta(t, -1.0, entry.BalanceAfter, 0.000001)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestWalletRepo_Adjust_BeginTxError(t *testing.T) {
 	// 触发 BeginTx 失败的回退路径：模拟 connection 错误。
 	repo, mock, db := newWalletRepoWithMock(t)
@@ -177,6 +334,56 @@ func TestWalletRepo_Adjust_BeginTxError(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "begin tx")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestWalletRepo_RecordActivation_AppendsLedgerWithoutAddingBalanceAgain(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	operatorID := int64(9)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT wallet_balance_usd, wallet_initial_usd").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd", "wallet_initial_usd"}).AddRow(100.0, 100.0))
+	mock.ExpectQuery("SELECT id, subscription_id, delta_usd").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "subscription_id", "delta_usd", "balance_after", "reason", "usage_log_id", "operator_id", "notes"}))
+	mock.ExpectQuery("INSERT INTO subscription_wallet_ledger").
+		WithArgs(int64(42), 100.0, 100.0, "activation", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{Int64: operatorID, Valid: true}, sql.NullString{String: "initial", Valid: true}).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(102)))
+	mock.ExpectCommit()
+
+	entry, err := repo.RecordActivation(context.Background(), service.WalletActivationCommand{
+		SubscriptionID: 42,
+		InitialUSD:     100,
+		OperatorID:     &operatorID,
+		Notes:          "initial",
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(102), entry.ID)
+	require.Equal(t, 100.0, entry.DeltaUSD)
+	require.Equal(t, 100.0, entry.BalanceAfter)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestWalletRepo_RecordActivation_IsIdempotent(t *testing.T) {
+	repo, mock, db := newWalletRepoWithMock(t)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT wallet_balance_usd, wallet_initial_usd").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd", "wallet_initial_usd"}).AddRow(100.0, 100.0))
+	mock.ExpectQuery("SELECT id, subscription_id, delta_usd").
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "subscription_id", "delta_usd", "balance_after", "reason", "usage_log_id", "operator_id", "notes"}).
+			AddRow(int64(102), int64(42), 100.0, 100.0, "activation", nil, nil, "initial"))
+	mock.ExpectCommit()
+
+	entry, err := repo.RecordActivation(context.Background(), service.WalletActivationCommand{SubscriptionID: 42, InitialUSD: 100})
+	require.NoError(t, err)
+	require.Equal(t, int64(102), entry.ID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -241,10 +448,10 @@ func TestWalletRepo_ListLedger_OrderedAndScanned(t *testing.T) {
 		WithArgs(int64(42), 50).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "subscription_id", "delta_usd", "balance_after", "reason",
-			"usage_log_id", "operator_id", "notes",
+			"payment_order_id", "usage_log_id", "operator_id", "notes",
 		}).
-			AddRow(int64(2), int64(42), -1.5, 8.5, "usage", int64(7), nil, "").
-			AddRow(int64(1), int64(42), 10.0, 10.0, "activation", nil, nil, ""))
+			AddRow(int64(2), int64(42), -1.5, 8.5, "usage", nil, int64(7), nil, "").
+			AddRow(int64(1), int64(42), 10.0, 10.0, "activation", nil, nil, nil, ""))
 
 	out, err := repo.ListLedger(context.Background(), 42, 50)
 	require.NoError(t, err)

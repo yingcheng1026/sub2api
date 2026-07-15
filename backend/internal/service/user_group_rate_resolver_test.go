@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"math"
+	"net/http"
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	gocache "github.com/patrickmn/go-cache"
 	"github.com/stretchr/testify/require"
 )
@@ -80,4 +83,29 @@ func TestGatewayServiceGetUserGroupRateMultiplier_FallbacksAndUsesExistingResolv
 	got := svc.getUserGroupRateMultiplier(context.Background(), 101, 202, 1.2)
 	require.Equal(t, rate, got)
 	require.Equal(t, 1, repo.calls)
+}
+
+type groupRPMOverflowRepoStub struct {
+	UserGroupRateRepository
+	syncCalled bool
+}
+
+func (s *groupRPMOverflowRepoStub) SyncGroupRPMOverrides(context.Context, int64, []GroupRPMOverrideInput) error {
+	s.syncCalled = true
+	return nil
+}
+
+func TestAdminServiceBatchSetGroupRPMOverridesRejectsPostgresIntegerOverflow(t *testing.T) {
+	repo := &groupRPMOverflowRepoStub{}
+	svc := &adminServiceImpl{userGroupRateRepo: repo}
+	overflow := int(math.MaxInt32) + 1
+
+	err := svc.BatchSetGroupRPMOverrides(context.Background(), 10, []GroupRPMOverrideInput{
+		{UserID: 20, RPMOverride: &overflow},
+	})
+
+	require.Error(t, err)
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Equal(t, "INVALID_RPM_OVERRIDE", infraerrors.Reason(err))
+	require.False(t, repo.syncCalled, "invalid input must be rejected before any repository write")
 }

@@ -59,15 +59,21 @@ func (s *PaymentOrderExpiryService) Stop() {
 }
 
 func (s *PaymentOrderExpiryService) runOnce() {
-	ctx, cancel := context.WithTimeout(context.Background(), expiryCheckTimeout)
-	defer cancel()
-
-	expired, err := s.paymentSvc.ExpireTimedOutOrders(ctx)
+	expiryCtx, cancelExpiry := context.WithTimeout(context.Background(), expiryCheckTimeout)
+	expired, err := s.paymentSvc.ExpireTimedOutOrders(expiryCtx)
+	cancelExpiry()
 	if err != nil {
 		slog.Error("[PaymentOrderExpiry] failed to expire orders", "error", err)
-		return
-	}
-	if expired > 0 {
+	} else if expired > 0 {
 		slog.Info("[PaymentOrderExpiry] expired timed-out orders", "count", expired)
+	}
+
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), expiryCheckTimeout)
+	recovered, err := s.paymentSvc.RecoverStaleFulfillments(recoveryCtx, defaultStaleRecoveryBatchSize)
+	cancelRecovery()
+	if err != nil {
+		slog.Error("[PaymentOrderExpiry] failed to recover stale fulfillments", "error", err)
+	} else if recovered > 0 {
+		slog.Info("[PaymentOrderExpiry] recovered stale fulfillments", "count", recovered)
 	}
 }

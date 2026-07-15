@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -155,7 +156,7 @@ func NewPricingService(cfg *config.Config, remoteClient PricingRemoteClient) *Pr
 // Initialize 初始化价格服务
 func (s *PricingService) Initialize() error {
 	// 确保数据目录存在
-	if err := os.MkdirAll(s.cfg.Pricing.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(s.cfg.Pricing.DataDir, 0o700); err != nil {
 		logger.LegacyPrintf("service.pricing", "[Pricing] Failed to create data directory: %v", err)
 	}
 
@@ -220,8 +221,10 @@ func (s *PricingService) checkAndUpdatePricing() error {
 		return s.downloadPricingData()
 	}
 
-	// 先加载本地文件（确保服务可用），再检查是否需要更新
-	if err := s.loadPricingData(pricingFile); err != nil {
+	// Only activate a cached download when its persisted SHA-256 sidecar still
+	// matches. If either file is missing or inconsistent, obtain a fresh signed-
+	// by-hash pair or fall back to the image-bundled pricing file.
+	if err := s.loadVerifiedLocalPricingData(pricingFile); err != nil {
 		logger.LegacyPrintf("service.pricing", "[Pricing] Failed to load local file, downloading: %v", err)
 		return s.downloadPricingData()
 	}
@@ -319,13 +322,12 @@ func (s *PricingService) downloadPricingData() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 获取远程哈希（用于同步锚点，不作为完整性校验）
-	var remoteHash string
-	if strings.TrimSpace(s.cfg.Pricing.HashURL) != "" {
-		remoteHash, err = s.fetchRemoteHash()
-		if err != nil {
-			logger.LegacyPrintf("service.pricing", "[Pricing] Failed to fetch remote hash (continuing): %v", err)
-		}
+	if strings.TrimSpace(s.cfg.Pricing.HashURL) == "" {
+		return fmt.Errorf("pricing.hash_url is required for verified remote pricing updates")
+	}
+	remoteHash, err := s.fetchRemoteHash()
+	if err != nil {
+		return fmt.Errorf("fetch remote pricing hash: %w", err)
 	}
 
 	body, err := s.remoteClient.FetchPricingJSON(ctx, remoteURL)
@@ -333,13 +335,10 @@ func (s *PricingService) downloadPricingData() error {
 		return fmt.Errorf("download failed: %w", err)
 	}
 
-	// 哈希校验：不匹配时仅告警，不阻止更新
-	// 远程哈希文件可能与数据文件不同步（如维护者更新了数据但未更新哈希文件）
 	dataHash := sha256.Sum256(body)
 	dataHashStr := hex.EncodeToString(dataHash[:])
-	if remoteHash != "" && !strings.EqualFold(remoteHash, dataHashStr) {
-		logger.LegacyPrintf("service.pricing", "[Pricing] Hash mismatch warning: remote=%s data=%s (hash file may be out of sync)",
-			remoteHash[:min(8, len(remoteHash))], dataHashStr[:8])
+	if !strings.EqualFold(remoteHash, dataHashStr) {
+		return fmt.Errorf("pricing hash mismatch: remote=%s data=%s", remoteHash[:8], dataHashStr[:8])
 	}
 
 	// 解析JSON数据（使用灵活的解析方式）
@@ -348,28 +347,22 @@ func (s *PricingService) downloadPricingData() error {
 		return fmt.Errorf("parse pricing data: %w", err)
 	}
 
-	// 保存到本地文件
-	pricingFile := s.getPricingFilePath()
-	if err := os.WriteFile(pricingFile, body, 0644); err != nil {
-		logger.LegacyPrintf("service.pricing", "[Pricing] Failed to save file: %v", err)
-	}
-
-	// 使用远程哈希作为同步锚点，防止重复下载
-	// 当远程哈希不可用时，回退到数据本身的哈希
-	syncHash := dataHashStr
-	if remoteHash != "" {
-		syncHash = remoteHash
-	}
+	// Persist the marker first and the verified data last. Both writes are
+	// atomic and private; a failed write never activates unpersisted prices.
 	hashFile := s.getHashFilePath()
-	if err := os.WriteFile(hashFile, []byte(syncHash+"\n"), 0644); err != nil {
-		logger.LegacyPrintf("service.pricing", "[Pricing] Failed to save hash: %v", err)
+	if err := writePrivateFileAtomically(hashFile, []byte(dataHashStr+"\n")); err != nil {
+		return fmt.Errorf("persist pricing hash: %w", err)
+	}
+	pricingFile := s.getPricingFilePath()
+	if err := writePrivateFileAtomically(pricingFile, body); err != nil {
+		return fmt.Errorf("persist pricing data: %w", err)
 	}
 
 	// 更新内存数据
 	s.mu.Lock()
 	s.pricingData = data
 	s.lastUpdated = time.Now()
-	s.localHash = syncHash
+	s.localHash = dataHashStr
 	s.mu.Unlock()
 
 	logger.LegacyPrintf("service.pricing", "[Pricing] Downloaded %d models successfully", len(data))
@@ -398,6 +391,9 @@ func (s *PricingService) parsePricingData(body []byte) (map[string]*LiteLLMModel
 		if err := json.Unmarshal(rawEntry, &entry); err != nil {
 			skipped++
 			continue
+		}
+		if err := validateNonNegativePricingEntry(modelName, &entry); err != nil {
+			return nil, err
 		}
 
 		// 只保留有有效价格的条目
@@ -463,6 +459,31 @@ func (s *PricingService) loadPricingData(filePath string) error {
 	if err != nil {
 		return fmt.Errorf("read file failed: %w", err)
 	}
+	return s.activatePricingData(filePath, data)
+}
+
+func (s *PricingService) loadVerifiedLocalPricingData(filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read local pricing file: %w", err)
+	}
+	hashText, err := os.ReadFile(s.getHashFilePath())
+	if err != nil {
+		return fmt.Errorf("read local pricing hash: %w", err)
+	}
+	expectedHash, err := normalizePricingSHA256(string(hashText))
+	if err != nil {
+		return fmt.Errorf("validate local pricing hash: %w", err)
+	}
+	actualSum := sha256.Sum256(data)
+	actualHash := hex.EncodeToString(actualSum[:])
+	if !strings.EqualFold(expectedHash, actualHash) {
+		return fmt.Errorf("local pricing hash mismatch: marker=%s data=%s", expectedHash[:8], actualHash[:8])
+	}
+	return s.activatePricingData(filePath, data)
+}
+
+func (s *PricingService) activatePricingData(filePath string, data []byte) error {
 
 	// 使用灵活的解析方式
 	pricingData, err := s.parsePricingData(data)
@@ -505,10 +526,18 @@ func (s *PricingService) useFallbackPricing() error {
 	if err != nil {
 		return fmt.Errorf("read fallback failed: %w", err)
 	}
+	if _, err := s.parsePricingData(data); err != nil {
+		return fmt.Errorf("parse fallback pricing data: %w", err)
+	}
 
 	pricingFile := s.getPricingFilePath()
-	if err := os.WriteFile(pricingFile, data, 0644); err != nil {
-		logger.LegacyPrintf("service.pricing", "[Pricing] Failed to copy fallback: %v", err)
+	hash := sha256.Sum256(data)
+	hashText := hex.EncodeToString(hash[:]) + "\n"
+	if err := writePrivateFileAtomically(s.getHashFilePath(), []byte(hashText)); err != nil {
+		return fmt.Errorf("persist fallback pricing hash: %w", err)
+	}
+	if err := writePrivateFileAtomically(pricingFile, data); err != nil {
+		return fmt.Errorf("persist fallback pricing data: %w", err)
 	}
 
 	return s.loadPricingData(fallbackFile)
@@ -528,21 +557,92 @@ func (s *PricingService) fetchRemoteHash() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(hash), nil
+	return normalizePricingSHA256(hash)
+}
+
+func normalizePricingSHA256(raw string) (string, error) {
+	hash := strings.ToLower(strings.TrimSpace(raw))
+	if len(hash) != sha256.Size*2 {
+		return "", fmt.Errorf("invalid remote pricing hash length: got %d, want %d", len(hash), sha256.Size*2)
+	}
+	decoded, err := hex.DecodeString(hash)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("invalid remote pricing hash: expected hexadecimal SHA-256")
+	}
+	return hash, nil
+}
+
+func validateNonNegativePricingEntry(modelName string, entry *LiteLLMRawEntry) error {
+	values := []struct {
+		name  string
+		value *float64
+	}{
+		{"input_cost_per_token", entry.InputCostPerToken},
+		{"input_cost_per_token_priority", entry.InputCostPerTokenPriority},
+		{"output_cost_per_token", entry.OutputCostPerToken},
+		{"output_cost_per_token_priority", entry.OutputCostPerTokenPriority},
+		{"cache_creation_input_token_cost", entry.CacheCreationInputTokenCost},
+		{"cache_creation_input_token_cost_above_1hr", entry.CacheCreationInputTokenCostAbove1hr},
+		{"cache_read_input_token_cost", entry.CacheReadInputTokenCost},
+		{"cache_read_input_token_cost_priority", entry.CacheReadInputTokenCostPriority},
+		{"output_cost_per_image", entry.OutputCostPerImage},
+		{"output_cost_per_image_token", entry.OutputCostPerImageToken},
+	}
+	for _, item := range values {
+		if item.value != nil && (*item.value < 0 || math.IsNaN(*item.value) || math.IsInf(*item.value, 0)) {
+			return fmt.Errorf("negative pricing value is not allowed: model=%q field=%s", modelName, item.name)
+		}
+	}
+	return nil
+}
+
+func writePrivateFileAtomically(path string, data []byte) (err error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func (s *PricingService) validatePricingURL(raw string) (string, error) {
-	if s.cfg != nil && !s.cfg.Security.URLAllowlist.Enabled {
-		normalized, err := urlvalidator.ValidateURLFormat(raw, s.cfg.Security.URLAllowlist.AllowInsecureHTTP)
+	if s.cfg == nil {
+		return "", fmt.Errorf("invalid pricing url: configuration is unavailable")
+	}
+	urlPolicy := s.cfg.Security.URLAllowlist
+	if !urlPolicy.Enabled {
+		normalized, err := urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
+			AllowPrivate: urlPolicy.AllowPrivateHosts,
+		})
 		if err != nil {
 			return "", fmt.Errorf("invalid pricing url: %w", err)
 		}
 		return normalized, nil
 	}
 	normalized, err := urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
-		AllowedHosts:     s.cfg.Security.URLAllowlist.PricingHosts,
+		AllowedHosts:     urlPolicy.PricingHosts,
 		RequireAllowlist: true,
-		AllowPrivate:     s.cfg.Security.URLAllowlist.AllowPrivateHosts,
+		AllowPrivate:     urlPolicy.AllowPrivateHosts,
 	})
 	if err != nil {
 		return "", fmt.Errorf("invalid pricing url: %w", err)

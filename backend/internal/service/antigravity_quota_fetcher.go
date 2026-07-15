@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -235,6 +236,25 @@ func classifyForbiddenType(body string) string {
 // urlPattern 用于从 403 响应体中提取 URL（降级方案）
 var urlPattern = regexp.MustCompile(`https://[^\s"'\\]+`)
 
+var trustedAntigravityValidationHosts = map[string]struct{}{
+	"accounts.google.com": {},
+	"support.google.com":  {},
+}
+
+func normalizeAntigravityValidationURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil {
+		return ""
+	}
+	if _, ok := trustedAntigravityValidationHosts[strings.ToLower(parsed.Hostname())]; !ok {
+		return ""
+	}
+	if parsed.Port() != "" && parsed.Port() != "443" {
+		return ""
+	}
+	return parsed.String()
+}
+
 // extractValidationURL 从 403 响应 JSON 中提取验证/申诉链接
 func extractValidationURL(body string) string {
 	// 1. 尝试结构化 JSON 提取: /error/details[*]/metadata/validation_url 或 appeal_url
@@ -247,10 +267,10 @@ func extractValidationURL(body string) string {
 	}
 	if json.Unmarshal([]byte(body), &parsed) == nil {
 		for _, detail := range parsed.Error.Details {
-			if u := detail.Metadata["validation_url"]; u != "" {
+			if u := normalizeAntigravityValidationURL(detail.Metadata["validation_url"]); u != "" {
 				return u
 			}
-			if u := detail.Metadata["appeal_url"]; u != "" {
+			if u := normalizeAntigravityValidationURL(detail.Metadata["appeal_url"]); u != "" {
 				return u
 			}
 		}
@@ -266,7 +286,7 @@ func extractValidationURL(body string) string {
 	// 先解码常见转义再匹配
 	normalized := strings.ReplaceAll(body, `\u0026`, "&")
 	if m := urlPattern.FindString(normalized); m != "" {
-		return m
+		return normalizeAntigravityValidationURL(m)
 	}
 	return ""
 }

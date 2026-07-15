@@ -156,8 +156,13 @@ Nginx 默认会丢弃名称中含下划线的请求头（如 `session_id`），�
 
 #### 安装步骤
 
+只能从已审查的仓库提交或发布包运行安装脚本；脚本会拒绝 `curl | bash` 输入。
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api
+git checkout <已审查的标签或提交>
+sudo bash deploy/install.sh
 ```
 
 脚本会自动：
@@ -176,8 +181,9 @@ sudo systemctl start sub2api
 # 2. 设置开机自启
 sudo systemctl enable sub2api
 
-# 3. 在浏览器中打开设置向导
-# http://你的服务器IP:8080
+# 3. 从本机转发只监听服务器回环地址的设置向导
+ssh -L 18080:127.0.0.1:8080 用户名@服务器IP
+# 然后打开 http://127.0.0.1:18080
 ```
 
 设置向导将引导你完成：
@@ -187,12 +193,9 @@ sudo systemctl enable sub2api
 
 #### 升级
 
-可以直接在 **管理后台** 左上角点击 **检测更新** 按钮进行在线升级。
-
-网页升级功能支持：
-- 自动检测新版本
-- 一键下载并应用更新
-- 支持回滚
+本二改版可以检查上游版本，但默认禁止应用更新和回滚。必须保持
+`SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED=false`，直到该确切上游版本通过兼容性门禁、
+备份、恢复演练和受控发布后，才可考虑开启。
 
 #### 常用命令
 
@@ -206,8 +209,8 @@ sudo journalctl -u sub2api -f
 # 重启服务
 sudo systemctl restart sub2api
 
-# 卸载
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+# 从同一份已审查代码卸载
+sudo bash deploy/install.sh uninstall -y
 ```
 
 ---
@@ -223,14 +226,13 @@ curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install
 
 #### 快速开始（一键部署）
 
-使用自动化部署脚本快速搭建：
+从经过审查的仓库提交或发布包运行部署脚本；不再支持从可变分支直接 `curl | bash`。
 
 ```bash
-# 创建部署目录
-mkdir -p sub2api-deploy && cd sub2api-deploy
-
-# 下载并运行部署准备脚本
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+# 克隆经过审查的版本并运行本地脚本
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api/deploy
+bash docker-deploy.sh
 
 # 启动服务
 docker compose up -d
@@ -240,11 +242,11 @@ docker compose logs -f sub2api
 ```
 
 **脚本功能：**
-- 下载 `docker-compose.local.yml`（本地保存为 `docker-compose.yml`）和 `.env.example`
-- 自动生成安全凭证（JWT_SECRET、TOTP_ENCRYPTION_KEY、POSTGRES_PASSWORD）
+- 仅复制脚本同目录下经过审查的 Compose 和环境模板
+- 分别生成 JWT、TOTP、支付恢复、PostgreSQL、Redis 和管理员凭证
 - 创建 `.env` 文件并填充自动生成的密钥
 - 创建数据目录（使用本地目录，便于备份和迁移）
-- 显示生成的凭证供你记录
+- 凭证仅写入权限为 0600 的 `.env`，不会打印到终端或日志
 
 #### 手动部署
 
@@ -268,15 +270,41 @@ nano .env
 # PostgreSQL 密码（必需）
 POSTGRES_PASSWORD=your_secure_password_here
 
-# JWT 密钥（推荐 - 重启后保持用户登录状态）
+# Redis 密码（必需；必须与其他密钥不同）
+REDIS_PASSWORD=your_redis_password_here
+
+# JWT 密钥（必需 - 重启后保持用户登录状态）
 JWT_SECRET=your_jwt_secret_here
 
-# TOTP 加密密钥（推荐 - 重启后保留双因素认证）
-TOTP_ENCRYPTION_KEY=your_totp_key_here
+# 旧 v1/v2 迁移根密钥（迁移完成后移除）
+TOTP_ENCRYPTION_KEY=
 
-# 可选：管理员账号
+# 应用秘密域独立根密钥（必需；每个值必须单独生成）
+SECRET_ENCRYPTION_TOTP_SECRET_KEY=your_totp_secret_key_here
+SECRET_ENCRYPTION_TOTP_CACHE_KEY=your_totp_cache_key_here
+SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=your_account_credential_key_here
+SECRET_ENCRYPTION_BACKUP_S3_KEY=your_backup_s3_key_here
+SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=your_content_moderation_key_here
+SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=your_channel_monitor_key_here
+SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=your_payment_provider_key_here
+SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=your_proxy_credential_key_here
+SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=your_scheduler_cache_key_here
+SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=your_oauth_token_cache_key_here
+SECRET_ENCRYPTION_JWT_HMAC_KEY=your_jwt_hmac_encryption_key_here
+SECRET_ENCRYPTION_SETTING_SECRET_KEY=your_setting_secret_encryption_key_here
+
+# 用户 API Key 保护主密钥（必需；必须独立）
+API_KEY_ENCRYPTION_KEY=your_api_key_encryption_key_here
+
+# 支付恢复签名密钥（必需；必须独立）
+PAYMENT_RESUME_SIGNING_KEY=your_payment_resume_key_here
+
+# 管理员密码（必需）
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=your_admin_password
+
+# 二改版默认禁止应用官方在线更新
+SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED=false
 
 # 可选：自定义端口
 SERVER_PORT=8080
@@ -287,7 +315,19 @@ SERVER_PORT=8080
 # 生成 JWT_SECRET
 openssl rand -hex 32
 
-# 生成 TOTP_ENCRYPTION_KEY
+# 分别生成每个 SECRET_ENCRYPTION_* 密钥；仅升级旧部署时保留原迁移密钥
+openssl rand -hex 32
+
+# 生成 API_KEY_ENCRYPTION_KEY
+openssl rand -hex 32
+
+# 生成 PAYMENT_RESUME_SIGNING_KEY
+openssl rand -hex 32
+
+# 生成 REDIS_PASSWORD
+openssl rand -hex 32
+
+# 生成 ADMIN_PASSWORD
 openssl rand -hex 32
 
 # 生成 POSTGRES_PASSWORD
@@ -337,10 +377,7 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 在浏览器中打开 `http://你的服务器IP:8080`
 
-如果管理员密码是自动生成的，在日志中查找：
-```bash
-docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
-```
+管理员密码必须在启动前配置，服务不会把密码打印到日志。内置部署脚本只会将其写入权限为 0600 的 `.env`。
 
 #### 升级
 
@@ -509,20 +546,22 @@ gateway:
 
 **⚠️ 安全警告：HTTP URL 配置**
 
-上游账号 `base_url` 只做最小 URL 校验，不再走主机白名单。HTTP URL 由 `security.url_allowlist.allow_insecure_http` 控制；公开不可信部署建议保持 `false`，只有开发环境或可信内网上游才设为 `true`：
+上游账号 `base_url` 不强制主机白名单，可使用任意公网主机，但默认拒绝私网/保留地址与 DNS rebinding。公开部署应把两个不安全开关都保持为 `false`：
 
 ```yaml
 security:
   url_allowlist:
     enabled: false                # 禁用价格数据/CRS 白名单检查
-    allow_insecure_http: true     # 允许 HTTP URL（⚠️ 不安全）
+    allow_private_hosts: false    # 只允许公网目标（安全默认值）
+    allow_insecure_http: false    # 强制 HTTPS（安全默认值）
 ```
 
 **或通过环境变量：**
 
 ```bash
 SECURITY_URL_ALLOWLIST_ENABLED=false
-SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true
+SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=false
+SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=false
 ```
 
 **允许 HTTP 的风险：**

@@ -17,7 +17,6 @@ import (
 	openaipkg "github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
@@ -242,17 +241,14 @@ type ClaudeUsageResponse struct {
 
 // ClaudeUsageFetchOptions 包含获取 Claude 用量数据所需的所有选项
 type ClaudeUsageFetchOptions struct {
-	AccessToken string                  // OAuth access token
-	ProxyURL    string                  // 代理 URL（可选）
-	AccountID   int64                   // 账号 ID（用于连接池隔离）
-	TLSProfile  *tlsfingerprint.Profile // TLS 指纹 Profile（nil 表示不启用）
-	Fingerprint *Fingerprint            // 缓存的指纹信息（User-Agent 等）
+	AccessToken string // OAuth access token
+	ProxyURL    string // 代理 URL（可选）
 }
 
 // ClaudeUsageFetcher fetches usage data from Anthropic OAuth API
 type ClaudeUsageFetcher interface {
 	FetchUsage(ctx context.Context, accessToken, proxyURL string) (*ClaudeUsageResponse, error)
-	// FetchUsageWithOptions 使用完整选项获取用量数据，支持 TLS 指纹和自定义 User-Agent
+	// FetchUsageWithOptions 获取用量数据；调用方不能提供官方客户端指纹。
 	FetchUsageWithOptions(ctx context.Context, opts *ClaudeUsageFetchOptions) (*ClaudeUsageResponse, error)
 }
 
@@ -265,7 +261,6 @@ type AccountUsageService struct {
 	antigravityQuotaFetcher *AntigravityQuotaFetcher
 	cache                   *UsageCache
 	identityCache           IdentityCache
-	tlsFPProfileService     *TLSFingerprintProfileService
 }
 
 // NewAccountUsageService 创建AccountUsageService实例
@@ -287,7 +282,6 @@ func NewAccountUsageService(
 		antigravityQuotaFetcher: antigravityQuotaFetcher,
 		cache:                   cache,
 		identityCache:           identityCache,
-		tlsFPProfileService:     tlsFPProfileService,
 	}
 }
 
@@ -1210,9 +1204,9 @@ func (s *AccountUsageService) GetAccountUsageStats(ctx context.Context, accountI
 	return stats, nil
 }
 
-// fetchOAuthUsageRaw 从 Anthropic API 获取原始响应（不构建 UsageInfo）
-// 如果账号开启了 TLS 指纹，则使用 TLS 指纹伪装
-// 如果有缓存的 Fingerprint，则使用缓存的 User-Agent 等信息
+// fetchOAuthUsageRaw 从 Anthropic API 获取原始响应（不构建 UsageInfo）。
+// Account-management traffic uses a truthful sub2api identity and never
+// reuses a cached Claude Code fingerprint or TLS profile.
 func (s *AccountUsageService) fetchOAuthUsageRaw(ctx context.Context, account *Account) (*ClaudeUsageResponse, error) {
 	accessToken := account.GetCredential("access_token")
 	if accessToken == "" {
@@ -1224,19 +1218,9 @@ func (s *AccountUsageService) fetchOAuthUsageRaw(ctx context.Context, account *A
 		proxyURL = account.Proxy.URL()
 	}
 
-	// 构建完整的选项
 	opts := &ClaudeUsageFetchOptions{
 		AccessToken: accessToken,
 		ProxyURL:    proxyURL,
-		AccountID:   account.ID,
-		TLSProfile:  s.tlsFPProfileService.ResolveTLSProfile(account),
-	}
-
-	// 尝试获取缓存的 Fingerprint（包含 User-Agent 等信息）
-	if s.identityCache != nil {
-		if fp, err := s.identityCache.GetFingerprint(ctx, account.ID); err == nil && fp != nil {
-			opts.Fingerprint = fp
-		}
 	}
 
 	return s.usageFetcher.FetchUsageWithOptions(ctx, opts)

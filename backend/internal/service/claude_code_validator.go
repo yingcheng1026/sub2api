@@ -10,8 +10,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
-// ClaudeCodeValidator 验证请求是否来自 Claude Code 客户端
-// 完全学习自 claude-relay-service 项目的验证逻辑
+// ClaudeCodeValidator classifies Claude Code-shaped requests for routing and
+// UX compatibility. Every signal it reads is downstream-controlled, so this is
+// not provenance authentication and must never unlock provider credentials.
 type ClaudeCodeValidator struct{}
 
 var (
@@ -52,8 +53,7 @@ func NewClaudeCodeValidator() *ClaudeCodeValidator {
 	return &ClaudeCodeValidator{}
 }
 
-// Validate 验证请求是否来自 Claude Code CLI
-// 采用与 claude-relay-service 完全一致的验证策略：
+// Validate applies the compatibility-shape heuristic:
 //
 //	Step 1: User-Agent 检查 (必需) - 必须是 claude-cli/x.x.x
 //	Step 2: 对于非 messages 路径，只要 UA 匹配就通过
@@ -80,7 +80,7 @@ func (v *ClaudeCodeValidator) Validate(r *http.Request, body map[string]any) boo
 	// Step 3: 检查 max_tokens=1 + haiku 探测请求绕过
 	// 这类请求用于 Claude Code 验证 API 连通性，不携带 system prompt
 	if isMaxTokensOneHaiku, ok := IsMaxTokensOneHaikuRequestFromContext(r.Context()); ok && isMaxTokensOneHaiku {
-		return true // 绕过 system prompt 检查，UA 已在 Step 1 验证
+		return true // routing heuristic only; not an authentication result
 	}
 
 	// Step 4: messages 路径，进行严格验证

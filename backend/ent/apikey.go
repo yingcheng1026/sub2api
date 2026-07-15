@@ -28,14 +28,16 @@ type APIKey struct {
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 	// UserID holds the value of the "user_id" field.
 	UserID int64 `json:"user_id,omitempty"`
-	// Key holds the value of the "key" field.
-	Key string `json:"key,omitempty"`
-	// SHA-256 hash of the API key for non-plaintext authentication lookup
-	KeyHash *string `json:"key_hash,omitempty"`
+	// Versioned AES-GCM ciphertext for the customer API key; never plaintext
+	Key string `json:"-"`
+	// HMAC-SHA-256 lookup locator derived from the API-key protection key
+	KeyHash *string `json:"-"`
 	// Non-secret API key prefix for search/display
 	KeyPrefix string `json:"key_prefix,omitempty"`
 	// Name holds the value of the "name" field.
 	Name string `json:"name,omitempty"`
+	// Immutable security identity: standard or wallet_universal
+	Purpose string `json:"purpose,omitempty"`
 	// GroupID holds the value of the "group_id" field.
 	GroupID *int64 `json:"group_id,omitempty"`
 	// Status holds the value of the "status" field.
@@ -131,7 +133,7 @@ func (*APIKey) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullFloat64)
 		case apikey.FieldID, apikey.FieldUserID, apikey.FieldGroupID:
 			values[i] = new(sql.NullInt64)
-		case apikey.FieldKey, apikey.FieldKeyHash, apikey.FieldKeyPrefix, apikey.FieldName, apikey.FieldStatus:
+		case apikey.FieldKey, apikey.FieldKeyHash, apikey.FieldKeyPrefix, apikey.FieldName, apikey.FieldPurpose, apikey.FieldStatus:
 			values[i] = new(sql.NullString)
 		case apikey.FieldCreatedAt, apikey.FieldUpdatedAt, apikey.FieldDeletedAt, apikey.FieldLastUsedAt, apikey.FieldExpiresAt, apikey.FieldWindow5hStart, apikey.FieldWindow1dStart, apikey.FieldWindow7dStart:
 			values[i] = new(sql.NullTime)
@@ -205,6 +207,12 @@ func (_m *APIKey) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field name", values[i])
 			} else if value.Valid {
 				_m.Name = value.String
+			}
+		case apikey.FieldPurpose:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field purpose", values[i])
+			} else if value.Valid {
+				_m.Purpose = value.String
 			}
 		case apikey.FieldGroupID:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -383,19 +391,18 @@ func (_m *APIKey) String() string {
 	builder.WriteString("user_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.UserID))
 	builder.WriteString(", ")
-	builder.WriteString("key=")
-	builder.WriteString(_m.Key)
+	builder.WriteString("key=<sensitive>")
 	builder.WriteString(", ")
-	if v := _m.KeyHash; v != nil {
-		builder.WriteString("key_hash=")
-		builder.WriteString(*v)
-	}
+	builder.WriteString("key_hash=<sensitive>")
 	builder.WriteString(", ")
 	builder.WriteString("key_prefix=")
 	builder.WriteString(_m.KeyPrefix)
 	builder.WriteString(", ")
 	builder.WriteString("name=")
 	builder.WriteString(_m.Name)
+	builder.WriteString(", ")
+	builder.WriteString("purpose=")
+	builder.WriteString(_m.Purpose)
 	builder.WriteString(", ")
 	if v := _m.GroupID; v != nil {
 		builder.WriteString("group_id=")

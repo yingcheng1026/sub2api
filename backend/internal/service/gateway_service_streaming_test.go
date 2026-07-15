@@ -1,10 +1,12 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,13 +45,46 @@ func TestGatewayService_StreamingReusesScannerBufferAndStillParsesUsage(t *testi
 		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
 	}()
 
-	result, err := svc.handleStreamingResponse(context.Background(), resp, c, &Account{ID: 1}, time.Now(), "model", "model", false)
+	result, err := svc.handleStreamingResponse(context.Background(), resp, c, &Account{ID: 1}, time.Now(), "model", "model")
 	_ = pr.Close()
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.usage)
 	require.Equal(t, 3, result.usage.InputTokens)
 	require.Equal(t, 7, result.usage.OutputTokens)
+}
+
+func TestGatewayService_StreamingRejectsLineAboveConfiguredLimit(t *testing.T) {
+	const maxLineSize = 1024 * 1024
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			StreamDataIntervalTimeout: 0,
+			MaxLineSize:               maxLineSize,
+		},
+	}
+
+	svc := &GatewayService{
+		cfg:              cfg,
+		rateLimitService: &RateLimitService{},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	pr, pw := io.Pipe()
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: pr}
+
+	go func() {
+		defer func() { _ = pw.Close() }()
+		_, _ = pw.Write([]byte("data: " + strings.Repeat("x", maxLineSize) + "\n\n"))
+	}()
+
+	result, err := svc.handleStreamingResponse(context.Background(), resp, c, &Account{ID: 1}, time.Now(), "model", "model")
+	_ = pr.Close()
+	require.ErrorIs(t, err, bufio.ErrTooLong)
+	require.NotNil(t, result)
+	require.Contains(t, rec.Body.String(), "response_too_large")
 }
 
 func TestDetachUpstreamContextIgnoresClientCancel(t *testing.T) {

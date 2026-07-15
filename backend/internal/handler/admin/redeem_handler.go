@@ -109,7 +109,7 @@ func (h *RedeemHandler) Generate(c *gin.Context) {
 		return
 	}
 
-	executeAdminIdempotentJSON(c, "admin.redeem_codes.generate", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+	executeAdminStrictIdempotentJSONNonTransactional(c, "admin.redeem_codes.generate", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
 		codes, execErr := h.adminService.GenerateRedeemCodes(ctx, &service.GenerateRedeemCodesInput{
 			Count:        req.Count,
 			Type:         req.Type,
@@ -161,7 +161,14 @@ func (h *RedeemHandler) CreateAndRedeem(c *gin.Context) {
 		}
 	}
 
-	executeAdminIdempotentJSON(c, "admin.redeem_codes.create_and_redeem", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+	// Legacy Sub2ApiPay callers did not send Idempotency-Key. The fixed redeem
+	// code is already their stable external order identity, so derive a hashed
+	// key from it without exposing the code in storage or logs.
+	idempotencyKey := c.GetHeader("Idempotency-Key")
+	if strings.TrimSpace(idempotencyKey) == "" {
+		idempotencyKey = "admin-create-redeem-" + service.HashIdempotencyKey(req.Code)
+	}
+	executeAdminStrictIdempotentJSONNonTransactionalWithKey(c, "admin.redeem_codes.create_and_redeem", req, service.DefaultWriteIdempotencyTTL(), idempotencyKey, func(ctx context.Context) (any, error) {
 		existing, err := h.redeemService.GetByCode(ctx, req.Code)
 		if err == nil {
 			return h.resolveCreateAndRedeemExisting(ctx, existing, req.UserID)

@@ -7,7 +7,9 @@ import (
 	_ "embed"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,8 +21,11 @@ import (
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
@@ -41,6 +46,14 @@ var (
 )
 
 const defaultServerShutdownTimeout = 30 * time.Minute
+
+const (
+	apiKeySecurityMigrationTimeout = 30 * time.Minute
+	paymentConfigMigrationTimeout  = 5 * time.Minute
+	domainSecretMigrationTimeout   = 30 * time.Minute
+	schedulerCachePurgeTimeout     = 2 * time.Minute
+	oauthTokenCachePurgeTimeout    = 2 * time.Minute
+)
 
 func init() {
 	// 如果 Version 已通过 ldflags 注入（例如 -X main.Version=...），则不要覆盖。
@@ -113,9 +126,10 @@ func runSetupServer() {
 		r.Use(web.ServeEmbeddedFrontend())
 	}
 
-	// Get server address from config.yaml or environment variables (SERVER_HOST, SERVER_PORT)
-	// This allows users to run setup on a different address if needed
-	addr := config.GetServerAddress()
+	// Setup can test arbitrary database/Redis destinations and create the first
+	// administrator, so it is intentionally loopback-only. Use an SSH tunnel for
+	// remote administration instead of exposing the bootstrap surface.
+	addr := setupServerAddress()
 	log.Printf("Setup wizard available at http://%s", addr)
 	log.Println("Complete the setup wizard to configure Sub2API")
 
@@ -129,6 +143,15 @@ func runSetupServer() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Failed to start setup server: %v", err)
 	}
+}
+
+func setupServerAddress() string {
+	configured := config.GetServerAddress()
+	_, port, err := net.SplitHostPort(configured)
+	if err != nil || strings.TrimSpace(port) == "" {
+		port = "8080"
+	}
+	return net.JoinHostPort("127.0.0.1", port)
 }
 
 func runMainServer() {
@@ -146,6 +169,45 @@ func runMainServer() {
 	buildInfo := handler.BuildInfo{
 		Version:   Version,
 		BuildType: BuildType,
+	}
+
+	purgedSchedulerCacheSecrets, err := prepareEncryptedSchedulerCacheBeforeWorkers(cfg)
+	if err != nil {
+		log.Fatalf("Failed scheduler cache security preflight: %v", err)
+	}
+	if purgedSchedulerCacheSecrets > 0 {
+		log.Printf("Removed %d legacy plaintext scheduler cache record(s)", purgedSchedulerCacheSecrets)
+	}
+
+	purgedOAuthTokenCacheSecrets, err := prepareEncryptedOAuthTokenCacheBeforeWorkers(cfg)
+	if err != nil {
+		log.Fatalf("Failed OAuth token cache security preflight: %v", err)
+	}
+	if purgedOAuthTokenCacheSecrets > 0 {
+		log.Printf("Removed %d legacy plaintext OAuth access token cache record(s)", purgedOAuthTokenCacheSecrets)
+	}
+
+	migratedAPIKeys, migratedProviderConfigs, migratedDomainSecrets, err := migrateSecuritySecretsBeforeWorkers(cfg)
+	if err != nil {
+		log.Fatalf("Failed security migration preflight: %v", err)
+	}
+	if migratedAPIKeys > 0 {
+		log.Printf("Encrypted %d legacy plaintext API key(s)", migratedAPIKeys)
+	}
+	if migratedProviderConfigs > 0 {
+		log.Printf("Encrypted %d legacy plaintext payment provider config(s)", migratedProviderConfigs)
+	}
+	if migratedDomainSecrets != (repository.DomainSecretMigrationResult{}) {
+		log.Printf("Domain-bound legacy secrets: accounts=%d totp=%d channel_monitor_keys=%d channel_monitor_payloads=%d backup_s3=%d content_moderation=%d settings=%d proxies=%d",
+			migratedDomainSecrets.AccountCredentials,
+			migratedDomainSecrets.TOTPSecrets,
+			migratedDomainSecrets.ChannelMonitorKeys,
+			migratedDomainSecrets.ChannelMonitorPayloads,
+			migratedDomainSecrets.BackupS3Configs,
+			migratedDomainSecrets.ContentModerationConfigs,
+			migratedDomainSecrets.SettingSecrets,
+			migratedDomainSecrets.ProxyCredentials,
+		)
 	}
 
 	app, err := initializeApplication(buildInfo)
@@ -181,6 +243,95 @@ func runMainServer() {
 	}
 
 	log.Println("Server exited")
+}
+
+func prepareEncryptedSchedulerCacheBeforeWorkers(cfg *config.Config) (int64, error) {
+	rdb := repository.InitRedis(cfg)
+	defer func() { _ = rdb.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), schedulerCachePurgeTimeout)
+	defer cancel()
+	removed, err := repository.PurgeLegacySchedulerCacheSecrets(ctx, rdb)
+	if err != nil {
+		return removed, fmt.Errorf("purge legacy plaintext scheduler cache: %w", err)
+	}
+	if _, err := repository.SeedSchedulerCacheV2Watermark(ctx, rdb); err != nil {
+		return removed, fmt.Errorf("seed encrypted scheduler cache watermark: %w", err)
+	}
+	return removed, nil
+}
+
+func prepareEncryptedOAuthTokenCacheBeforeWorkers(cfg *config.Config) (int64, error) {
+	rdb := repository.InitRedis(cfg)
+	defer func() { _ = rdb.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), oauthTokenCachePurgeTimeout)
+	defer cancel()
+	removed, err := repository.PurgeLegacyOAuthTokenCacheSecrets(ctx, rdb)
+	if err != nil {
+		return removed, fmt.Errorf("purge legacy plaintext OAuth token cache: %w", err)
+	}
+	return removed, nil
+}
+
+// migrateSecuritySecretsBeforeWorkers constructs only database-backed migration
+// dependencies. The full Wire graph starts background workers in provider
+// constructors, so it must not be built until these fail-closed rewrites pass.
+func migrateSecuritySecretsBeforeWorkers(cfg *config.Config) (int, int, repository.DomainSecretMigrationResult, error) {
+	client, _, err := repository.InitEnt(cfg)
+	if err != nil {
+		return 0, 0, repository.DomainSecretMigrationResult{}, fmt.Errorf("initialize migration database: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	db, err := repository.ProvideSQLDB(client)
+	if err != nil {
+		return 0, 0, repository.DomainSecretMigrationResult{}, err
+	}
+	protector, err := repository.NewAPIKeyProtector(cfg)
+	if err != nil {
+		return 0, 0, repository.DomainSecretMigrationResult{}, err
+	}
+	apiKeyRepo := repository.NewAPIKeyRepository(client, db, protector)
+	migrator, ok := apiKeyRepo.(service.APIKeyPlaintextMigrator)
+	if !ok {
+		return 0, 0, repository.DomainSecretMigrationResult{}, errors.New("API key plaintext migrator is unavailable")
+	}
+
+	apiKeyCtx, cancelAPIKeyMigration := context.WithTimeout(context.Background(), apiKeySecurityMigrationTimeout)
+	migratedAPIKeys, err := migrator.MigratePlaintextAPIKeysToEncrypted(apiKeyCtx)
+	cancelAPIKeyMigration()
+	if err != nil {
+		return migratedAPIKeys, 0, repository.DomainSecretMigrationResult{}, fmt.Errorf("secure API keys: %w", err)
+	}
+
+	secretEncryptor, err := repository.NewAESEncryptor(cfg)
+	if err != nil {
+		return migratedAPIKeys, 0, repository.DomainSecretMigrationResult{}, err
+	}
+	domainCtx, cancelDomainMigration := context.WithTimeout(context.Background(), domainSecretMigrationTimeout)
+	migratedDomainSecrets, err := repository.MigrateDomainBoundSecrets(domainCtx, client, secretEncryptor)
+	cancelDomainMigration()
+	if err != nil {
+		return migratedAPIKeys, 0, migratedDomainSecrets, fmt.Errorf("bind persistent secrets to domains: %w", err)
+	}
+
+	paymentKey, err := payment.ProvideEncryptionKey(cfg)
+	if err != nil {
+		return migratedAPIKeys, 0, migratedDomainSecrets, err
+	}
+	legacyPaymentKey, err := payment.ProvideLegacyEncryptionKey(cfg)
+	if err != nil {
+		return migratedAPIKeys, 0, migratedDomainSecrets, err
+	}
+	paymentConfig := service.NewPaymentConfigService(client, repository.NewSettingRepository(client, secretEncryptor), []byte(paymentKey))
+	paymentCtx, cancelPaymentMigration := context.WithTimeout(context.Background(), paymentConfigMigrationTimeout)
+	migratedProviderConfigs, err := paymentConfig.MigrateProviderConfigsToEncrypted(paymentCtx, []byte(legacyPaymentKey))
+	cancelPaymentMigration()
+	if err != nil {
+		return migratedAPIKeys, migratedProviderConfigs, migratedDomainSecrets, fmt.Errorf("secure payment provider configs: %w", err)
+	}
+	return migratedAPIKeys, migratedProviderConfigs, migratedDomainSecrets, nil
 }
 
 func serverShutdownTimeout() time.Duration {

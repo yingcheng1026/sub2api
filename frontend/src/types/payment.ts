@@ -119,7 +119,7 @@ export interface SubscriptionPlan {
   features: string[]
   for_sale: boolean
   sort_order: number
-  /** 月卡 / 额度卡。subscription = 月卡，validity_days 控时长；credits = 额度卡，永久有效。 */
+  /** 历史权益 / 额度卡。subscription 仅用于兼容历史数据；credits 为当前可售额度。 */
   plan_type?: 'subscription' | 'credits'
 }
 

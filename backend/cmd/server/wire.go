@@ -24,8 +24,10 @@ import (
 )
 
 type Application struct {
-	Server  *http.Server
-	Cleanup func()
+	Server               *http.Server
+	Cleanup              func()
+	PaymentConfigService *service.PaymentConfigService
+	APIKeyService        *service.APIKeyService
 }
 
 func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
@@ -53,7 +55,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "Cleanup"),
+		wire.Struct(new(Application), "Server", "Cleanup", "PaymentConfigService", "APIKeyService"),
 	)
 	return nil, nil
 }

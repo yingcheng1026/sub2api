@@ -73,6 +73,8 @@ run_mode: "standard"
 cors:
   # Allowed origins list. Leave empty to disable cross-origin requests.
   # 允许的来源列表。留空则禁用跨域请求。
+  # Browser sessions use credentialed HttpOnly cookies. If the frontend is on
+  # another origin, list that exact origin here; never use "*" for this flow.
   allowed_origins: []
   # Allow credentials (cookies/authorization headers). Cannot be used with "*".
   # 允许携带凭证（cookies/授权头）。不能与 "*" 通配符同时使用。
@@ -85,8 +87,8 @@ cors:
 security:
   url_allowlist:
     # Enable pricing/CRS URL allowlist validation.
-    # Upstream account base_url values only receive minimal URL format validation.
-    # 启用价格数据/CRS URL 白名单验证；上游账号 base_url 只做最小 URL 格式校验。
+    # Upstream account base_url values always reject private/reserved addresses by default.
+    # 启用价格数据/CRS URL 白名单验证；上游账号 base_url 默认始终拒绝私网/保留地址。
     enabled: false
     # Legacy upstream host list. Retained for config compatibility; not enforced for account base_url.
     # 兼容保留的上游主机列表；不再用于限制账号 base_url。
@@ -108,10 +110,10 @@ security:
     crs_hosts: []
     # Allow localhost/private IPs for pricing/CRS URL validation (use only in trusted networks)
     # 允许本地/私有 IP 地址用于价格数据/CRS URL 校验（仅在可信网络中使用）
-    allow_private_hosts: true
+    allow_private_hosts: false
     # Allow http:// URLs when allowlist is disabled (default: false, require https)
     # 白名单禁用时是否允许 http:// URL（默认: false，要求 https）
-    allow_insecure_http: true
+    allow_insecure_http: false
   response_headers:
     # Enable configurable response header filtering (default: true)
     # 启用可配置的响应头过滤（默认启用，过滤上游敏感响应头）
@@ -373,9 +375,9 @@ gateway:
     # Max image requests waiting in this process when overflow_mode=wait, 0=unlimited
     # wait 模式当前进程允许排队等待的图片请求数，0=不限制
     max_waiting_requests: 100
-  # SSE max line size in bytes (default: 40MB)
-  # SSE 单行最大字节数（默认 40MB）
-  max_line_size: 41943040
+  # SSE max line size in bytes (default: 8MB; hard maximum: 16MB)
+  # SSE 单行最大字节数（默认 8MB；硬上限 16MB）
+  max_line_size: 8388608
   # Log upstream error response body summary (safe/truncated; does not log request content)
   # 记录上游错误响应体摘要（安全/截断；不记录请求内容）
   log_upstream_error_body: true
@@ -868,15 +870,25 @@ jwt:
 # TOTP 双因素认证配置
 # =============================================================================
 totp:
-  # IMPORTANT: Set a fixed encryption key for TOTP secrets.
-  # 重要：设置固定的 TOTP 加密密钥。
-  # If left empty, a random key will be generated on each startup, causing all
-  # existing TOTP configurations to become invalid (users won't be able to
-  # login with 2FA).
-  # 如果留空，每次启动将生成随机密钥，导致现有的 TOTP 配置失效（用户无法使用
-  # 双因素认证登录）。
-  # Generate with / 生成命令: openssl rand -hex 32
+  # Legacy v1/v2 migration root. Keep only until every stored secret is v3.
+  # 旧 v1/v2 迁移根；所有持久秘密升级为 v3 后即可移除。
   encryption_key: ""
+
+# Generate every value separately with `openssl rand -hex 32`. Reuse is rejected.
+# 每个值必须分别生成；复用任何根密钥都会导致启动失败。
+secret_encryption:
+  totp_secret_key: ""
+  totp_cache_key: ""
+  account_credential_key: ""
+  backup_s3_key: ""
+  content_moderation_key: ""
+  channel_monitor_key: ""
+  payment_provider_key: ""
+  proxy_credential_key: ""
+  scheduler_cache_key: ""
+  oauth_token_cache_key: ""
+  jwt_hmac_key: ""
+  setting_secret_key: ""
 
 # =============================================================================
 # LinuxDo Connect OAuth Login (SSO)
@@ -988,10 +1000,11 @@ rate_limit:
 pricing:
   # URL to fetch model pricing data (default: pinned model-price-repo commit)
   # 获取模型定价数据的 URL（默认：固定 commit 的 model-price-repo）
-  remote_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/refs/heads/main//model_prices_and_context_window.json"
-  # Hash verification URL (optional)
-  # 哈希校验 URL（可选）
-  hash_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/refs/heads/main//model_prices_and_context_window.sha256"
+  # Keep data and hash on the same reviewed immutable revision.
+  remote_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/2eaf5efd588b52cd9fd435e809a5b58267259553/model_prices_and_context_window.json"
+  # Hash verification URL (required for remote updates)
+  # 哈希校验 URL（远程更新必填）
+  hash_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/2eaf5efd588b52cd9fd435e809a5b58267259553/model_prices_and_context_window.sha256"
   # Local data directory for caching
   # 本地数据缓存目录
   data_dir: "./data"

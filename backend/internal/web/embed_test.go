@@ -90,6 +90,18 @@ func TestInjectSiteTitle(t *testing.T) {
 		assert.Contains(t, string(result), `<div id="app"></div>`)
 		assert.Contains(t, string(result), "<title>TestSite - AI API Gateway</title>")
 	})
+
+	t.Run("escapes_site_name_before_nonce_replacement", func(t *testing.T) {
+		html := []byte(`<html><head><title>Sub2API</title></head><body></body></html>`)
+		settingsJSON := []byte(`{"site_name":"</title><script nonce=\"__CSP_NONCE_VALUE__\">alert(1)</script><title>"}`)
+
+		result := injectSiteTitle(html, settingsJSON)
+		result = replaceNoncePlaceholder(result, "request-nonce")
+
+		assert.NotContains(t, string(result), `</title><script nonce="request-nonce">`)
+		assert.NotContains(t, string(result), `<script`)
+		assert.Contains(t, string(result), `&lt;/title&gt;&lt;script nonce=&#34;request-nonce&#34;&gt;alert(1)&lt;/script&gt;&lt;title&gt;`)
+	})
 }
 
 func TestReplaceNoncePlaceholder(t *testing.T) {

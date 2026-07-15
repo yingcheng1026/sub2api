@@ -35,7 +35,6 @@ const (
 	defaultIdleConnTimeout     = 90 * time.Second // 空闲连接超时时间（建议小于上游 LB 超时）
 	defaultDialTimeout         = 5 * time.Second  // TCP 连接超时（含代理握手），代理不通时快速失败
 	defaultTLSHandshakeTimeout = 5 * time.Second  // TLS 握手超时
-	validatedHostTTL           = 30 * time.Second // DNS Rebinding 校验缓存 TTL
 )
 
 // Options 定义共享 HTTP 客户端的构建参数
@@ -110,15 +109,16 @@ func buildTransport(opts Options) (*http.Transport, error) {
 	}
 
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: defaultDialTimeout,
-		}).DialContext,
+		DialContext:           (&net.Dialer{Timeout: defaultDialTimeout}).DialContext,
 		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		MaxConnsPerHost:       opts.MaxConnsPerHost, // 0 表示无限制
 		IdleConnTimeout:       defaultIdleConnTimeout,
 		ResponseHeaderTimeout: opts.ResponseHeaderTimeout,
+	}
+	if opts.ValidateResolvedIP && !opts.AllowPrivateHosts {
+		transport.DialContext = urlvalidator.NewSafeDialContext(false)
 	}
 
 	if opts.InsecureSkipVerify {
@@ -156,51 +156,19 @@ func buildClientKey(opts Options) string {
 }
 
 type validatedTransport struct {
-	base           http.RoundTripper
-	validatedHosts sync.Map // map[string]time.Time, value 为过期时间
-	now            func() time.Time
+	base http.RoundTripper
 }
 
 func newValidatedTransport(base http.RoundTripper) *validatedTransport {
-	return &validatedTransport{
-		base: base,
-		now:  time.Now,
-	}
-}
-
-func (t *validatedTransport) isValidatedHost(host string, now time.Time) bool {
-	if t == nil {
-		return false
-	}
-	raw, ok := t.validatedHosts.Load(host)
-	if !ok {
-		return false
-	}
-	expireAt, ok := raw.(time.Time)
-	if !ok {
-		t.validatedHosts.Delete(host)
-		return false
-	}
-	if now.Before(expireAt) {
-		return true
-	}
-	t.validatedHosts.Delete(host)
-	return false
+	return &validatedTransport{base: base}
 }
 
 func (t *validatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req != nil && req.URL != nil {
 		host := strings.ToLower(strings.TrimSpace(req.URL.Hostname()))
 		if host != "" {
-			now := time.Now()
-			if t != nil && t.now != nil {
-				now = t.now()
-			}
-			if !t.isValidatedHost(host, now) {
-				if err := validateResolvedIP(host); err != nil {
-					return nil, err
-				}
-				t.validatedHosts.Store(host, now.Add(validatedHostTTL))
+			if err := validateResolvedIP(host); err != nil {
+				return nil, err
 			}
 		}
 	}

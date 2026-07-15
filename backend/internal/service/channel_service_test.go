@@ -1067,6 +1067,21 @@ func TestIsModelRestricted_CaseInsensitive(t *testing.T) {
 	require.False(t, restricted)
 }
 
+func TestIsModelRestricted_CacheBuildFailureFailsClosedDuringErrorTTL(t *testing.T) {
+	var listCalls int
+	repo := &mockChannelRepository{
+		listAllFn: func(_ context.Context) ([]Channel, error) {
+			listCalls++
+			return nil, errors.New("database unavailable")
+		},
+	}
+	svc := newTestChannelService(repo)
+
+	require.True(t, svc.IsModelRestricted(context.Background(), 10, "claude-opus-4"))
+	require.True(t, svc.IsModelRestricted(context.Background(), 10, "claude-opus-4"))
+	require.Equal(t, 1, listCalls, "the short error cache should avoid a retry storm without failing open")
+}
+
 // --- 4.5 ResolveChannelMappingAndRestrict ---
 // 注意：模型限制检查已移至调度阶段（GatewayService.checkChannelPricingRestriction），
 // ResolveChannelMappingAndRestrict 仅做映射，restricted 始终为 false。

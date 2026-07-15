@@ -13,6 +13,16 @@ type snapshotHydrationCache struct {
 	accounts map[int64]*Account
 }
 
+func TestSchedulerAccountHasConfiguredAPIKeyAcceptsEncryptedCacheMarker(t *testing.T) {
+	metadata := &Account{Credentials: map[string]any{SchedulerMetadataAPIKeyConfigured: true}}
+	if !schedulerAccountHasConfiguredAPIKey(metadata) {
+		t.Fatal("scheduler metadata marker should preserve API-key account ranking without storing the key")
+	}
+	if schedulerAccountHasConfiguredAPIKey(&Account{Credentials: map[string]any{}}) {
+		t.Fatal("missing key and marker must not be treated as configured")
+	}
+}
+
 func (c *snapshotHydrationCache) GetSnapshot(ctx context.Context, bucket SchedulerBucket) ([]*Account, bool, error) {
 	return c.snapshot, true, nil
 }

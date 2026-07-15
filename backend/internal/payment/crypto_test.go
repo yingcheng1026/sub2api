@@ -2,6 +2,8 @@ package payment
 
 import (
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -159,6 +161,86 @@ func TestDecryptInvalidFormat(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Decrypt(%q) should fail but got nil error", input)
 		}
+	}
+}
+
+func TestDecryptRejectsInvalidNonceAndTagLengthsWithoutPanic(t *testing.T) {
+	t.Parallel()
+	key := makeKey(t)
+	encoded := func(raw []byte) string { return base64.StdEncoding.EncodeToString(raw) }
+
+	inputs := []string{
+		encoded(make([]byte, 1)) + ":" + encoded(make([]byte, 16)) + ":" + encoded([]byte("ciphertext")),
+		encoded(make([]byte, 12)) + ":" + encoded(make([]byte, 1)) + ":" + encoded([]byte("ciphertext")),
+	}
+	for _, input := range inputs {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("Decrypt panicked for malformed ciphertext: %v", recovered)
+				}
+			}()
+			if _, err := Decrypt(input, key); err == nil {
+				t.Fatal("Decrypt should reject malformed nonce or tag length")
+			}
+		}()
+	}
+}
+
+func TestProviderConfigEncryptionUsesCiphertextAndReadsLegacyPlaintext(t *testing.T) {
+	t.Parallel()
+	key := makeKey(t)
+	cfg := map[string]string{"secretKey": "sk-live-secret", "publishableKey": "pk-live"}
+
+	stored, err := EncryptProviderConfig(cfg, key)
+	if err != nil {
+		t.Fatalf("EncryptProviderConfig returned error: %v", err)
+	}
+	if strings.Contains(stored, "sk-live-secret") || json.Valid([]byte(stored)) {
+		t.Fatalf("provider config was not stored as opaque ciphertext: %q", stored)
+	}
+
+	decoded, legacyPlaintext, err := DecryptProviderConfig(stored, key)
+	if err != nil {
+		t.Fatalf("DecryptProviderConfig returned error: %v", err)
+	}
+	if legacyPlaintext || decoded["secretKey"] != cfg["secretKey"] {
+		t.Fatalf("decoded=%v legacyPlaintext=%v", decoded, legacyPlaintext)
+	}
+
+	legacy := `{"secretKey":"sk-legacy","publishableKey":"pk-legacy"}`
+	decoded, legacyPlaintext, err = DecryptProviderConfig(legacy, key)
+	if err != nil {
+		t.Fatalf("DecryptProviderConfig legacy plaintext returned error: %v", err)
+	}
+	if !legacyPlaintext || decoded["secretKey"] != "sk-legacy" {
+		t.Fatalf("decoded=%v legacyPlaintext=%v", decoded, legacyPlaintext)
+	}
+}
+
+func TestProviderConfigDecryptionFailsClosed(t *testing.T) {
+	t.Parallel()
+	key := makeKey(t)
+	wrongKey := makeKey(t)
+	stored, err := EncryptProviderConfig(map[string]string{"secret": "value"}, key)
+	if err != nil {
+		t.Fatalf("EncryptProviderConfig returned error: %v", err)
+	}
+
+	for name, tc := range map[string]struct {
+		stored string
+		key    []byte
+	}{
+		"missing key":      {stored: stored, key: nil},
+		"wrong key":        {stored: stored, key: wrongKey},
+		"malformed config": {stored: "not-json-or-ciphertext", key: key},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, _, err := DecryptProviderConfig(tc.stored, tc.key); err == nil {
+				t.Fatal("expected fail-closed provider config error")
+			}
+		})
 	}
 }
 

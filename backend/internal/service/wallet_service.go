@@ -39,11 +39,22 @@ func (s *WalletService) Activate(ctx context.Context, subscriptionID int64, init
 	if initialUSD <= 0 {
 		return WalletLedgerEntry{}, ErrWalletNegativeDelta
 	}
-	return s.repo.Adjust(ctx, WalletAdjustCommand{
+	return s.repo.RecordActivation(ctx, WalletActivationCommand{
 		SubscriptionID: subscriptionID,
-		DeltaUSD:       initialUSD,
-		Reason:         WalletLedgerReasonActivation,
+		InitialUSD:     initialUSD,
 		OperatorID:     operatorID,
+		Notes:          strings.TrimSpace(notes),
+	})
+}
+
+func (s *WalletService) ActivateFromPayment(ctx context.Context, subscriptionID int64, initialUSD float64, paymentOrderID int64, notes string) (WalletLedgerEntry, error) {
+	if initialUSD <= 0 || paymentOrderID <= 0 {
+		return WalletLedgerEntry{}, ErrWalletNegativeDelta
+	}
+	return s.repo.RecordActivation(ctx, WalletActivationCommand{
+		SubscriptionID: subscriptionID,
+		InitialUSD:     initialUSD,
+		PaymentOrderID: &paymentOrderID,
 		Notes:          strings.TrimSpace(notes),
 	})
 }
@@ -74,6 +85,18 @@ func (s *WalletService) Topup(ctx context.Context, subscriptionID int64, deltaUS
 	})
 }
 
+func (s *WalletService) TopupFromPayment(ctx context.Context, subscriptionID int64, deltaUSD float64, paymentOrderID int64, notes string) (WalletLedgerEntry, error) {
+	if deltaUSD <= 0 || paymentOrderID <= 0 {
+		return WalletLedgerEntry{}, ErrWalletNegativeDelta
+	}
+	return s.repo.Topup(ctx, WalletTopupCommand{
+		SubscriptionID: subscriptionID,
+		DeltaUSD:       deltaUSD,
+		PaymentOrderID: &paymentOrderID,
+		Notes:          strings.TrimSpace(notes),
+	})
+}
+
 // ListLedger 查最近 limit 条流水。limit ≤ 0 默认 50；> 500 截断到 500。
 func (s *WalletService) ListLedger(ctx context.Context, subscriptionID int64, limit int) ([]WalletLedgerEntry, error) {
 	if limit <= 0 {
@@ -87,12 +110,9 @@ func (s *WalletService) ListLedger(ctx context.Context, subscriptionID int64, li
 
 func isValidWalletLedgerReason(reason string) bool {
 	switch reason {
-	case WalletLedgerReasonActivation,
-		WalletLedgerReasonUsage,
-		WalletLedgerReasonRefund,
+	case WalletLedgerReasonRefund,
 		WalletLedgerReasonAdjustment,
-		WalletLedgerReasonExpiration,
-		WalletLedgerReasonTopup:
+		WalletLedgerReasonExpiration:
 		return true
 	}
 	return false

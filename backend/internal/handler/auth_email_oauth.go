@@ -181,7 +181,7 @@ func (h *AuthHandler) emailOAuthCallbackWithProfile(
 		return
 	}
 
-	tokenPair, user, err := h.authService.LoginOrRegisterVerifiedEmailOAuthWithInvitation(c.Request.Context(), input, "", affiliateCode)
+	user, err := h.authService.ResolveVerifiedEmailOAuthWithInvitation(c.Request.Context(), input, "", affiliateCode)
 	if err != nil {
 		if errors.Is(err, service.ErrOAuthInvitationRequired) {
 			if pendingErr := h.createEmailOAuthRegistrationPendingSession(c, provider, frontendCallback, redirectTo, profile); pendingErr != nil {
@@ -198,21 +198,14 @@ func (h *AuthHandler) emailOAuthCallbackWithProfile(
 		redirectOAuthError(c, frontendCallback, "login_blocked", infraerrors.Reason(err), infraerrors.Message(err))
 		return
 	}
-
-	fragment := url.Values{}
-	fragment.Set("access_token", tokenPair.AccessToken)
-	fragment.Set("refresh_token", tokenPair.RefreshToken)
-	fragment.Set("expires_in", fmt.Sprintf("%d", tokenPair.ExpiresIn))
-	fragment.Set("token_type", "Bearer")
-	fragment.Set("redirect", redirectTo)
-	redirectWithFragment(c, frontendCallback, fragment)
+	if pendingErr := h.createEmailOAuthLoginPendingSession(c, provider, redirectTo, profile, user); pendingErr != nil {
+		redirectOAuthError(c, frontendCallback, infraerrors.Reason(pendingErr), infraerrors.Message(pendingErr), "")
+		return
+	}
+	redirectToFrontendCallback(c, frontendCallback)
 }
 
 func (h *AuthHandler) emailOAuthShouldCreatePendingRegistration(ctx context.Context, input service.EmailOAuthIdentityInput) (bool, error) {
-	client := h.entClient()
-	if client == nil {
-		return false, infraerrors.ServiceUnavailable("PENDING_AUTH_NOT_READY", "pending auth service is not ready")
-	}
 	identityUser, err := h.findOAuthIdentityUser(ctx, service.PendingAuthIdentityKey{
 		ProviderType:    strings.TrimSpace(input.ProviderType),
 		ProviderKey:     strings.TrimSpace(input.ProviderKey),
@@ -228,13 +221,7 @@ func (h *AuthHandler) emailOAuthShouldCreatePendingRegistration(ctx context.Cont
 		}
 		return false, nil
 	}
-	if _, err := findUserByNormalizedEmail(ctx, client, email); err != nil {
-		if errors.Is(err, service.ErrUserNotFound) {
-			return true, nil
-		}
-		return false, err
-	}
-	return false, nil
+	return true, nil
 }
 
 func (h *AuthHandler) emailOAuthAffiliateCode(c *gin.Context) string {
@@ -245,6 +232,58 @@ func (h *AuthHandler) emailOAuthAffiliateCode(c *gin.Context) string {
 		return strings.TrimSpace(code)
 	}
 	return ""
+}
+
+func (h *AuthHandler) createEmailOAuthLoginPendingSession(
+	c *gin.Context,
+	provider string,
+	redirectTo string,
+	profile *emailOAuthProfile,
+	user *service.User,
+) error {
+	if h == nil || profile == nil || user == nil || user.ID <= 0 {
+		return infraerrors.ServiceUnavailable("PENDING_AUTH_NOT_READY", "pending auth service is not ready")
+	}
+	browserSessionKey, err := generateOAuthPendingBrowserSession()
+	if err != nil {
+		return infraerrors.InternalServer("PENDING_AUTH_SESSION_CREATE_FAILED", "failed to create pending auth session").WithCause(err)
+	}
+	setOAuthPendingBrowserCookie(c, browserSessionKey, isRequestHTTPS(c))
+
+	email := strings.TrimSpace(strings.ToLower(profile.Email))
+	upstreamClaims := map[string]any{
+		"email":            email,
+		"email_verified":   profile.EmailVerified,
+		"username":         strings.TrimSpace(profile.Username),
+		"provider":         provider,
+		"provider_key":     provider,
+		"provider_subject": strings.TrimSpace(profile.Subject),
+	}
+	if strings.TrimSpace(profile.DisplayName) != "" {
+		upstreamClaims["suggested_display_name"] = strings.TrimSpace(profile.DisplayName)
+	}
+	if strings.TrimSpace(profile.AvatarURL) != "" {
+		upstreamClaims["suggested_avatar_url"] = strings.TrimSpace(profile.AvatarURL)
+	}
+	for key, value := range profile.Metadata {
+		if _, exists := upstreamClaims[key]; !exists {
+			upstreamClaims[key] = value
+		}
+	}
+
+	return h.createOAuthPendingSession(c, oauthPendingSessionPayload{
+		Intent:                 oauthIntentLogin,
+		Identity:               service.PendingAuthIdentityKey{ProviderType: provider, ProviderKey: provider, ProviderSubject: strings.TrimSpace(profile.Subject)},
+		TargetUserID:           &user.ID,
+		ResolvedEmail:          email,
+		RedirectTo:             redirectTo,
+		BrowserSessionKey:      browserSessionKey,
+		UpstreamIdentityClaims: upstreamClaims,
+		CompletionResponse: map[string]any{
+			"provider": provider,
+			"redirect": redirectTo,
+		},
+	})
 }
 
 func (h *AuthHandler) createEmailOAuthRegistrationPendingSession(
@@ -289,6 +328,11 @@ func (h *AuthHandler) createEmailOAuthRegistrationPendingSession(
 		}
 	}
 
+	existingUser, findErr := findUserByNormalizedEmail(c.Request.Context(), h.entClient(), email)
+	if findErr != nil && !errors.Is(findErr, service.ErrUserNotFound) {
+		return findErr
+	}
+
 	invitationRequired := h != nil && h.settingSvc != nil && h.settingSvc.IsInvitationCodeEnabled(c.Request.Context())
 	pendingError := "registration_completion_required"
 	choiceReason := "registration_completion_required"
@@ -313,10 +357,21 @@ func (h *AuthHandler) createEmailOAuthRegistrationPendingSession(
 	if strings.TrimSpace(frontendCallback) != "" {
 		completionResponse["frontend_callback"] = strings.TrimSpace(frontendCallback)
 	}
+	var targetUserID *int64
+	if existingUser != nil {
+		targetUserID = &existingUser.ID
+		completionResponse["error"] = "existing_account_binding_required"
+		completionResponse["choice_reason"] = "existing_account_binding_required"
+		completionResponse["adoption_required"] = true
+		completionResponse["create_account_allowed"] = false
+		completionResponse["existing_account_bindable"] = true
+		completionResponse["invitation_required"] = false
+	}
 
 	return h.createOAuthPendingSession(c, oauthPendingSessionPayload{
 		Intent:                 oauthIntentLogin,
 		Identity:               service.PendingAuthIdentityKey{ProviderType: provider, ProviderKey: provider, ProviderSubject: strings.TrimSpace(profile.Subject)},
+		TargetUserID:           targetUserID,
 		ResolvedEmail:          email,
 		RedirectTo:             redirectTo,
 		BrowserSessionKey:      browserSessionKey,
@@ -429,7 +484,7 @@ func (h *AuthHandler) completeEmailOAuthRegistration(c *gin.Context, provider st
 	}
 	h.authService.RecordSuccessfulLogin(c.Request.Context(), user.ID)
 	clearCookies()
-	writeOAuthTokenPairResponse(c, tokenPair)
+	h.writeOAuthTokenPairResponse(c, tokenPair)
 }
 
 func (h *AuthHandler) getEmailOAuthConfig(ctx context.Context, provider string) (config.EmailOAuthProviderConfig, error) {

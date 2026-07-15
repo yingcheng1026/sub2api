@@ -28,7 +28,8 @@ func executeUserIdempotentJSON(
 			response.ErrorFrom(c, err)
 			return
 		}
-		response.Success(c, data)
+		publicData, _ := service.SplitIdempotencySensitiveResponse(data)
+		response.Success(c, publicData)
 		return
 	}
 

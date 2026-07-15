@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -76,6 +77,64 @@ func (s *ApiKeyCacheSuite) TestCreateAttemptCount() {
 			tt.fn(ctx, rdb, cache)
 		})
 	}
+}
+
+func (s *ApiKeyCacheSuite) TestRevealAttemptReservationIsAtomic() {
+	rdb := testRedis(s.T())
+	cache := &apiKeyCache{rdb: rdb}
+	ctx := context.Background()
+	const workers = 32
+	counts := make(chan int, workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			count, err := cache.IncrementAPIKeyStepUpAttempt(ctx, service.APIKeyStepUpPurposeReveal, 77)
+			counts <- count
+			errs <- err
+		}()
+	}
+	seen := make(map[int]bool, workers)
+	for i := 0; i < workers; i++ {
+		require.NoError(s.T(), <-errs)
+		seen[<-counts] = true
+	}
+	for i := 1; i <= workers; i++ {
+		require.True(s.T(), seen[i], "missing atomic reservation %d", i)
+	}
+	ttl, err := rdb.TTL(ctx, apiKeyStepUpLimitKey(service.APIKeyStepUpPurposeReveal, 77)).Result()
+	require.NoError(s.T(), err)
+	s.AssertTTLWithin(ttl, time.Second, apiKeyStepUpLimitDuration)
+}
+
+func (s *ApiKeyCacheSuite) TestSuccessfulCreateReservationIsAtomicAndFixedWindow() {
+	rdb := testRedis(s.T())
+	cache := &apiKeyCache{rdb: rdb}
+	ctx := context.Background()
+	const workers = 32
+	counts := make(chan int, workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			count, err := cache.ReserveAPIKeyCreate(ctx, 78)
+			counts <- count
+			errs <- err
+		}()
+	}
+	seen := make(map[int]bool, workers)
+	for i := 0; i < workers; i++ {
+		require.NoError(s.T(), <-errs)
+		seen[<-counts] = true
+	}
+	for i := 1; i <= workers; i++ {
+		require.True(s.T(), seen[i], "missing create reservation %d", i)
+	}
+	key := apiKeyCreateLimitKey(78)
+	require.NoError(s.T(), rdb.Expire(ctx, key, 2*time.Second).Err())
+	_, err := cache.ReserveAPIKeyCreate(ctx, 78)
+	require.NoError(s.T(), err)
+	ttl, err := rdb.TTL(ctx, key).Result()
+	require.NoError(s.T(), err)
+	require.LessOrEqual(s.T(), ttl, 2*time.Second, "a retry must not extend the create window")
 }
 
 func (s *ApiKeyCacheSuite) TestDailyUsage() {

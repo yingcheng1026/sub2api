@@ -23,6 +23,29 @@ type outboxProcessorRepoStub struct {
 	trace        *[]string
 }
 
+type outboxReconcileRepoStub struct {
+	*outboxProcessorRepoStub
+	reconcileResult          UsageBillingAdmissionReconcileResult
+	reconcileErr             error
+	reconcileCalls           int
+	reconcilePreparedGrace   time.Duration
+	reconcileDispatchedGrace time.Duration
+	reconcileLimit           int
+}
+
+func (s *outboxReconcileRepoStub) ReconcileStaleAdmissions(
+	_ context.Context,
+	preparedGrace time.Duration,
+	dispatchedGrace time.Duration,
+	limit int,
+) (UsageBillingAdmissionReconcileResult, error) {
+	s.reconcileCalls++
+	s.reconcilePreparedGrace = preparedGrace
+	s.reconcileDispatchedGrace = dispatchedGrace
+	s.reconcileLimit = limit
+	return s.reconcileResult, s.reconcileErr
+}
+
 func (s *outboxProcessorRepoStub) Enqueue(context.Context, UsageBillingEnvelope) (*UsageBillingOutboxEvent, bool, error) {
 	panic("not used")
 }
@@ -166,7 +189,7 @@ func TestUsageBillingOutboxProcessor_TransientRetryThenSuccess(t *testing.T) {
 	require.Equal(t, UsageBillingOutboxResultApplied, repo.resultCode)
 }
 
-func TestUsageBillingOutboxProcessor_PoisonAndMaxAttemptsDeadLetter(t *testing.T) {
+func TestUsageBillingOutboxProcessor_PoisonDeadLettersButTransientAtMaxAttemptsKeepsRetrying(t *testing.T) {
 	t.Run("decode poison", func(t *testing.T) {
 		repo := &outboxProcessorRepoStub{}
 		billing := &outboxBillingStub{}
@@ -178,15 +201,16 @@ func TestUsageBillingOutboxProcessor_PoisonAndMaxAttemptsDeadLetter(t *testing.T
 		require.Zero(t, billing.calls)
 	})
 
-	t.Run("max attempts", func(t *testing.T) {
+	t.Run("transient at max attempts", func(t *testing.T) {
 		repo := &outboxProcessorRepoStub{}
 		billing := &outboxBillingStub{err: errors.New("still unavailable")}
 		processor := NewUsageBillingOutboxProcessor(repo, &outboxBindingStub{}, billing, nil)
 		event := UsageBillingOutboxEvent{ID: 9, Envelope: processorEnvelope(t, "processor-max"), AttemptCount: 8, MaxAttempts: 8, LockedBy: "worker", LeaseToken: "lease-1"}
 
 		require.NoError(t, processor.ProcessEvent(context.Background(), event))
-		require.True(t, repo.dead)
-		require.Equal(t, "max_attempts", repo.errorCode)
+		require.False(t, repo.dead)
+		require.True(t, repo.retried)
+		require.Equal(t, "billing_apply_failed", repo.errorCode)
 	})
 }
 
@@ -306,6 +330,64 @@ func TestUsageBillingOutboxProcessor_ProcessBatchContinuesAfterOneEventFails(t *
 	require.Equal(t, 2, processed)
 	require.Equal(t, 2, billing.calls)
 	require.True(t, repo.completed, "second event must still be acknowledged")
+}
+
+func TestUsageBillingOutboxProcessor_ProcessBatchReconcilesWithIndependentBudget(t *testing.T) {
+	now := time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC)
+	first := UsageBillingOutboxEvent{ID: 41, Envelope: processorEnvelope(t, "processor-reconcile-full-1"), AttemptCount: 1, MaxAttempts: 8, LockedBy: "worker", LeaseToken: "lease-1"}
+	second := UsageBillingOutboxEvent{ID: 42, Envelope: processorEnvelope(t, "processor-reconcile-full-2"), AttemptCount: 1, MaxAttempts: 8, LockedBy: "worker", LeaseToken: "lease-2"}
+	repo := &outboxReconcileRepoStub{
+		outboxProcessorRepoStub: &outboxProcessorRepoStub{claimed: []UsageBillingOutboxEvent{first, second}},
+		reconcileResult: UsageBillingAdmissionReconcileResult{
+			AbandonedPrepared:  1,
+			OrphanedDispatched: 1,
+		},
+	}
+	processor := NewUsageBillingOutboxProcessor(repo, &outboxBindingStub{}, &outboxBillingStub{}, nil)
+	processor.now = func() time.Time { return now }
+
+	processed, err := processor.ProcessBatch(context.Background(), "worker", 2)
+
+	require.NoError(t, err)
+	require.Equal(t, 4, processed)
+	require.Equal(t, 1, repo.reconcileCalls)
+	require.Equal(t, usageBillingPreparedReconcileGrace, repo.reconcilePreparedGrace)
+	require.Equal(t, usageBillingDispatchedOrphanReconcileGrace, repo.reconcileDispatchedGrace)
+	require.Equal(t, usageBillingAdmissionReconcileBatchSize, repo.reconcileLimit)
+}
+
+func TestUsageBillingOutboxProcessor_ProcessBatchDoesNotCountRolledBackReconciliation(t *testing.T) {
+	repo := &outboxReconcileRepoStub{
+		outboxProcessorRepoStub: &outboxProcessorRepoStub{},
+		reconcileResult: UsageBillingAdmissionReconcileResult{
+			AbandonedPrepared: 2,
+		},
+		reconcileErr: errors.New("transaction rolled back"),
+	}
+	processor := NewUsageBillingOutboxProcessor(repo, &outboxBindingStub{}, &outboxBillingStub{}, nil)
+
+	processed, err := processor.ProcessBatch(context.Background(), "worker", 3)
+
+	require.ErrorContains(t, err, "reconcile stale admissions")
+	require.Zero(t, processed)
+}
+
+func TestUsageBillingOutboxProcessor_ProcessBatchThrottlesReconciliation(t *testing.T) {
+	now := time.Date(2026, 7, 12, 8, 0, 0, 0, time.UTC)
+	repo := &outboxReconcileRepoStub{outboxProcessorRepoStub: &outboxProcessorRepoStub{}}
+	processor := NewUsageBillingOutboxProcessor(repo, &outboxBindingStub{}, &outboxBillingStub{}, nil)
+	processor.now = func() time.Time { return now }
+
+	_, err := processor.ProcessBatch(context.Background(), "worker", 3)
+	require.NoError(t, err)
+	_, err = processor.ProcessBatch(context.Background(), "worker", 3)
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.reconcileCalls)
+
+	now = now.Add(usageBillingAdmissionReconcileInterval)
+	_, err = processor.ProcessBatch(context.Background(), "worker", 3)
+	require.NoError(t, err)
+	require.Equal(t, 2, repo.reconcileCalls)
 }
 
 func TestUsageBillingOutboxProcessor_PersistedErrorsAreRedacted(t *testing.T) {

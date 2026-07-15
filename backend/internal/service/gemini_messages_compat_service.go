@@ -486,7 +486,7 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 		}
 		switch a.Type {
 		case AccountTypeAPIKey:
-			if strings.TrimSpace(a.GetCredential("api_key")) != "" {
+			if schedulerAccountHasConfiguredAPIKey(a) {
 				return 0
 			}
 			return 9
@@ -549,6 +549,17 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 		return nil, errors.New("no available Gemini accounts")
 	}
 	return s.hydrateSelectedAccount(ctx, selected)
+}
+
+func schedulerAccountHasConfiguredAPIKey(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	if strings.TrimSpace(account.GetCredential("api_key")) != "" {
+		return true
+	}
+	configured, _ := account.Credentials[SchedulerMetadataAPIKeyConfigured].(bool)
+	return configured
 }
 
 func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
@@ -1669,6 +1680,9 @@ func sleepGeminiBackoff(attempt int) {
 
 var (
 	sensitiveQueryParamRegex = regexp.MustCompile(`(?i)([?&](?:key|client_secret|access_token|refresh_token)=)[^&"\s]+`)
+	sensitiveAssignmentRegex = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|x-api-key|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|client[-_]?secret|password|passwd|passphrase|token|secret)\b(\s*(?::|=)\s*|\s+)(?:bearer\s+)?["']?[^,\s;"'}]{8,}`)
+	sensitiveBearerRegex     = regexp.MustCompile(`(?i)\bbearer\s+[^,\s;"'}]{8,}`)
+	knownSecretValueRegex    = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{12,}|[sr]k_(?:live|test)_[a-z0-9]{12,}|gh[pousr]_[a-z0-9]{20,}|AIza[a-z0-9_-]{35}|GOCSPX-[a-z0-9_-]{24,}|xox[baprs]-[a-z0-9-]{12,}|eyJ[a-z0-9_-]{10,}\.[a-z0-9_-]{10,}\.[a-z0-9_-]{8,})\b`)
 	retryInRegex             = regexp.MustCompile(`Please retry in ([0-9.]+)s`)
 )
 
@@ -1676,7 +1690,10 @@ func sanitizeUpstreamErrorMessage(msg string) string {
 	if msg == "" {
 		return msg
 	}
-	return sensitiveQueryParamRegex.ReplaceAllString(msg, `$1***`)
+	msg = sensitiveQueryParamRegex.ReplaceAllString(msg, `$1***`)
+	msg = sensitiveAssignmentRegex.ReplaceAllString(msg, `$1$2***`)
+	msg = sensitiveBearerRegex.ReplaceAllString(msg, `Bearer ***`)
+	return knownSecretValueRegex.ReplaceAllString(msg, `***`)
 }
 
 func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, account *Account, upstreamStatus int, upstreamRequestID string, body []byte) error {

@@ -84,6 +84,9 @@ func (userSubRepoNoop) GetActiveByUserIDAndGroupID(context.Context, int64, int64
 func (userSubRepoNoop) GetActiveWalletByUserID(context.Context, int64) (*UserSubscription, error) {
 	panic("unexpected GetActiveWalletByUserID call")
 }
+func (u userSubRepoNoop) GetActiveCreditsWalletByUserID(ctx context.Context, userID int64) (*UserSubscription, error) {
+	return u.GetActiveWalletByUserID(ctx, userID)
+}
 func (userSubRepoNoop) GetActiveByPlanCoveringGroup(context.Context, int64, int64) (*UserSubscription, error) {
 	return nil, ErrSubscriptionNotFound
 }
@@ -120,6 +123,9 @@ func (userSubRepoNoop) UpdateNotes(context.Context, int64, string) error {
 }
 func (userSubRepoNoop) ActivateWindows(context.Context, int64, time.Time) error {
 	panic("unexpected ActivateWindows call")
+}
+func (userSubRepoNoop) AdvanceUsageWindow(context.Context, int64, SubscriptionUsageWindowAdvance) (bool, error) {
+	panic("unexpected AdvanceUsageWindow call")
 }
 func (userSubRepoNoop) ResetDailyUsage(context.Context, int64, time.Time) error {
 	panic("unexpected ResetDailyUsage call")
@@ -220,6 +226,9 @@ func (s *subscriptionUserSubRepoStub) GetActiveWalletByUserID(_ context.Context,
 	}
 	cp := *sub
 	return &cp, nil
+}
+func (s *subscriptionUserSubRepoStub) GetActiveCreditsWalletByUserID(ctx context.Context, userID int64) (*UserSubscription, error) {
+	return s.GetActiveWalletByUserID(ctx, userID)
 }
 
 func (s *subscriptionUserSubRepoStub) GetActiveByPlanCoveringGroup(_ context.Context, _, _ int64) (*UserSubscription, error) {

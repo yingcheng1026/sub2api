@@ -22,12 +22,8 @@ describe('payment api', () => {
     post.mockResolvedValue({ data: {} })
   })
 
-  it('keeps legacy public out_trade_no verification for upgrade compatibility', async () => {
-    await paymentAPI.verifyOrderPublic('legacy-order-no')
-
-    expect(post).toHaveBeenCalledWith('/payment/public/orders/verify', {
-      out_trade_no: 'legacy-order-no',
-    })
+  it('does not expose an unsigned public order lookup', () => {
+    expect(paymentAPI).not.toHaveProperty('verifyOrderPublic')
   })
 
   it('keeps signed public resume-token resolve endpoint', async () => {

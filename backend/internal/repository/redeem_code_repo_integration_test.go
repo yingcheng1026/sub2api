@@ -4,12 +4,15 @@ package repository
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -25,6 +28,12 @@ func (s *RedeemCodeRepoSuite) SetupTest() {
 	tx := testEntTx(s.T())
 	s.client = tx.Client()
 	s.repo = NewRedeemCodeRepository(s.client).(*redeemCodeRepository)
+	_, err := tx.ExecContext(s.ctx, `
+		SET LOCAL session_replication_role = 'replica';
+		DELETE FROM redeem_codes;
+		SET LOCAL session_replication_role = 'origin';
+	`)
+	s.Require().NoError(err, "isolate redeem-code repository test transaction")
 }
 
 func TestRedeemCodeRepoSuite(t *testing.T) {
@@ -115,7 +124,7 @@ func (s *RedeemCodeRepoSuite) TestGetByCode_NotFound() {
 
 // --- Delete ---
 
-func (s *RedeemCodeRepoSuite) TestDelete() {
+func (s *RedeemCodeRepoSuite) TestDeleteIfUnused() {
 	created, err := s.client.RedeemCode.Create().
 		SetCode("TO-DELETE").
 		SetType(service.RedeemTypeBalance).
@@ -126,44 +135,262 @@ func (s *RedeemCodeRepoSuite) TestDelete() {
 		Save(s.ctx)
 	s.Require().NoError(err)
 
-	err = s.repo.Delete(s.ctx, created.ID)
-	s.Require().NoError(err, "Delete")
+	deleted, err := s.repo.DeleteIfUnused(s.ctx, created.ID)
+	s.Require().NoError(err, "DeleteIfUnused")
+	s.Require().True(deleted)
 
 	_, err = s.repo.GetByID(s.ctx, created.ID)
 	s.Require().Error(err, "expected error after delete")
 	s.Require().ErrorIs(err, service.ErrRedeemCodeNotFound)
 }
 
+func (s *RedeemCodeRepoSuite) TestDeleteIfUnusedProtectsUsedCode() {
+	user := s.createUser(uniqueTestValue(s.T(), "delete-used") + "@example.com")
+	usedAt := time.Now().UTC().Truncate(time.Second)
+	created, err := s.client.RedeemCode.Create().
+		SetCode("DO-NOT-DELETE-USED").
+		SetType(service.RedeemTypeBalance).
+		SetStatus(service.StatusUsed).
+		SetValue(10).
+		SetUsedBy(user.ID).
+		SetUsedAt(usedAt).
+		Save(s.ctx)
+	s.Require().NoError(err)
+	ledgerKey := fmt.Sprintf("redeem-delete-guard-%d", created.ID)
+	_, err = s.client.ExecContext(s.ctx, `
+		INSERT INTO ledger_transactions (
+			transaction_type, idempotency_key, source_type, source_id,
+			user_id, redeem_code_id, amount_usd, description
+		) VALUES ('redeem', $1, 'redeem_code', $2, $3, $2, 10, 'delete guard')
+	`, ledgerKey, created.ID, user.ID)
+	s.Require().NoError(err)
+	_, err = s.client.ExecContext(s.ctx, `
+		INSERT INTO hfc_abuse_risk_events (source, user_id, redeem_code_id, summary)
+		VALUES ('redeem-delete-guard', $1, $2, 'delete guard')
+	`, user.ID, created.ID)
+	s.Require().NoError(err)
+
+	deleted, err := s.repo.DeleteIfUnused(s.ctx, created.ID)
+	s.Require().NoError(err)
+	s.Require().False(deleted)
+
+	got, err := s.repo.GetByID(s.ctx, created.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.StatusUsed, got.Status)
+	s.Require().NotNil(got.UsedBy)
+	s.Require().Equal(user.ID, *got.UsedBy)
+	s.Require().NotNil(got.UsedAt)
+	s.Require().WithinDuration(usedAt, *got.UsedAt, time.Second)
+	ledgerRefs, abuseRefs := queryRedeemAuditReferenceCounts(s.T(), s.ctx, s.client, ledgerKey, created.ID)
+	s.Require().Equal(1, ledgerRefs)
+	s.Require().Equal(1, abuseRefs)
+}
+
+func (s *RedeemCodeRepoSuite) TestDeleteIfUnusedPreservesExpiredCode() {
+	created, err := s.client.RedeemCode.Create().
+		SetCode("PRESERVE-EXPIRED").
+		SetType(service.RedeemTypeBalance).
+		SetStatus(service.StatusExpired).
+		SetValue(10).
+		Save(s.ctx)
+	s.Require().NoError(err)
+
+	deleted, err := s.repo.DeleteIfUnused(s.ctx, created.ID)
+	s.Require().NoError(err)
+	s.Require().False(deleted)
+
+	got, err := s.repo.GetByID(s.ctx, created.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.StatusExpired, got.Status)
+}
+
+func (s *RedeemCodeRepoSuite) TestExpireIfUnusedProtectsUsedCode() {
+	user := s.createUser(uniqueTestValue(s.T(), "expire-used") + "@example.com")
+	usedAt := time.Now().UTC().Truncate(time.Second)
+	created, err := s.client.RedeemCode.Create().
+		SetCode("DO-NOT-EXPIRE-USED").
+		SetType(service.RedeemTypeBalance).
+		SetStatus(service.StatusUsed).
+		SetValue(10).
+		SetUsedBy(user.ID).
+		SetUsedAt(usedAt).
+		Save(s.ctx)
+	s.Require().NoError(err)
+
+	expired, err := s.repo.ExpireIfUnused(s.ctx, created.ID)
+	s.Require().NoError(err)
+	s.Require().False(expired)
+
+	got, err := s.repo.GetByID(s.ctx, created.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.StatusUsed, got.Status)
+	s.Require().NotNil(got.UsedBy)
+	s.Require().Equal(user.ID, *got.UsedBy)
+	s.Require().NotNil(got.UsedAt)
+	s.Require().WithinDuration(usedAt, *got.UsedAt, time.Second)
+}
+
+func TestRedeemCodeExpireAndUseRaceHasSingleWinner(t *testing.T) {
+	ctx, repo, userID, codeID := newConcurrentRedeemFixture(t, "expire-use")
+	start := make(chan struct{})
+	var useErr, expireErr error
+	var expired bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		useErr = repo.Use(ctx, codeID, userID)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		expired, expireErr = repo.ExpireIfUnused(ctx, codeID)
+	}()
+	close(start)
+	wg.Wait()
+
+	require.NoError(t, expireErr)
+	require.NotEqual(t, expired, useErr == nil, "exactly one unused-state CAS must win")
+	got, err := repo.GetByID(ctx, codeID)
+	require.NoError(t, err)
+	if expired {
+		require.Equal(t, service.StatusExpired, got.Status)
+		require.Nil(t, got.UsedBy)
+		require.Nil(t, got.UsedAt)
+		return
+	}
+	require.Equal(t, service.StatusUsed, got.Status)
+	require.NotNil(t, got.UsedBy)
+	require.Equal(t, userID, *got.UsedBy)
+	require.NotNil(t, got.UsedAt)
+}
+
+func TestRedeemCodeDeleteAndUseRaceCannotEraseUsedWinner(t *testing.T) {
+	ctx, repo, userID, codeID := newConcurrentRedeemFixture(t, "delete-use")
+	start := make(chan struct{})
+	var useErr, deleteErr error
+	var deleted bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		useErr = repo.Use(ctx, codeID, userID)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		deleted, deleteErr = repo.DeleteIfUnused(ctx, codeID)
+	}()
+	close(start)
+	wg.Wait()
+
+	require.NoError(t, deleteErr)
+	require.NotEqual(t, deleted, useErr == nil, "exactly one unused-state CAS must win")
+	got, err := repo.GetByID(ctx, codeID)
+	if deleted {
+		require.ErrorIs(t, err, service.ErrRedeemCodeNotFound)
+		return
+	}
+	require.NoError(t, err)
+	require.Equal(t, service.StatusUsed, got.Status)
+	require.NotNil(t, got.UsedBy)
+	require.Equal(t, userID, *got.UsedBy)
+	require.NotNil(t, got.UsedAt)
+}
+
+func newConcurrentRedeemFixture(t *testing.T, prefix string) (context.Context, *redeemCodeRepository, int64, int64) {
+	t.Helper()
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewRedeemCodeRepository(client).(*redeemCodeRepository)
+	suffix := time.Now().UnixNano()
+	user, err := client.User.Create().
+		SetEmail(fmt.Sprintf("redeem-%s-%d@example.test", prefix, suffix)).
+		SetPasswordHash("test-password-hash").
+		Save(ctx)
+	require.NoError(t, err)
+	code, err := client.RedeemCode.Create().
+		SetCode(fmt.Sprintf("REDEEM-%s-%d", prefix, suffix)).
+		SetType(service.RedeemTypeBalance).
+		SetStatus(service.StatusUnused).
+		SetValue(1).
+		Save(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = client.RedeemCode.DeleteOneID(code.ID).Exec(ctx)
+		_ = client.User.DeleteOneID(user.ID).Exec(ctx)
+	})
+	return ctx, repo, user.ID, code.ID
+}
+
+func queryRedeemAuditReferenceCounts(t *testing.T, ctx context.Context, client *dbent.Client, ledgerKey string, codeID int64) (int, int) {
+	t.Helper()
+	rows, err := client.QueryContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM ledger_transactions WHERE idempotency_key = $1 AND redeem_code_id = $2),
+			(SELECT COUNT(*) FROM hfc_abuse_risk_events WHERE source = 'redeem-delete-guard' AND redeem_code_id = $2)
+	`, ledgerKey, codeID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	require.True(t, rows.Next())
+	var ledgerRefs, abuseRefs int
+	require.NoError(t, rows.Scan(&ledgerRefs, &abuseRefs))
+	require.NoError(t, rows.Err())
+	return ledgerRefs, abuseRefs
+}
+
 // --- List / ListWithFilters ---
 
 func (s *RedeemCodeRepoSuite) TestList() {
+	_, basePage, err := s.repo.List(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 100})
+	s.Require().NoError(err, "List base")
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "LIST-1", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "LIST-2", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 
-	codes, page, err := s.repo.List(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10})
+	codes, page, err := s.repo.List(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 100})
 	s.Require().NoError(err, "List")
-	s.Require().Len(codes, 2)
-	s.Require().Equal(int64(2), page.Total)
+	s.Require().Len(codes, int(basePage.Total)+2)
+	s.Require().Equal(basePage.Total+2, page.Total)
 }
 
 func (s *RedeemCodeRepoSuite) TestListWithFilters_Type() {
+	_, basePage, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 100}, service.RedeemTypeSubscription, "", "")
+	s.Require().NoError(err)
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "TYPE-BAL", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "TYPE-SUB", Type: service.RedeemTypeSubscription, Value: 0, Status: service.StatusUnused}))
 
-	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, service.RedeemTypeSubscription, "", "")
+	codes, page, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 100}, service.RedeemTypeSubscription, "", "")
 	s.Require().NoError(err)
-	s.Require().Len(codes, 1)
-	s.Require().Equal(service.RedeemTypeSubscription, codes[0].Type)
+	s.Require().Equal(basePage.Total+1, page.Total)
+	var found bool
+	for _, code := range codes {
+		if code.Code == "TYPE-SUB" {
+			found = true
+			s.Require().Equal(service.RedeemTypeSubscription, code.Type)
+		}
+	}
+	s.Require().True(found)
 }
 
 func (s *RedeemCodeRepoSuite) TestListWithFilters_Status() {
+	_, basePage, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 100}, "", service.StatusUsed, "")
+	s.Require().NoError(err)
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "STAT-UNUSED", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "STAT-USED", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUsed}))
 
-	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", service.StatusUsed, "")
+	codes, page, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 100}, "", service.StatusUsed, "")
 	s.Require().NoError(err)
-	s.Require().Len(codes, 1)
-	s.Require().Equal(service.StatusUsed, codes[0].Status)
+	s.Require().Equal(basePage.Total+1, page.Total)
+	var found bool
+	for _, code := range codes {
+		if code.Code == "STAT-USED" {
+			found = true
+			s.Require().Equal(service.StatusUsed, code.Status)
+		}
+	}
+	s.Require().True(found)
 }
 
 func (s *RedeemCodeRepoSuite) TestListWithFilters_Search() {
@@ -189,7 +416,7 @@ func (s *RedeemCodeRepoSuite) TestListWithFilters_GroupPreload() {
 		Save(s.ctx)
 	s.Require().NoError(err)
 
-	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "")
+	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "WITH-GROUP")
 	s.Require().NoError(err)
 	s.Require().Len(codes, 1)
 	s.Require().NotNil(codes[0].Group, "expected Group preload")

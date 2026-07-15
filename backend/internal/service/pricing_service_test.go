@@ -1,13 +1,174 @@
 package service
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+type pricingRemoteClientStub struct {
+	body      []byte
+	hash      string
+	bodyErr   error
+	hashErr   error
+	bodyCalls int
+	hashCalls int
+}
+
+func (s *pricingRemoteClientStub) FetchPricingJSON(context.Context, string) ([]byte, error) {
+	s.bodyCalls++
+	return s.body, s.bodyErr
+}
+
+func (s *pricingRemoteClientStub) FetchHashText(context.Context, string) (string, error) {
+	s.hashCalls++
+	return s.hash, s.hashErr
+}
+
+func newPricingIntegrityTestService(t *testing.T, remote *pricingRemoteClientStub) *PricingService {
+	t.Helper()
+	return NewPricingService(&config.Config{
+		Pricing: config.PricingConfig{
+			RemoteURL: "https://raw.githubusercontent.com/example/pricing.json",
+			HashURL:   "https://raw.githubusercontent.com/example/pricing.sha256",
+			DataDir:   t.TempDir(),
+		},
+	}, remote)
+}
+
+func TestPricingDownloadFailsClosedWhenHashFetchFails(t *testing.T) {
+	remote := &pricingRemoteClientStub{
+		body:    []byte(`{"gpt-test":{"input_cost_per_token":0.1}}`),
+		hashErr: errors.New("hash unavailable"),
+	}
+	svc := newPricingIntegrityTestService(t, remote)
+
+	err := svc.downloadPricingData()
+
+	require.ErrorContains(t, err, "fetch remote pricing hash")
+	require.Zero(t, remote.bodyCalls, "unverifiable pricing data must not be downloaded or activated")
+	require.Empty(t, svc.pricingData)
+}
+
+func TestPricingDownloadRejectsMalformedOrMismatchedHash(t *testing.T) {
+	body := []byte(`{"gpt-test":{"input_cost_per_token":0.1}}`)
+
+	t.Run("malformed hash", func(t *testing.T) {
+		remote := &pricingRemoteClientStub{body: body, hash: "not-a-sha256"}
+		svc := newPricingIntegrityTestService(t, remote)
+
+		err := svc.downloadPricingData()
+
+		require.ErrorContains(t, err, "invalid remote pricing hash")
+		require.Zero(t, remote.bodyCalls)
+		require.Empty(t, svc.pricingData)
+	})
+
+	t.Run("hash mismatch", func(t *testing.T) {
+		remote := &pricingRemoteClientStub{body: body, hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+		svc := newPricingIntegrityTestService(t, remote)
+
+		err := svc.downloadPricingData()
+
+		require.ErrorContains(t, err, "pricing hash mismatch")
+		require.Equal(t, 1, remote.bodyCalls)
+		require.Empty(t, svc.pricingData)
+		_, statErr := os.Stat(svc.getPricingFilePath())
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+}
+
+func TestPricingDownloadPersistsVerifiedDataWithPrivatePermissions(t *testing.T) {
+	body := []byte(`{"gpt-test":{"input_cost_per_token":0.1}}`)
+	hash := sha256.Sum256(body)
+	remote := &pricingRemoteClientStub{body: body, hash: fmt.Sprintf("%x", hash)}
+	svc := newPricingIntegrityTestService(t, remote)
+
+	require.NoError(t, svc.downloadPricingData())
+	require.NotNil(t, svc.pricingData["gpt-test"])
+	require.Equal(t, remote.hash, svc.localHash)
+
+	for _, path := range []string{svc.getPricingFilePath(), svc.getHashFilePath()} {
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), path)
+	}
+}
+
+func TestPricingLocalLoadRequiresMatchingPersistedHash(t *testing.T) {
+	body := []byte(`{"gpt-test":{"input_cost_per_token":0.1}}`)
+	hash := sha256.Sum256(body)
+
+	tests := []struct {
+		name        string
+		hashMarker  string
+		writeMarker bool
+		wantError   string
+	}{
+		{name: "missing marker", wantError: "read local pricing hash"},
+		{name: "malformed marker", hashMarker: "not-a-hash", writeMarker: true, wantError: "validate local pricing hash"},
+		{name: "mismatched marker", hashMarker: strings.Repeat("a", 64), writeMarker: true, wantError: "local pricing hash mismatch"},
+		{name: "matching marker", hashMarker: fmt.Sprintf("%x", hash), writeMarker: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newPricingIntegrityTestService(t, &pricingRemoteClientStub{})
+			require.NoError(t, os.WriteFile(svc.getPricingFilePath(), body, 0o600))
+			if tt.writeMarker {
+				require.NoError(t, os.WriteFile(svc.getHashFilePath(), []byte(tt.hashMarker+"\n"), 0o600))
+			}
+
+			err := svc.loadVerifiedLocalPricingData(svc.getPricingFilePath())
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				require.Empty(t, svc.pricingData)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, fmt.Sprintf("%x", hash), svc.localHash)
+			require.NotNil(t, svc.pricingData["gpt-test"])
+		})
+	}
+}
+
+func TestPricingURLAlwaysRequiresHTTPS(t *testing.T) {
+	svc := NewPricingService(&config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{
+				Enabled:           false,
+				AllowInsecureHTTP: true,
+			},
+		},
+	}, &pricingRemoteClientStub{})
+
+	_, err := svc.validatePricingURL("http://pricing.example.test/model.json")
+	require.ErrorContains(t, err, "invalid url scheme")
+	normalized, err := svc.validatePricingURL("https://pricing.example.test/model.json")
+	require.NoError(t, err)
+	require.Equal(t, "https://pricing.example.test/model.json", normalized)
+}
+
+func TestParsePricingDataRejectsNegativeCosts(t *testing.T) {
+	svc := &PricingService{}
+
+	_, err := svc.parsePricingData([]byte(`{
+		"gpt-test": {
+			"input_cost_per_token": -0.1,
+			"output_cost_per_token": 0.2
+		}
+	}`))
+
+	require.ErrorContains(t, err, "negative pricing value")
+}
 
 func TestPricingServiceGetModelPricing_GPT56ExactFallbacks(t *testing.T) {
 	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{

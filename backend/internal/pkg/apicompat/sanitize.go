@@ -3,6 +3,7 @@ package apicompat
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 )
 
 // thinkingKeyMarker is the cheapest substring that must be present in the body
@@ -13,6 +14,13 @@ import (
 // A false positive (e.g. user text that contains the literal string
 // `"thinking"`) is harmless — the slow path runs and finds nothing to drop.
 var thinkingKeyMarker = []byte(`"thinking"`)
+
+const maxAnthropicSanitizeBodyBytes = 16 << 20
+
+// ErrAnthropicSanitizeBodyTooLarge is returned before JSON decoding when the
+// compatibility slow path would otherwise multiply a large request's working
+// set. Callers must reject this request instead of forwarding it unchanged.
+var ErrAnthropicSanitizeBodyTooLarge = errors.New("anthropic compatibility sanitization body limit exceeded")
 
 // SanitizeAnthropicRequestBody removes placeholder "empty thinking" content
 // blocks from a POST /v1/messages request body before it is forwarded upstream.
@@ -62,6 +70,9 @@ func SanitizeAnthropicRequestBody(body []byte) ([]byte, int, error) {
 	// /v1/messages requests in production do not carry thinking blocks.
 	if !bytes.Contains(body, thinkingKeyMarker) {
 		return body, 0, nil
+	}
+	if len(body) > maxAnthropicSanitizeBodyBytes {
+		return body, 0, ErrAnthropicSanitizeBodyTooLarge
 	}
 
 	var top map[string]json.RawMessage

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -25,7 +24,10 @@ func (s *PaymentConfigService) GetAvailableMethodLimits(ctx context.Context) (*M
 		Methods: make(map[string]MethodLimits, len(typeInstances)),
 	}
 	for pt, insts := range typeInstances {
-		ml := pcAggregateMethodLimits(pt, insts)
+		ml, err := pcAggregateMethodLimits(pt, insts)
+		if err != nil {
+			return nil, err
+		}
 		resp.Methods[ml.PaymentType] = ml
 	}
 	resp.GlobalMin, resp.GlobalMax = pcComputeGlobalRange(resp.Methods)
@@ -43,6 +45,11 @@ func (s *PaymentConfigService) pcApplyEnabledVisibleMethodInstances(ctx context.
 	}
 
 	for _, method := range []string{payment.TypeAlipay, payment.TypeWxpay} {
+		methodEnabled, err := s.visibleMethodEnabled(ctx, method)
+		if err != nil || !methodEnabled {
+			delete(filtered, method)
+			continue
+		}
 		matching := filterEnabledVisibleMethodInstances(instances, method)
 		providerKey, err := s.resolveVisibleMethodProviderKey(ctx, method, matching)
 		if err != nil {
@@ -82,7 +89,11 @@ func (s *PaymentConfigService) GetMethodLimits(ctx context.Context, types []stri
 				matching = append(matching, inst)
 			}
 		}
-		result = append(result, pcAggregateMethodLimits(pt, matching))
+		ml, err := pcAggregateMethodLimits(pt, matching)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, ml)
 	}
 	return result, nil
 }
@@ -119,16 +130,13 @@ func pcGroupByPaymentType(instances []*dbent.PaymentProviderInstance) map[string
 // pcInstanceTypeLimits extracts per-type limits from a provider instance.
 // Returns (limits, true) if configured; (zero, false) if unlimited.
 // For Stripe instances, limits are stored under "stripe" key regardless of sub-types.
-func pcInstanceTypeLimits(inst *dbent.PaymentProviderInstance, pt string) (payment.ChannelLimits, bool) {
-	if inst.Limits == "" {
-		return payment.ChannelLimits{}, false
-	}
-	var limits payment.InstanceLimits
-	if err := json.Unmarshal([]byte(inst.Limits), &limits); err != nil {
-		return payment.ChannelLimits{}, false
+func pcInstanceTypeLimits(inst *dbent.PaymentProviderInstance, pt string) (payment.ChannelLimits, bool, error) {
+	limits, err := payment.ParseInstanceLimits(inst.Limits)
+	if err != nil {
+		return payment.ChannelLimits{}, false, fmt.Errorf("provider instance %d has invalid limits: %w", inst.ID, err)
 	}
 	cl, ok := limits[pt]
-	return cl, ok
+	return cl, ok, nil
 }
 
 // unionFloat merges a single limit value into the aggregate using UNION semantics.
@@ -164,14 +172,17 @@ func unionFloat(agg float64, limited bool, val float64, wantMin bool) (float64, 
 //   - SingleMin: lowest floor across instances; 0 if any is unlimited
 //   - SingleMax: highest ceiling across instances; 0 if any is unlimited
 //   - DailyLimit: highest cap across instances; 0 if any is unlimited
-func pcAggregateMethodLimits(pt string, instances []*dbent.PaymentProviderInstance) MethodLimits {
+func pcAggregateMethodLimits(pt string, instances []*dbent.PaymentProviderInstance) (MethodLimits, error) {
 	ml := MethodLimits{PaymentType: pt}
 	minLimited, maxLimited, dailyLimited := true, true, true
 
 	for _, inst := range instances {
-		cl, hasLimits := pcInstanceTypeLimits(inst, pt)
+		cl, hasLimits, err := pcInstanceTypeLimits(inst, pt)
+		if err != nil {
+			return MethodLimits{}, err
+		}
 		if !hasLimits {
-			return MethodLimits{PaymentType: pt} // any unlimited instance → all zeros
+			return MethodLimits{PaymentType: pt}, nil // any global-only instance → all zeros
 		}
 		ml.SingleMin, minLimited = unionFloat(ml.SingleMin, minLimited, cl.SingleMin, true)
 		ml.SingleMax, maxLimited = unionFloat(ml.SingleMax, maxLimited, cl.SingleMax, false)
@@ -187,7 +198,7 @@ func pcAggregateMethodLimits(pt string, instances []*dbent.PaymentProviderInstan
 	if !dailyLimited {
 		ml.DailyLimit = 0
 	}
-	return ml
+	return ml, nil
 }
 
 // pcComputeGlobalRange computes the widest [min, max] across all methods.

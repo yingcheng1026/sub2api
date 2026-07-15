@@ -14,7 +14,11 @@ import (
 
 const (
 	apiKeyRateLimitKeyPrefix   = "apikey:ratelimit:"
+	apiKeyStepUpLimitKeyPrefix = "apikey:stepup:ratelimit:"
+	apiKeyCreateLimitKeyPrefix = "apikey:create:ratelimit:"
 	apiKeyRateLimitDuration    = 24 * time.Hour
+	apiKeyStepUpLimitDuration  = time.Hour
+	apiKeyCreateLimitDuration  = time.Hour
 	apiKeyAuthCachePrefix      = "apikey:auth:"
 	authCacheInvalidateChannel = "auth:cache:invalidate"
 )
@@ -22,6 +26,14 @@ const (
 // apiKeyRateLimitKey generates the Redis key for API key creation rate limiting.
 func apiKeyRateLimitKey(userID int64) string {
 	return fmt.Sprintf("%s%d", apiKeyRateLimitKeyPrefix, userID)
+}
+
+func apiKeyStepUpLimitKey(purpose string, userID int64) string {
+	return fmt.Sprintf("%s%s:%d", apiKeyStepUpLimitKeyPrefix, purpose, userID)
+}
+
+func apiKeyCreateLimitKey(userID int64) string {
+	return fmt.Sprintf("%s%d", apiKeyCreateLimitKeyPrefix, userID)
 }
 
 func apiKeyAuthCacheKey(key string) string {
@@ -57,6 +69,33 @@ func (c *apiKeyCache) IncrementCreateAttemptCount(ctx context.Context, userID in
 func (c *apiKeyCache) DeleteCreateAttemptCount(ctx context.Context, userID int64) error {
 	key := apiKeyRateLimitKey(userID)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *apiKeyCache) IncrementAPIKeyStepUpAttempt(ctx context.Context, purpose string, userID int64) (int, error) {
+	key := apiKeyStepUpLimitKey(purpose, userID)
+	return c.reserveFixedWindow(ctx, key, apiKeyStepUpLimitDuration)
+}
+
+func (c *apiKeyCache) ReserveAPIKeyCreate(ctx context.Context, userID int64) (int, error) {
+	return c.reserveFixedWindow(ctx, apiKeyCreateLimitKey(userID), apiKeyCreateLimitDuration)
+}
+
+func (c *apiKeyCache) reserveFixedWindow(ctx context.Context, key string, duration time.Duration) (int, error) {
+	const reserveScript = `
+		local count = redis.call('INCR', KEYS[1])
+		if count == 1 then
+			redis.call('EXPIRE', KEYS[1], ARGV[1])
+		end
+		return count`
+	count, err := c.rdb.Eval(ctx, reserveScript, []string{key}, int64(duration/time.Second)).Int()
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (c *apiKeyCache) DeleteAPIKeyStepUpAttempts(ctx context.Context, purpose string, userID int64) error {
+	return c.rdb.Del(ctx, apiKeyStepUpLimitKey(purpose, userID)).Err()
 }
 
 func (c *apiKeyCache) IncrementDailyUsage(ctx context.Context, apiKey string) error {

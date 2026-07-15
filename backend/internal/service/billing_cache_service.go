@@ -398,6 +398,21 @@ func (s *BillingCacheService) InvalidateUserBalance(ctx context.Context, userID 
 	return nil
 }
 
+// invalidateBillingCacheAfterCommit completes invalidation before a successful
+// mutation response is returned. The database is already authoritative, so a
+// cache outage is logged rather than misreported to the caller as a failed
+// financial mutation.
+func invalidateBillingCacheAfterCommit(ctx context.Context, operation string, invalidate func(context.Context) error) {
+	if invalidate == nil {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cacheWriteTimeout)
+	defer cancel()
+	if err := invalidate(cacheCtx); err != nil {
+		logger.LegacyPrintf("service.billing_cache", "Warning: post-commit cache invalidation failed (%s): %v", operation, err)
+	}
+}
+
 // ============================================
 // 订阅缓存方法
 // ============================================

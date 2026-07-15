@@ -358,6 +358,39 @@ func TestWeChatOAuthCallbackRejectsDisabledExistingIdentityUser(t *testing.T) {
 	require.Zero(t, count)
 }
 
+func TestWeChatPaymentOAuthStartRequiresSignedUserBinding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const signingKey = "0123456789abcdef0123456789abcdef"
+	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", signingKey)
+	handler, client := newWeChatOAuthTestHandlerWithSettings(t, false, wechatOAuthTestSettings("mp", "wx-mp-app", "wx-mp-secret", "/auth/wechat/callback"))
+	defer client.Close()
+
+	unsignedRecorder := httptest.NewRecorder()
+	unsignedContext, _ := gin.CreateTestContext(unsignedRecorder)
+	unsignedContext.Request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/wechat/payment/start?payment_type=wxpay", nil)
+	unsignedContext.Request.Host = "api.example.com"
+	handler.WeChatPaymentOAuthStart(unsignedContext)
+	require.Equal(t, http.StatusBadRequest, unsignedRecorder.Code)
+
+	subjectToken, err := service.NewPaymentResumeService([]byte(signingKey)).CreateWeChatPaymentOAuthSubjectToken(17)
+	require.NoError(t, err)
+	signedRecorder := httptest.NewRecorder()
+	signedContext, _ := gin.CreateTestContext(signedRecorder)
+	signedContext.Request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/wechat/payment/start?payment_type=wxpay&subject_token="+url.QueryEscape(subjectToken), nil)
+	signedContext.Request.Host = "api.example.com"
+	handler.WeChatPaymentOAuthStart(signedContext)
+
+	require.Equal(t, http.StatusFound, signedRecorder.Code)
+	require.Equal(t, "no-referrer", signedRecorder.Header().Get("Referrer-Policy"))
+	contextCookie := findCookie(signedRecorder.Result().Cookies(), wechatPaymentOAuthContextName)
+	require.NotNil(t, contextCookie)
+	rawContext, err := decodeCookieValue(contextCookie.Value)
+	require.NoError(t, err)
+	paymentContext, err := decodeWeChatPaymentOAuthContext(rawContext)
+	require.NoError(t, err)
+	require.Equal(t, subjectToken, paymentContext.SubjectToken)
+}
+
 func TestWeChatPaymentOAuthCallbackRedirectsWithOpaqueResumeToken(t *testing.T) {
 	originalAccessTokenURL := wechatOAuthAccessTokenURL
 	t.Cleanup(func() {
@@ -379,6 +412,16 @@ func TestWeChatPaymentOAuthCallbackRedirectsWithOpaqueResumeToken(t *testing.T) 
 	defer client.Close()
 	handler.cfg.Totp.EncryptionKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	handler.cfg.Totp.EncryptionKeyConfigured = true
+	subjectToken, err := handler.wechatPaymentResumeService().CreateWeChatPaymentOAuthSubjectToken(17)
+	require.NoError(t, err)
+	paymentContext, err := encodeWeChatPaymentOAuthContext(wechatPaymentOAuthContext{
+		PaymentType:  payment.TypeWxpay,
+		Amount:       "12.5",
+		OrderType:    payment.OrderTypeSubscription,
+		PlanID:       7,
+		SubjectToken: subjectToken,
+	})
+	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -386,7 +429,7 @@ func TestWeChatPaymentOAuthCallbackRedirectsWithOpaqueResumeToken(t *testing.T) 
 	req.Host = "api.example.com"
 	req.AddCookie(encodedCookie(wechatPaymentOAuthStateName, "state-123"))
 	req.AddCookie(encodedCookie(wechatPaymentOAuthRedirect, "/purchase?from=wechat"))
-	req.AddCookie(encodedCookie(wechatPaymentOAuthContextName, `{"payment_type":"wxpay","amount":"12.5","order_type":"subscription","plan_id":7}`))
+	req.AddCookie(encodedCookie(wechatPaymentOAuthContextName, paymentContext))
 	req.AddCookie(encodedCookie(wechatPaymentOAuthScope, "snsapi_base"))
 	c.Request = req
 
@@ -414,6 +457,8 @@ func TestWeChatPaymentOAuthCallbackRedirectsWithOpaqueResumeToken(t *testing.T) 
 	require.Equal(t, payment.OrderTypeSubscription, claims.OrderType)
 	require.EqualValues(t, 7, claims.PlanID)
 	require.Equal(t, "/purchase?from=wechat", claims.RedirectTo)
+	require.EqualValues(t, 17, claims.UserID)
+	require.NotEmpty(t, claims.JTI)
 }
 
 func TestWeChatPaymentOAuthCallbackUsesExplicitPaymentResumeSigningKeyWhenMixedKeysConfigured(t *testing.T) {
@@ -441,6 +486,16 @@ func TestWeChatPaymentOAuthCallbackUsesExplicitPaymentResumeSigningKeyWhenMixedK
 	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", explicitSigningKey)
 	handler.cfg.Totp.EncryptionKey = legacyKeyHex
 	handler.cfg.Totp.EncryptionKeyConfigured = true
+	subjectToken, err := handler.wechatPaymentResumeService().CreateWeChatPaymentOAuthSubjectToken(19)
+	require.NoError(t, err)
+	paymentContext, err := encodeWeChatPaymentOAuthContext(wechatPaymentOAuthContext{
+		PaymentType:  payment.TypeWxpay,
+		Amount:       "18.8",
+		OrderType:    payment.OrderTypeSubscription,
+		PlanID:       9,
+		SubjectToken: subjectToken,
+	})
+	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -448,7 +503,7 @@ func TestWeChatPaymentOAuthCallbackUsesExplicitPaymentResumeSigningKeyWhenMixedK
 	req.Host = "api.example.com"
 	req.AddCookie(encodedCookie(wechatPaymentOAuthStateName, "state-mixed"))
 	req.AddCookie(encodedCookie(wechatPaymentOAuthRedirect, "/purchase?from=wechat"))
-	req.AddCookie(encodedCookie(wechatPaymentOAuthContextName, `{"payment_type":"wxpay","amount":"18.8","order_type":"subscription","plan_id":9}`))
+	req.AddCookie(encodedCookie(wechatPaymentOAuthContextName, paymentContext))
 	req.AddCookie(encodedCookie(wechatPaymentOAuthScope, "snsapi_base"))
 	c.Request = req
 
@@ -472,6 +527,8 @@ func TestWeChatPaymentOAuthCallbackUsesExplicitPaymentResumeSigningKeyWhenMixedK
 	require.Equal(t, payment.OrderTypeSubscription, claims.OrderType)
 	require.EqualValues(t, 9, claims.PlanID)
 	require.Equal(t, "/purchase?from=wechat", claims.RedirectTo)
+	require.EqualValues(t, 19, claims.UserID)
+	require.NotEmpty(t, claims.JTI)
 
 	_, err = service.NewPaymentResumeService([]byte("0123456789abcdef0123456789abcdef")).ParseWeChatPaymentResumeToken(token)
 	require.Error(t, err)
@@ -1462,6 +1519,10 @@ func (s *wechatOAuthRefreshTokenCacheStub) StoreRefreshToken(context.Context, st
 }
 
 func (s *wechatOAuthRefreshTokenCacheStub) GetRefreshToken(context.Context, string) (*service.RefreshTokenData, error) {
+	return nil, service.ErrRefreshTokenNotFound
+}
+
+func (s *wechatOAuthRefreshTokenCacheStub) ConsumeRefreshToken(context.Context, string) (*service.RefreshTokenData, error) {
 	return nil, service.ErrRefreshTokenNotFound
 }
 

@@ -68,8 +68,16 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	// 1) Try cache first.
 	if p.tokenCache != nil {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
-			slog.Debug("claude_token_cache_hit", "account_id", account.ID)
-			return token, nil
+			latestAccount, cacheHitIsCurrent, validationErr := validateOAuthTokenCacheHit(ctx, account, p.accountRepo)
+			if validationErr != nil {
+				return "", validationErr
+			}
+			if cacheHitIsCurrent {
+				slog.Debug("claude_token_cache_hit", "account_id", account.ID)
+				return token, nil
+			}
+			account = latestAccount
+			cacheKey = ClaudeTokenCacheKey(account)
 		} else if err != nil {
 			slog.Warn("claude_token_cache_get_failed", "account_id", account.ID, "error", err)
 		}
@@ -94,8 +102,17 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
 				time.Sleep(claudeLockWaitTime)
 				if token, cacheErr := p.tokenCache.GetAccessToken(ctx, cacheKey); cacheErr == nil && strings.TrimSpace(token) != "" {
-					slog.Debug("claude_token_cache_hit_after_wait", "account_id", account.ID)
-					return token, nil
+					latestAccount, cacheHitIsCurrent, validationErr := validateOAuthTokenCacheHit(ctx, account, p.accountRepo)
+					if validationErr != nil {
+						return "", validationErr
+					}
+					if cacheHitIsCurrent {
+						slog.Debug("claude_token_cache_hit_after_wait", "account_id", account.ID)
+						return token, nil
+					}
+					account = latestAccount
+					cacheKey = ClaudeTokenCacheKey(account)
+					expiresAt = account.GetCredentialAsTime("expires_at")
 				}
 			}
 		} else {
@@ -104,16 +121,25 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		}
 	} else if needsRefresh && p.tokenCache != nil {
 		// Backward-compatible test path when refreshAPI is not injected.
-		locked, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
+		locked, ownershipToken, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
 		if lockErr == nil && locked {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, ownershipToken) }()
 		} else if lockErr != nil {
 			slog.Warn("claude_token_lock_failed", "account_id", account.ID, "error", lockErr)
 		} else {
 			time.Sleep(claudeLockWaitTime)
 			if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
-				slog.Debug("claude_token_cache_hit_after_wait", "account_id", account.ID)
-				return token, nil
+				latestAccount, cacheHitIsCurrent, validationErr := validateOAuthTokenCacheHit(ctx, account, p.accountRepo)
+				if validationErr != nil {
+					return "", validationErr
+				}
+				if cacheHitIsCurrent {
+					slog.Debug("claude_token_cache_hit_after_wait", "account_id", account.ID)
+					return token, nil
+				}
+				account = latestAccount
+				cacheKey = ClaudeTokenCacheKey(account)
+				expiresAt = account.GetCredentialAsTime("expires_at")
 			}
 		}
 	}
@@ -125,8 +151,10 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 	// 3) Populate cache with TTL.
 	if p.tokenCache != nil {
-		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
-		if isStale && latestAccount != nil {
+		latestAccount, isStale, versionErr := CheckTokenVersion(ctx, account, p.accountRepo)
+		if versionErr != nil {
+			slog.Warn("claude_token_version_check_unavailable", "account_id", account.ID, "error", versionErr)
+		} else if isStale && latestAccount != nil {
 			slog.Debug("claude_token_version_stale_use_latest", "account_id", account.ID)
 			accessToken = latestAccount.GetCredential("access_token")
 			if strings.TrimSpace(accessToken) == "" {

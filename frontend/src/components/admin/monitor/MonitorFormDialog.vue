@@ -47,7 +47,8 @@
           <input
             v-model="form.api_key"
             type="password"
-            :required="!editing"
+            :required="!editing && !form.api_key_id"
+            @input="form.api_key_id = null"
             class="input flex-1"
             :placeholder="editing ? t('admin.channelMonitor.form.apiKeyEditPlaceholder') : t('admin.channelMonitor.form.apiKeyPlaceholder')"
           />
@@ -114,7 +115,26 @@
             <p class="mt-1 text-xs text-gray-400">{{ t('admin.channelMonitor.templateField.applyHint') }}</p>
           </div>
 
+          <div
+            v-if="editing"
+            class="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+          >
+            <p>{{ t('admin.channelMonitor.advanced.writeOnlyNotice') }}</p>
+            <label class="mt-2 flex cursor-pointer items-center gap-2 font-medium">
+              <input v-model="form.replace_request_customization" type="checkbox" />
+              {{ t('admin.channelMonitor.advanced.replaceExisting') }}
+            </label>
+          </div>
+
+          <p
+            v-if="form.template_id != null"
+            class="rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"
+          >
+            {{ t('admin.channelMonitor.advanced.templateAppliedServerSide') }}
+          </p>
+
           <MonitorAdvancedRequestConfig
+            v-else-if="!editing || form.replace_request_customization"
             :extra-headers="form.extra_headers"
             :body-override-mode="form.body_override_mode"
             :body-override="form.body_override"
@@ -162,6 +182,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { adminAPI } from '@/api/admin'
+import { applyWriteOnlyMonitorCustomization } from '@/api/admin/channelMonitorWriteOnly'
 import { keysAPI } from '@/api/keys'
 import { userGroupsAPI } from '@/api/groups'
 import type {
@@ -226,6 +247,7 @@ interface MonitorForm {
   provider: Provider
   endpoint: string
   api_key: string
+  api_key_id: number | null
   primary_model: string
   extra_models: string[]
   group_name: string
@@ -236,6 +258,7 @@ interface MonitorForm {
   extra_headers: Record<string, string>
   body_override_mode: BodyOverrideMode
   body_override: Record<string, unknown> | null
+  replace_request_customization: boolean
 }
 
 const form = reactive<MonitorForm>({
@@ -243,6 +266,7 @@ const form = reactive<MonitorForm>({
   provider: PROVIDER_ANTHROPIC,
   endpoint: '',
   api_key: '',
+  api_key_id: null,
   primary_model: '',
   extra_models: [],
   group_name: '',
@@ -252,6 +276,7 @@ const form = reactive<MonitorForm>({
   extra_headers: {},
   body_override_mode: 'off',
   body_override: null,
+  replace_request_customization: false,
 })
 
 // 可用模板列表（进入 dialog 时一次性拉取 cache；按 provider 过滤）。
@@ -284,20 +309,17 @@ async function loadTemplates() {
 const templateSelectValue = computed<string>({
   get: () => (form.template_id == null ? '' : String(form.template_id)),
   set: (raw: string) => {
+    const previous = form.template_id
     if (raw === '') {
       form.template_id = null
+      if (editing.value && previous !== null) form.replace_request_customization = true
       return
     }
     const id = Number(raw)
     if (!Number.isFinite(id)) return
     form.template_id = id
-    // 应用模板 = 拷贝快照
-    const tpl = templatesCache.value.find((t) => t.id === id)
-    if (tpl) {
-      form.extra_headers = { ...(tpl.extra_headers || {}) }
-      form.body_override_mode = tpl.body_override_mode
-      form.body_override = tpl.body_override ? { ...tpl.body_override } : null
-    }
+    // 模板内容是 write-only，由后端按 template_id 安全拷贝快照。
+    if (editing.value && previous !== id) form.replace_request_customization = true
   },
 })
 
@@ -317,16 +339,26 @@ const providerOptions = computed<ProviderOption[]>(() => [
 // typing, so clearing on provider change is always a safe no-op until the user
 // picks a new key.
 // 同时清空 template_id（模板有 provider 归属，跨平台不通用）。
-watch(() => form.provider, () => {
-  form.api_key = ''
-  form.template_id = null
-})
+watch(
+  () => form.provider,
+  (provider) => {
+    // loadFromMonitor 会先恢复 provider、随后恢复 template_id；加载原值时不能触发清空。
+    if (editing.value && provider === editing.value.provider) return
+    form.api_key = ''
+    form.api_key_id = null
+    if (editing.value) {
+      form.replace_request_customization = true
+    }
+    form.template_id = null
+  },
+)
 
 function resetForm() {
   form.name = ''
   form.provider = PROVIDER_ANTHROPIC
   form.endpoint = ''
   form.api_key = ''
+  form.api_key_id = null
   form.primary_model = ''
   form.extra_models = []
   form.group_name = ''
@@ -336,6 +368,7 @@ function resetForm() {
   form.extra_headers = {}
   form.body_override_mode = 'off'
   form.body_override = null
+  form.replace_request_customization = false
 }
 
 function loadFromMonitor(m: ChannelMonitor) {
@@ -343,15 +376,18 @@ function loadFromMonitor(m: ChannelMonitor) {
   form.provider = m.provider
   form.endpoint = m.endpoint
   form.api_key = ''
+  form.api_key_id = null
   form.primary_model = m.primary_model
   form.extra_models = [...(m.extra_models || [])]
   form.group_name = m.group_name || ''
   form.interval_seconds = m.interval_seconds || systemDefaultInterval.value
   form.enabled = m.enabled
   form.template_id = m.template_id ?? null
-  form.extra_headers = { ...(m.extra_headers || {}) }
-  form.body_override_mode = m.body_override_mode || 'off'
-  form.body_override = m.body_override ? { ...m.body_override } : null
+  // 请求自定义字段不从 API 回显；编辑时默认保留原配置。
+  form.extra_headers = {}
+  form.body_override_mode = 'off'
+  form.body_override = null
+  form.replace_request_customization = false
 }
 
 // Re-sync form whenever the dialog is opened or the target monitor changes.
@@ -396,26 +432,33 @@ async function openMyKeyPicker() {
 }
 
 function pickMyKey(k: ApiKey) {
-  form.api_key = k.key
+  // 只把已认证账号下的 key ID 交给后端解析；不要把 key 值复制进表单或提交体。
+  form.api_key = ''
+  form.api_key_id = k.id
   showKeyPicker.value = false
 }
 
 function buildPayload(): CreateParams {
-  return {
+  const payload: CreateParams = {
     name: form.name.trim(),
     provider: form.provider,
     endpoint: form.endpoint.trim(),
-    api_key: form.api_key.trim(),
     primary_model: form.primary_model.trim(),
     extra_models: form.extra_models,
     group_name: form.group_name.trim(),
     enabled: form.enabled,
     interval_seconds: form.interval_seconds,
-    template_id: form.template_id,
-    extra_headers: form.extra_headers,
-    body_override_mode: form.body_override_mode,
-    body_override: form.body_override,
   }
+  if (form.api_key.trim()) payload.api_key = form.api_key.trim()
+  if (form.api_key_id != null) payload.api_key_id = form.api_key_id
+  if (form.template_id != null) {
+    payload.template_id = form.template_id
+  } else {
+    payload.extra_headers = form.extra_headers
+    payload.body_override_mode = form.body_override_mode
+    payload.body_override = form.body_override
+  }
+  return payload
 }
 
 async function handleSubmit() {
@@ -433,15 +476,27 @@ async function handleSubmit() {
   try {
     const target = editing.value
     if (target) {
-      const { api_key, ...rest } = buildPayload()
-      const req: UpdateParams = { ...rest }
+      const {
+        api_key,
+        api_key_id,
+        template_id: _templateID,
+        extra_headers: _extraHeaders,
+        body_override_mode: _bodyOverrideMode,
+        body_override: _bodyOverride,
+        ...rest
+      } = buildPayload()
+      let req: UpdateParams = { ...rest }
       // Only send api_key if user typed a new value
       if (api_key) req.api_key = api_key
-      // template_id=null 用 clear_template=true 明确告诉后端清空（pointer 语义）
-      if (form.template_id == null) {
-        req.clear_template = true
-        delete req.template_id
-      }
+      if (api_key_id) req.api_key_id = api_key_id
+
+      req = applyWriteOnlyMonitorCustomization(req, target.template_id ?? null, {
+        templateId: form.template_id,
+        replace: form.replace_request_customization,
+        extraHeaders: form.extra_headers,
+        bodyOverrideMode: form.body_override_mode,
+        bodyOverride: form.body_override,
+      })
       await adminAPI.channelMonitor.update(target.id, req)
       appStore.showSuccess(t('admin.channelMonitor.updateSuccess'))
     } else {

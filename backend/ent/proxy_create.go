@@ -244,11 +244,6 @@ func (_c *ProxyCreate) check() error {
 			return &ValidationError{Name: "username", err: fmt.Errorf(`ent: validator failed for field "Proxy.username": %w`, err)}
 		}
 	}
-	if v, ok := _c.mutation.Password(); ok {
-		if err := proxy.PasswordValidator(v); err != nil {
-			return &ValidationError{Name: "password", err: fmt.Errorf(`ent: validator failed for field "Proxy.password": %w`, err)}
-		}
-	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "Proxy.status"`)}
 	}

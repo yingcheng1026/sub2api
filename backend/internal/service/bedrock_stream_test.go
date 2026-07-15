@@ -241,21 +241,66 @@ func TestBedrockEventStreamDecoder(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "prelude CRC mismatch")
 	})
+
+	t.Run("oversized frame is rejected before allocation", func(t *testing.T) {
+		var prelude bytes.Buffer
+		_ = binary.Write(&prelude, binary.BigEndian, uint32(16*1024*1024+1))
+		_ = binary.Write(&prelude, binary.BigEndian, uint32(0))
+		frame := append([]byte(nil), prelude.Bytes()...)
+		frame = binary.BigEndian.AppendUint32(frame, crc32.Checksum(frame, crc32IeeeTab))
+
+		decoder := newBedrockEventStreamDecoder(bytes.NewReader(frame))
+		_, err := decoder.Decode()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds limit")
+	})
+
+	t.Run("headers length beyond frame is rejected without panic", func(t *testing.T) {
+		var prelude bytes.Buffer
+		_ = binary.Write(&prelude, binary.BigEndian, uint32(16))
+		_ = binary.Write(&prelude, binary.BigEndian, uint32(5))
+		frame := append([]byte(nil), prelude.Bytes()...)
+		frame = binary.BigEndian.AppendUint32(frame, crc32.Checksum(frame, crc32IeeeTab))
+		frame = binary.BigEndian.AppendUint32(frame, crc32.Checksum(frame, crc32IeeeTab))
+
+		decoder := newBedrockEventStreamDecoder(bytes.NewReader(frame))
+		_, err := decoder.Decode()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "headers_length")
+	})
 }
 
 func TestBuildBedrockURL(t *testing.T) {
 	t.Run("stream URL with colon in model ID", func(t *testing.T) {
-		url := BuildBedrockURL("us-east-1", "us.anthropic.claude-opus-4-5-20251101-v1:0", true)
+		url, err := BuildBedrockURL("us-east-1", "us.anthropic.claude-opus-4-5-20251101-v1:0", true)
+		require.NoError(t, err)
 		assert.Equal(t, "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-opus-4-5-20251101-v1%3A0/invoke-with-response-stream", url)
 	})
 
 	t.Run("non-stream URL with colon in model ID", func(t *testing.T) {
-		url := BuildBedrockURL("eu-west-1", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", false)
+		url, err := BuildBedrockURL("eu-west-1", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", false)
+		require.NoError(t, err)
 		assert.Equal(t, "https://bedrock-runtime.eu-west-1.amazonaws.com/model/eu.anthropic.claude-sonnet-4-5-20250929-v1%3A0/invoke", url)
 	})
 
 	t.Run("model ID without colon", func(t *testing.T) {
-		url := BuildBedrockURL("us-east-1", "us.anthropic.claude-sonnet-4-6", true)
+		url, err := BuildBedrockURL("us-east-1", "us.anthropic.claude-sonnet-4-6", true)
+		require.NoError(t, err)
 		assert.Equal(t, "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-sonnet-4-6/invoke-with-response-stream", url)
 	})
+
+	for _, region := range []string{
+		"us-east-1@attacker.example",
+		"x@attacker.example/",
+		"us-east-1.attacker.example",
+		"us-east-1:443",
+		"US-EAST-1",
+		"us-east-1%2fattacker.example",
+	} {
+		t.Run("reject authority injection "+region, func(t *testing.T) {
+			builtURL, err := BuildBedrockURL(region, "anthropic.claude-sonnet-v1:0", false)
+			require.Error(t, err)
+			assert.Empty(t, builtURL)
+		})
+	}
 }

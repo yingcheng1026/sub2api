@@ -1,12 +1,78 @@
 import { describe, expect, it } from 'vitest'
 import type { CreateOrderResult, MethodLimit } from '@/types/payment'
 import {
+  PAYMENT_LATE_SETTLEMENT_GRACE_MS,
+  PAYMENT_RECOVERY_RETENTION_MS,
+  PAYMENT_RECOVERY_STORAGE_KEY,
   buildCreateOrderPayload,
   decidePaymentLaunch,
   getVisibleMethods,
+  isPaymentCompleted,
+  isPaymentFulfillmentFailed,
+  isPaymentFulfillmentPending,
+  isPaymentLateSettlementRecoverable,
+  isPaymentStillProcessing,
+  isPaymentTerminalFailure,
+  clearPaymentRecoveryForUser,
+  clearPaymentRecoverySnapshot,
   readPaymentRecoverySnapshot,
+  writePaymentRecoverySnapshot,
   type PaymentRecoverySnapshot,
 } from '@/components/payment/paymentFlow'
+
+describe('payment fulfillment status', () => {
+  it('treats only COMPLETED as delivered', () => {
+    expect(isPaymentCompleted('COMPLETED')).toBe(true)
+    expect(isPaymentCompleted(' completed ')).toBe(true)
+    expect(isPaymentCompleted('PAID')).toBe(false)
+    expect(isPaymentCompleted('RECHARGING')).toBe(false)
+  })
+
+  it('keeps paid and recharging orders in the processing state', () => {
+    expect(isPaymentStillProcessing('PAID')).toBe(true)
+    expect(isPaymentStillProcessing('RECHARGING')).toBe(true)
+    expect(isPaymentStillProcessing('PENDING')).toBe(true)
+    expect(isPaymentStillProcessing('COMPLETED')).toBe(false)
+  })
+
+  it('distinguishes captured payment fulfillment from pre-payment waiting', () => {
+    expect(isPaymentFulfillmentPending('PAID')).toBe(true)
+    expect(isPaymentFulfillmentPending('RECHARGING')).toBe(true)
+    expect(isPaymentFulfillmentPending('FAILED', '2026-04-20T12:00:01Z')).toBe(true)
+    expect(isPaymentFulfillmentPending('FAILED')).toBe(false)
+    expect(isPaymentFulfillmentPending('PENDING')).toBe(false)
+  })
+
+  it('keeps retryable fulfillment failures separate from terminal payment failures', () => {
+    expect(isPaymentFulfillmentFailed('FAILED', '2026-04-20T12:00:01Z')).toBe(true)
+    expect(isPaymentFulfillmentFailed('FAILED')).toBe(false)
+    expect(isPaymentFulfillmentFailed('EXPIRED')).toBe(false)
+    expect(isPaymentTerminalFailure('FAILED')).toBe(true)
+    expect(isPaymentTerminalFailure('FAILED', '2026-04-20T12:00:01Z')).toBe(false)
+    expect(isPaymentTerminalFailure('CANCELLED')).toBe(true)
+    expect(isPaymentTerminalFailure('EXPIRED')).toBe(true)
+    expect(isPaymentTerminalFailure('PAID')).toBe(false)
+  })
+
+  it('keeps an expired provider order recoverable only during the late-webhook grace', () => {
+    const expiresAt = '2026-04-20T12:00:00.000Z'
+    const expiryMs = Date.parse(expiresAt)
+
+    expect(isPaymentLateSettlementRecoverable(
+      'EXPIRED',
+      null,
+      expiresAt,
+      expiryMs + PAYMENT_LATE_SETTLEMENT_GRACE_MS - 1,
+    )).toBe(true)
+    expect(isPaymentLateSettlementRecoverable(
+      'EXPIRED',
+      null,
+      expiresAt,
+      expiryMs + PAYMENT_LATE_SETTLEMENT_GRACE_MS + 1,
+    )).toBe(false)
+    expect(isPaymentLateSettlementRecoverable('FAILED', null, expiresAt, expiryMs + 1)).toBe(false)
+  })
+})
 
 function methodLimit(overrides: Partial<MethodLimit> = {}): MethodLimit {
   return {
@@ -263,7 +329,7 @@ describe('readPaymentRecoverySnapshot', () => {
     expect(restored?.orderId).toBe(33)
   })
 
-  it('drops expired or mismatched recovery snapshots', () => {
+  it('keeps expired recovery identity for backend verification but rejects a mismatched token', () => {
     const expiredSnapshot: PaymentRecoverySnapshot = {
       orderId: 55,
       amount: 18,
@@ -283,7 +349,7 @@ describe('readPaymentRecoverySnapshot', () => {
     expect(readPaymentRecoverySnapshot(JSON.stringify(expiredSnapshot), {
       now: Date.UTC(2024, 0, 1, 0, 20, 0),
       resumeToken: 'resume-55',
-    })).toBeNull()
+    })?.orderId).toBe(55)
 
     expect(readPaymentRecoverySnapshot(JSON.stringify({
       ...expiredSnapshot,
@@ -316,5 +382,93 @@ describe('readPaymentRecoverySnapshot', () => {
 
     expect(restored?.orderId).toBe(44)
     expect(restored?.outTradeNo).toBe('')
+  })
+
+  it('stores multiple user-bound slots and compare-clears only the expected revision', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) },
+      removeItem: (key: string) => { values.delete(key) },
+    }
+    const base: PaymentRecoverySnapshot = {
+      orderId: 101,
+      userId: 7,
+      revision: 'rev-101',
+      amount: 18,
+      qrCode: '',
+      expiresAt: '2099-01-01T00:10:00.000Z',
+      paymentType: 'alipay',
+      payUrl: '',
+      outTradeNo: 'sub2_101',
+      clientSecret: '',
+      payAmount: 18,
+      orderType: 'balance',
+      paymentMode: 'popup',
+      resumeToken: '',
+      createdAt: Date.now(),
+    }
+    writePaymentRecoverySnapshot(storage, base)
+    writePaymentRecoverySnapshot(storage, {
+      ...base,
+      orderId: 202,
+      userId: 8,
+      revision: 'rev-202',
+      outTradeNo: 'sub2_202',
+    })
+
+    const raw = storage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)
+    expect(readPaymentRecoverySnapshot(raw, { userId: 7, orderId: 101 })?.revision).toBe('rev-101')
+    expect(readPaymentRecoverySnapshot(raw, { userId: 7, orderId: 202 })).toBeNull()
+    expect(clearPaymentRecoverySnapshot(storage, {
+      userId: 7,
+      orderId: 101,
+      revision: 'wrong-revision',
+    })).toBe(false)
+    expect(clearPaymentRecoverySnapshot(storage, {
+      userId: 7,
+      orderId: 101,
+      revision: 'rev-101',
+    })).toBe(true)
+    expect(readPaymentRecoverySnapshot(storage.getItem(PAYMENT_RECOVERY_STORAGE_KEY), {
+      userId: 8,
+      orderId: 202,
+    })?.orderId).toBe(202)
+  })
+
+  it('clears only the requested user and rejects retained launch data after the retention window', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) },
+      removeItem: (key: string) => { values.delete(key) },
+    }
+    const createdAt = Date.now()
+    const makeSnapshot = (userId: number, orderId: number): PaymentRecoverySnapshot => ({
+      orderId,
+      userId,
+      revision: `rev-${orderId}`,
+      amount: 18,
+      qrCode: 'secret-qr',
+      expiresAt: '2026-04-20T12:10:00.000Z',
+      paymentType: 'stripe',
+      payUrl: '/payment/stripe?secret',
+      outTradeNo: `sub2_${orderId}`,
+      clientSecret: 'cs_secret',
+      payAmount: 18,
+      orderType: 'balance',
+      paymentMode: 'popup',
+      resumeToken: 'resume-secret',
+      createdAt,
+    })
+    writePaymentRecoverySnapshot(storage, makeSnapshot(7, 101))
+    writePaymentRecoverySnapshot(storage, makeSnapshot(8, 202))
+
+    expect(clearPaymentRecoveryForUser(storage, 7)).toBe(1)
+    expect(readPaymentRecoverySnapshot(storage.getItem(PAYMENT_RECOVERY_STORAGE_KEY), {
+      userId: 8,
+      orderId: 202,
+      now: createdAt + PAYMENT_RECOVERY_RETENTION_MS + 1,
+    })).toBeNull()
   })
 })

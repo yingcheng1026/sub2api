@@ -31,22 +31,49 @@ func toResponsePagination(p *pagination.PaginationResult) *response.PaginationRe
 type SubscriptionHandler struct {
 	subscriptionService *service.SubscriptionService
 	affiliateService    *service.AffiliateService
+
+	// Narrow assignment dependencies keep the high-risk write path testable
+	// without weakening the concrete service used by the read/update handlers.
+	subscriptionAssigner        subscriptionAssigner
+	subscriptionBulkAssigner    subscriptionBulkAssigner
+	assignmentTransactionRunner assignmentTransactionRunner
+	affiliateRebateAccruer      affiliateRebateAccruer
+}
+
+type subscriptionAssigner interface {
+	AssignAdminSubscription(context.Context, *service.AssignSubscriptionInput) (*service.UserSubscription, error)
+}
+
+type subscriptionBulkAssigner interface {
+	BulkAssignSubscription(context.Context, *service.BulkAssignSubscriptionInput) (*service.BulkAssignResult, error)
+}
+
+type assignmentTransactionRunner interface {
+	RunAssignmentTransaction(context.Context, func(context.Context) error) error
+}
+
+type affiliateRebateAccruer interface {
+	AccrueInviteRebateForOrderWithOverride(context.Context, int64, float64, *float64, *int64) (float64, error)
 }
 
 // NewSubscriptionHandler creates a new admin subscription handler
 func NewSubscriptionHandler(subscriptionService *service.SubscriptionService, affiliateService *service.AffiliateService) *SubscriptionHandler {
 	return &SubscriptionHandler{
-		subscriptionService: subscriptionService,
-		affiliateService:    affiliateService,
+		subscriptionService:         subscriptionService,
+		affiliateService:            affiliateService,
+		subscriptionAssigner:        subscriptionService,
+		subscriptionBulkAssigner:    subscriptionService,
+		assignmentTransactionRunner: subscriptionService,
+		affiliateRebateAccruer:      affiliateService,
 	}
 }
 
 // AssignSubscriptionRequest represents assign subscription request.
 //
 // 三种模式三选一：
-//   - Plan 模式：填 plan_id，由 plan 读取钱包额度/有效期
-//   - Group 模式（v3）：填 group_id，wallet_initial_usd 留空
-//   - 钱包充值模式 (credits)：填 wallet_initial_usd（>0），group_id / validity_days 忽略；用户级永久 credits 钱包
+//   - Plan 模式：只填 plan_id，由 plan 读取额度/有效期
+//   - Group 模式（v3）：填 group_id，可填 validity_days
+//   - 钱包充值模式 (credits)：只填 wallet_initial_usd（>0），创建或充值用户级永久 credits 钱包
 type AssignSubscriptionRequest struct {
 	UserID           int64    `json:"user_id" binding:"required"`
 	GroupID          int64    `json:"group_id"`
@@ -54,6 +81,16 @@ type AssignSubscriptionRequest struct {
 	Notes            string   `json:"notes"`
 	WalletInitialUSD *float64 `json:"wallet_initial_usd" binding:"omitempty,gt=0,lte=10000000"`
 	PlanID           *int64   `json:"plan_id" binding:"omitempty,gt=0"`
+}
+
+type adminAssignIdempotencyPayload struct {
+	Mode             string  `json:"mode"`
+	UserID           int64   `json:"user_id"`
+	GroupID          int64   `json:"group_id,omitempty"`
+	ValidityDays     int     `json:"validity_days,omitempty"`
+	Notes            string  `json:"notes,omitempty"`
+	WalletInitialUSD float64 `json:"wallet_initial_usd,omitempty"`
+	PlanID           int64   `json:"plan_id,omitempty"`
 }
 
 func assignSubscriptionInputFromRequest(req AssignSubscriptionRequest, adminID int64) *service.AssignSubscriptionInput {
@@ -72,6 +109,26 @@ func assignSubscriptionInputFromRequest(req AssignSubscriptionRequest, adminID i
 		PlanID:           req.PlanID,
 		PlanType:         planType,
 	}
+}
+
+func adminAssignPayloadFromInput(input *service.AssignSubscriptionInput) adminAssignIdempotencyPayload {
+	payload := adminAssignIdempotencyPayload{
+		UserID:       input.UserID,
+		ValidityDays: input.ValidityDays,
+		Notes:        input.Notes,
+	}
+	switch {
+	case input.PlanID != nil:
+		payload.Mode = "plan"
+		payload.PlanID = *input.PlanID
+	case input.WalletInitialUSD != nil:
+		payload.Mode = "wallet"
+		payload.WalletInitialUSD = *input.WalletInitialUSD
+	default:
+		payload.Mode = "group"
+		payload.GroupID = input.GroupID
+	}
+	return payload
 }
 
 // BulkAssignSubscriptionRequest represents bulk assign subscription request
@@ -169,34 +226,54 @@ func (h *SubscriptionHandler) Assign(c *gin.Context) {
 		return
 	}
 
-	// Plan / 钱包 / group 模式：必须提供其一。
-	if req.PlanID == nil && req.WalletInitialUSD == nil && req.GroupID <= 0 {
-		response.BadRequest(c, "one of plan_id, group_id, or wallet_initial_usd is required")
-		return
-	}
-
 	// Get admin user ID from context
 	adminID := getAdminIDFromContext(c)
-
-	subscription, err := h.subscriptionService.AssignSubscription(c.Request.Context(), assignSubscriptionInputFromRequest(req, adminID))
+	adminInput, err := service.NormalizeAdminSubscriptionAssignInput(assignSubscriptionInputFromRequest(req, adminID))
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
+	idempotencyPayload := adminAssignPayloadFromInput(adminInput)
 
-	// Trigger affiliate rebate for the invitee's first admin-assigned subscription.
-	// Non-blocking: a rebate failure must never roll back a successful assignment.
-	if h.affiliateService != nil {
-		if baseAmount := adminAssignBaseAmount(subscription); baseAmount > 0 {
-			// 差异化返利：余额卡 10% / 月卡及其它 0%（与兑换码口径一致，月卡不给佣金）。
-			override := service.AffiliateRebateOverrideForAdminAssign(req.PlanID)
-			if _, rebateErr := h.affiliateService.AccrueInviteRebateForOrderWithOverride(c.Request.Context(), subscription.UserID, baseAmount, override, nil); rebateErr != nil {
-				slog.Warn("admin assign: affiliate rebate failed", "userID", subscription.UserID, "subscriptionID", subscription.ID, "err", rebateErr)
-			}
-		}
+	assigner := h.subscriptionAssigner
+	if assigner == nil {
+		assigner = h.subscriptionService
+	}
+	transactionRunner := h.assignmentTransactionRunner
+	if transactionRunner == nil {
+		transactionRunner = h.subscriptionService
+	}
+	rebateAccruer := h.affiliateRebateAccruer
+	if rebateAccruer == nil {
+		rebateAccruer = h.affiliateService
+	}
+	var runInTransaction func(context.Context, func(context.Context) error) error
+	if transactionRunner != nil {
+		runInTransaction = transactionRunner.RunAssignmentTransaction
 	}
 
-	response.Success(c, dto.UserSubscriptionFromServiceAdmin(subscription))
+	executeAdminStrictIdempotentJSON(c, "admin.subscriptions.assign", idempotencyPayload, service.DefaultWriteIdempotencyTTL(), runInTransaction, func(ctx context.Context) (any, error) {
+		subscription, err := assigner.AssignAdminSubscription(ctx, adminInput)
+		if err != nil {
+			return nil, err
+		}
+
+		// Keep rebate accrual inside the same idempotency boundary as the wallet or
+		// monthly assignment. A replay returns the stored response and reaches
+		// neither side effect again.
+		if rebateAccruer != nil {
+			if baseAmount := adminAssignBaseAmount(adminInput, subscription); baseAmount > 0 {
+				// 差异化返利：余额卡 10% / 月卡及其它 0%（与兑换码口径一致，月卡不给佣金）。
+				override := service.AffiliateRebateOverrideForAdminAssign(adminInput.PlanID, subscription.AssignmentPlanType)
+				if _, rebateErr := rebateAccruer.AccrueInviteRebateForOrderWithOverride(ctx, subscription.UserID, baseAmount, override, nil); rebateErr != nil {
+					slog.Warn("admin assign: affiliate rebate failed", "userID", subscription.UserID, "subscriptionID", subscription.ID, "err", rebateErr)
+					return nil, rebateErr
+				}
+			}
+		}
+
+		return dto.UserSubscriptionFromServiceAdmin(subscription), nil
+	})
 }
 
 // BulkAssign handles bulk assigning subscriptions to multiple users
@@ -211,19 +288,23 @@ func (h *SubscriptionHandler) BulkAssign(c *gin.Context) {
 	// Get admin user ID from context
 	adminID := getAdminIDFromContext(c)
 
-	result, err := h.subscriptionService.BulkAssignSubscription(c.Request.Context(), &service.BulkAssignSubscriptionInput{
-		UserIDs:      req.UserIDs,
-		GroupID:      req.GroupID,
-		ValidityDays: req.ValidityDays,
-		AssignedBy:   adminID,
-		Notes:        req.Notes,
-	})
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
+	assigner := h.subscriptionBulkAssigner
+	if assigner == nil {
+		assigner = h.subscriptionService
 	}
-
-	response.Success(c, dto.BulkAssignResultFromService(result))
+	executeAdminStrictIdempotentJSONNonTransactional(c, "admin.subscriptions.bulk_assign", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		result, err := assigner.BulkAssignSubscription(ctx, &service.BulkAssignSubscriptionInput{
+			UserIDs:      req.UserIDs,
+			GroupID:      req.GroupID,
+			ValidityDays: req.ValidityDays,
+			AssignedBy:   adminID,
+			Notes:        req.Notes,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return dto.BulkAssignResultFromService(result), nil
+	})
 }
 
 // Extend handles adjusting a subscription (extend or shorten)
@@ -248,7 +329,17 @@ func (h *SubscriptionHandler) Extend(c *gin.Context) {
 		SubscriptionID: subscriptionID,
 		Body:           req,
 	}
-	executeAdminIdempotentJSON(c, "admin.subscriptions.extend", idempotencyPayload, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+	transactionRunner := h.assignmentTransactionRunner
+	if transactionRunner == nil {
+		transactionRunner = h.subscriptionService
+	}
+	var runInTransaction func(context.Context, func(context.Context) error) error
+	if transactionRunner != nil {
+		runInTransaction = transactionRunner.RunAssignmentTransaction
+	}
+	executeAdminStrictIdempotentJSONWithPostCommit(c, "admin.subscriptions.extend", idempotencyPayload, service.DefaultWriteIdempotencyTTL(), runInTransaction, func(ctx context.Context) error {
+		return h.subscriptionService.InvalidateSubscriptionCachesAfterCommit(ctx, subscriptionID)
+	}, func(ctx context.Context) (any, error) {
 		subscription, execErr := h.subscriptionService.ExtendSubscription(ctx, subscriptionID, req.Days)
 		if execErr != nil {
 			return nil, execErr
@@ -362,16 +453,24 @@ func getAdminIDFromContext(c *gin.Context) int64 {
 	return subject.UserID
 }
 
-// adminAssignBaseAmount returns the USD value of an admin-assigned subscription,
-// used as the base amount for affiliate rebate calculation.
-// Wallet subscriptions use the initial wallet balance; group subscriptions use
-// the group monthly quota. Returns 0 when the value cannot be determined.
-func adminAssignBaseAmount(sub *service.UserSubscription) float64 {
-	if sub == nil {
+// adminAssignBaseAmount returns the USD value applied by this admin assignment.
+// A wallet's wallet_initial_usd is cumulative after top-ups, so it must never be
+// used as the rebate base for a credits plan. Manual wallet assignments use the
+// request delta; plan wallet assignments use the runtime delta produced by the
+// subscription service. Group subscriptions keep their existing monthly-quota
+// semantics. Returns 0 when the current-operation value cannot be determined.
+func adminAssignBaseAmount(input *service.AssignSubscriptionInput, sub *service.UserSubscription) float64 {
+	if input == nil || sub == nil {
 		return 0
 	}
-	if sub.WalletInitialUSD != nil && *sub.WalletInitialUSD > 0 {
-		return *sub.WalletInitialUSD
+	if input.WalletInitialUSD != nil && *input.WalletInitialUSD > 0 {
+		return *input.WalletInitialUSD
+	}
+	if input.PlanID != nil && sub.WalletInitialUSD != nil {
+		if sub.WalletCreditDeltaUSD != nil && *sub.WalletCreditDeltaUSD > 0 {
+			return *sub.WalletCreditDeltaUSD
+		}
+		return 0
 	}
 	if sub.Group != nil && sub.Group.MonthlyLimitUSD != nil && *sub.Group.MonthlyLimitUSD > 0 {
 		return *sub.Group.MonthlyLimitUSD

@@ -49,6 +49,20 @@ func (_c *SubscriptionWalletLedgerCreate) SetReason(v string) *SubscriptionWalle
 	return _c
 }
 
+// SetPaymentOrderID sets the "payment_order_id" field.
+func (_c *SubscriptionWalletLedgerCreate) SetPaymentOrderID(v int64) *SubscriptionWalletLedgerCreate {
+	_c.mutation.SetPaymentOrderID(v)
+	return _c
+}
+
+// SetNillablePaymentOrderID sets the "payment_order_id" field if the given value is not nil.
+func (_c *SubscriptionWalletLedgerCreate) SetNillablePaymentOrderID(v *int64) *SubscriptionWalletLedgerCreate {
+	if v != nil {
+		_c.SetPaymentOrderID(*v)
+	}
+	return _c
+}
+
 // SetUsageLogID sets the "usage_log_id" field.
 func (_c *SubscriptionWalletLedgerCreate) SetUsageLogID(v int64) *SubscriptionWalletLedgerCreate {
 	_c.mutation.SetUsageLogID(v)
@@ -225,6 +239,10 @@ func (_c *SubscriptionWalletLedgerCreate) createSpec() (*SubscriptionWalletLedge
 		_spec.SetField(subscriptionwalletledger.FieldReason, field.TypeString, value)
 		_node.Reason = value
 	}
+	if value, ok := _c.mutation.PaymentOrderID(); ok {
+		_spec.SetField(subscriptionwalletledger.FieldPaymentOrderID, field.TypeInt64, value)
+		_node.PaymentOrderID = &value
+	}
 	if value, ok := _c.mutation.Notes(); ok {
 		_spec.SetField(subscriptionwalletledger.FieldNotes, field.TypeString, value)
 		_node.Notes = &value
@@ -396,6 +414,30 @@ func (u *SubscriptionWalletLedgerUpsert) UpdateReason() *SubscriptionWalletLedge
 	return u
 }
 
+// SetPaymentOrderID sets the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsert) SetPaymentOrderID(v int64) *SubscriptionWalletLedgerUpsert {
+	u.Set(subscriptionwalletledger.FieldPaymentOrderID, v)
+	return u
+}
+
+// UpdatePaymentOrderID sets the "payment_order_id" field to the value that was provided on create.
+func (u *SubscriptionWalletLedgerUpsert) UpdatePaymentOrderID() *SubscriptionWalletLedgerUpsert {
+	u.SetExcluded(subscriptionwalletledger.FieldPaymentOrderID)
+	return u
+}
+
+// AddPaymentOrderID adds v to the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsert) AddPaymentOrderID(v int64) *SubscriptionWalletLedgerUpsert {
+	u.Add(subscriptionwalletledger.FieldPaymentOrderID, v)
+	return u
+}
+
+// ClearPaymentOrderID clears the value of the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsert) ClearPaymentOrderID() *SubscriptionWalletLedgerUpsert {
+	u.SetNull(subscriptionwalletledger.FieldPaymentOrderID)
+	return u
+}
+
 // SetUsageLogID sets the "usage_log_id" field.
 func (u *SubscriptionWalletLedgerUpsert) SetUsageLogID(v int64) *SubscriptionWalletLedgerUpsert {
 	u.Set(subscriptionwalletledger.FieldUsageLogID, v)
@@ -562,6 +604,34 @@ func (u *SubscriptionWalletLedgerUpsertOne) SetReason(v string) *SubscriptionWal
 func (u *SubscriptionWalletLedgerUpsertOne) UpdateReason() *SubscriptionWalletLedgerUpsertOne {
 	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
 		s.UpdateReason()
+	})
+}
+
+// SetPaymentOrderID sets the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsertOne) SetPaymentOrderID(v int64) *SubscriptionWalletLedgerUpsertOne {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.SetPaymentOrderID(v)
+	})
+}
+
+// AddPaymentOrderID adds v to the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsertOne) AddPaymentOrderID(v int64) *SubscriptionWalletLedgerUpsertOne {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.AddPaymentOrderID(v)
+	})
+}
+
+// UpdatePaymentOrderID sets the "payment_order_id" field to the value that was provided on create.
+func (u *SubscriptionWalletLedgerUpsertOne) UpdatePaymentOrderID() *SubscriptionWalletLedgerUpsertOne {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.UpdatePaymentOrderID()
+	})
+}
+
+// ClearPaymentOrderID clears the value of the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsertOne) ClearPaymentOrderID() *SubscriptionWalletLedgerUpsertOne {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.ClearPaymentOrderID()
 	})
 }
 
@@ -906,6 +976,34 @@ func (u *SubscriptionWalletLedgerUpsertBulk) SetReason(v string) *SubscriptionWa
 func (u *SubscriptionWalletLedgerUpsertBulk) UpdateReason() *SubscriptionWalletLedgerUpsertBulk {
 	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
 		s.UpdateReason()
+	})
+}
+
+// SetPaymentOrderID sets the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsertBulk) SetPaymentOrderID(v int64) *SubscriptionWalletLedgerUpsertBulk {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.SetPaymentOrderID(v)
+	})
+}
+
+// AddPaymentOrderID adds v to the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsertBulk) AddPaymentOrderID(v int64) *SubscriptionWalletLedgerUpsertBulk {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.AddPaymentOrderID(v)
+	})
+}
+
+// UpdatePaymentOrderID sets the "payment_order_id" field to the value that was provided on create.
+func (u *SubscriptionWalletLedgerUpsertBulk) UpdatePaymentOrderID() *SubscriptionWalletLedgerUpsertBulk {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.UpdatePaymentOrderID()
+	})
+}
+
+// ClearPaymentOrderID clears the value of the "payment_order_id" field.
+func (u *SubscriptionWalletLedgerUpsertBulk) ClearPaymentOrderID() *SubscriptionWalletLedgerUpsertBulk {
+	return u.Update(func(s *SubscriptionWalletLedgerUpsert) {
+		s.ClearPaymentOrderID()
 	})
 }
 

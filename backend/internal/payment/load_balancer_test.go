@@ -3,11 +3,20 @@
 package payment
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/enttest"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	_ "modernc.org/sqlite"
 )
 
 func TestInstanceSupportsType(t *testing.T) {
@@ -102,13 +111,19 @@ func TestGetInstanceChannelLimitsFallsBackToLegacyDirectAliases(t *testing.T) {
 	t.Parallel()
 
 	inst := testInstance(1, TypeAlipay, makeLimitsJSON(TypeAlipayDirect, ChannelLimits{SingleMax: 66}))
-	got := getInstanceChannelLimits(inst, TypeAlipay)
+	got, err := getInstanceChannelLimits(inst, TypeAlipay)
+	if err != nil {
+		t.Fatalf("getInstanceChannelLimits() error: %v", err)
+	}
 	if got.SingleMax != 66 {
 		t.Fatalf("getInstanceChannelLimits() = %+v, want SingleMax=66", got)
 	}
 
 	wxInst := testInstance(2, TypeWxpay, makeLimitsJSON(TypeWxpayDirect, ChannelLimits{SingleMin: 8}))
-	wxGot := getInstanceChannelLimits(wxInst, TypeWxpay)
+	wxGot, err := getInstanceChannelLimits(wxInst, TypeWxpay)
+	if err != nil {
+		t.Fatalf("getInstanceChannelLimits() error: %v", err)
+	}
 	if wxGot.SingleMin != 8 {
 		t.Fatalf("getInstanceChannelLimits() = %+v, want SingleMin=8", wxGot)
 	}
@@ -147,6 +162,7 @@ func TestFilterByLimits(t *testing.T) {
 		paymentType PaymentType
 		orderAmount float64
 		wantIDs     []int64 // expected surviving instance IDs
+		wantErr     bool
 	}{
 		{
 			name: "order below SingleMin is filtered out",
@@ -243,7 +259,7 @@ func TestFilterByLimits(t *testing.T) {
 			},
 			paymentType: "alipay",
 			orderAmount: 99999,
-			wantIDs:     []int64{1},
+			wantErr:     true,
 		},
 		{
 			name: "all limits combined - order passes all checks",
@@ -275,7 +291,16 @@ func TestFilterByLimits(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := filterByLimits(tt.candidates, tt.paymentType, tt.orderAmount)
+			got, err := filterByLimits(tt.candidates, tt.paymentType, tt.orderAmount)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("filterByLimits() expected error, got IDs %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("filterByLimits() error: %v", err)
+			}
 			gotIDs := make([]int64, len(got))
 			for i, c := range got {
 				gotIDs[i] = c.inst.ID
@@ -285,6 +310,90 @@ func TestFilterByLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFilterByLimitsRejectsMalformedLimitsInsteadOfTreatingThemAsUnlimited(t *testing.T) {
+	t.Parallel()
+
+	candidates := []instanceCandidate{{
+		inst:      testInstance(1, TypeEasyPay, `{not-json}`),
+		dailyUsed: 0,
+	}}
+	got, err := filterByLimits(candidates, TypeAlipay, 100)
+	if err == nil {
+		t.Fatalf("malformed limits returned candidates %v without a fail-closed error", got)
+	}
+}
+
+func TestSelectInstanceFailsClosedWhenAllCandidatesExceedLimits(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newLoadBalancerTestClient(t)
+	ctx := context.Background()
+	_, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(TypeEasyPay).
+		SetName("capacity-limited").
+		SetConfig("").
+		SetSupportedTypes(TypeAlipay).
+		SetEnabled(true).
+		SetLimits(`{"alipay":{"singleMax":10}}`).
+		Save(ctx)
+	if err != nil {
+		t.Fatalf("create provider instance: %v", err)
+	}
+
+	lb := NewDefaultLoadBalancer(client, nil)
+	selection, err := lb.SelectInstance(ctx, TypeEasyPay, TypeAlipay, StrategyRoundRobin, 100)
+	if err == nil || selection != nil {
+		t.Fatalf("SelectInstance = (%+v, %v), want fail-closed capacity error", selection, err)
+	}
+}
+
+func TestSelectInstanceFailsClosedWhenDailyUsageCannotBeRead(t *testing.T) {
+	t.Parallel()
+
+	client, sqlDB := newLoadBalancerTestClient(t)
+	ctx := context.Background()
+	_, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(TypeEasyPay).
+		SetName("daily-limited").
+		SetConfig("").
+		SetSupportedTypes(TypeAlipay).
+		SetEnabled(true).
+		SetLimits(`{"alipay":{"dailyLimit":1000}}`).
+		Save(ctx)
+	if err != nil {
+		t.Fatalf("create provider instance: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `DROP TABLE payment_orders`); err != nil {
+		t.Fatalf("drop payment_orders: %v", err)
+	}
+
+	lb := NewDefaultLoadBalancer(client, nil)
+	selection, err := lb.SelectInstance(ctx, TypeEasyPay, TypeAlipay, StrategyRoundRobin, 10)
+	if err == nil || selection != nil {
+		t.Fatalf("SelectInstance = (%+v, %v), want fail-closed usage-query error", selection, err)
+	}
+}
+
+func newLoadBalancerTestClient(t *testing.T) (*dbent.Client, *sql.DB) {
+	t.Helper()
+	dbName := fmt.Sprintf(
+		"file:%s?mode=memory&cache=shared",
+		strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()),
+	)
+	db, err := sql.Open("sqlite", dbName)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+	driver := entsql.OpenDB(dialect.SQLite, db)
+	client := enttest.NewClient(t, enttest.WithOptions(dbent.Driver(driver)))
+	t.Cleanup(func() { _ = client.Close() })
+	return client, db
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +466,7 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 		inst        *dbent.PaymentProviderInstance
 		paymentType PaymentType
 		want        ChannelLimits
+		wantErr     bool
 	}{
 		{
 			name:        "empty limits string returns zero ChannelLimits",
@@ -365,10 +475,10 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 			want:        ChannelLimits{},
 		},
 		{
-			name:        "invalid JSON returns zero ChannelLimits",
+			name:        "invalid JSON fails closed",
 			inst:        testInstance(1, "easypay", "not-json{"),
 			paymentType: "alipay",
-			want:        ChannelLimits{},
+			wantErr:     true,
 		},
 		{
 			name: "valid JSON with matching payment type",
@@ -392,11 +502,22 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 			want:        ChannelLimits{SingleMin: 10, SingleMax: 500, DailyLimit: 5000},
 		},
 		{
-			name: "stripe provider ignores payment type key even if present",
+			name: "stripe provider rejects dormant non-stripe limit key",
 			inst: testInstance(1, "stripe",
 				`{"stripe":{"singleMin":10,"singleMax":500},"alipay":{"singleMin":1,"singleMax":100}}`),
 			paymentType: "alipay",
-			want:        ChannelLimits{SingleMin: 10, SingleMax: 500},
+			wantErr:     true,
+		},
+		{
+			name: "runtime rejects a limit key not enabled by supported types",
+			inst: &dbent.PaymentProviderInstance{
+				ID:             1,
+				ProviderKey:    "easypay",
+				SupportedTypes: "alipay",
+				Limits:         `{"wxpay":{"dailyLimit":100}}`,
+			},
+			paymentType: "alipay",
+			wantErr:     true,
 		},
 		{
 			name: "non-stripe provider uses payment type as lookup key",
@@ -417,7 +538,16 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := getInstanceChannelLimits(tt.inst, tt.paymentType)
+			got, err := getInstanceChannelLimits(tt.inst, tt.paymentType)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("getInstanceChannelLimits() expected error, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("getInstanceChannelLimits() error: %v", err)
+			}
 			if got != tt.want {
 				t.Fatalf("getInstanceChannelLimits() = %+v, want %+v", got, tt.want)
 			}
@@ -474,7 +604,7 @@ func TestStartOfDay(t *testing.T) {
 	}
 }
 
-func TestDecryptConfig_PlaintextAndLegacyCompat(t *testing.T) {
+func TestDecryptConfig_EncryptedAndPlaintextMigrationCompat(t *testing.T) {
 	t.Parallel()
 
 	key := make([]byte, AES256KeySize)
@@ -494,10 +624,11 @@ func TestDecryptConfig_PlaintextAndLegacyCompat(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		stored string
-		key    []byte
-		want   map[string]string
+		name    string
+		stored  string
+		key     []byte
+		want    map[string]string
+		wantErr bool
 	}{
 		{
 			name:   "empty stored returns nil map",
@@ -506,10 +637,10 @@ func TestDecryptConfig_PlaintextAndLegacyCompat(t *testing.T) {
 			want:   nil,
 		},
 		{
-			name:   "plaintext JSON parses directly",
-			stored: plaintextJSON,
-			key:    nil,
-			want:   map[string]string{"appId": "app-123", "secret": "sec-xyz"},
+			name:    "plaintext JSON without key fails closed",
+			stored:  plaintextJSON,
+			key:     nil,
+			wantErr: true,
 		},
 		{
 			name:   "plaintext JSON works even with key present",
@@ -518,28 +649,28 @@ func TestDecryptConfig_PlaintextAndLegacyCompat(t *testing.T) {
 			want:   map[string]string{"appId": "app-123", "secret": "sec-xyz"},
 		},
 		{
-			name:   "legacy ciphertext with correct key decrypts",
+			name:   "encrypted config with correct key decrypts",
 			stored: legacyEncrypted,
 			key:    key,
 			want:   map[string]string{"appId": "app-123", "secret": "sec-xyz"},
 		},
 		{
-			name:   "legacy ciphertext with no key treated as empty",
-			stored: legacyEncrypted,
-			key:    nil,
-			want:   nil,
+			name:    "encrypted config with no key fails closed",
+			stored:  legacyEncrypted,
+			key:     nil,
+			wantErr: true,
 		},
 		{
-			name:   "legacy ciphertext with wrong key treated as empty",
-			stored: legacyEncrypted,
-			key:    wrongKey,
-			want:   nil,
+			name:    "encrypted config with wrong key fails closed",
+			stored:  legacyEncrypted,
+			key:     wrongKey,
+			wantErr: true,
 		},
 		{
-			name:   "garbage data treated as empty",
-			stored: "not-json-and-not-ciphertext",
-			key:    key,
-			want:   nil,
+			name:    "garbage data fails closed",
+			stored:  "not-json-and-not-ciphertext",
+			key:     key,
+			wantErr: true,
 		},
 	}
 
@@ -548,6 +679,12 @@ func TestDecryptConfig_PlaintextAndLegacyCompat(t *testing.T) {
 			t.Parallel()
 			lb := NewDefaultLoadBalancer(nil, tt.key)
 			got, err := lb.decryptConfig(tt.stored)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("decryptConfig expected fail-closed error")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("decryptConfig unexpected error: %v", err)
 			}

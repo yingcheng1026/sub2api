@@ -68,18 +68,21 @@ func (s *openAITokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey s
 	return nil
 }
 
-func (s *openAITokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, error) {
+func (s *openAITokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, string, error) {
 	atomic.AddInt32(&s.lockCalled, 1)
 	if s.lockErr != nil {
-		return false, s.lockErr
+		return false, "", s.lockErr
 	}
 	if s.simulateLockRace {
-		return false, nil
+		return false, "", nil
 	}
-	return s.lockAcquired, nil
+	if !s.lockAcquired {
+		return false, "", nil
+	}
+	return true, "openai-test-owner", nil
 }
 
-func (s *openAITokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string) error {
+func (s *openAITokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string, ownershipToken string) error {
 	atomic.AddInt32(&s.unlockCalled, 1)
 	return s.releaseLockErr
 }
@@ -147,7 +150,7 @@ func TestOpenAITokenProvider_CacheHit(t *testing.T) {
 	cacheKey := OpenAITokenCacheKey(account)
 	cache.tokens[cacheKey] = "cached-token"
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
@@ -170,7 +173,9 @@ func TestOpenAITokenProvider_CacheMiss_FromCredentials(t *testing.T) {
 		},
 	}
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
@@ -248,9 +253,9 @@ func (p *testOpenAITokenProvider) GetAccessToken(ctx context.Context, account *A
 	needsRefresh := expiresAt == nil || time.Until(*expiresAt) <= openAITokenRefreshSkew
 	refreshFailed := false
 	if needsRefresh && p.tokenCache != nil {
-		locked, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
+		locked, ownershipToken, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
 		if err == nil && locked {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, ownershipToken) }()
 
 			// Check cache again after acquiring lock
 			if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && token != "" {
@@ -429,7 +434,7 @@ func TestOpenAITokenProvider_CacheGetError(t *testing.T) {
 		},
 	}
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 
 	// Should gracefully degrade and return from credentials
 	token, err := provider.GetAccessToken(context.Background(), account)
@@ -452,7 +457,7 @@ func TestOpenAITokenProvider_CacheSetError(t *testing.T) {
 		},
 	}
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 
 	// Should still work even if cache set fails
 	token, err := provider.GetAccessToken(context.Background(), account)
@@ -473,7 +478,7 @@ func TestOpenAITokenProvider_MissingAccessToken(t *testing.T) {
 		},
 	}
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.Error(t, err)
@@ -576,7 +581,9 @@ func TestOpenAITokenProvider_TTLCalculation(t *testing.T) {
 				},
 			}
 
-			provider := NewOpenAITokenProvider(nil, cache, nil)
+			provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{
+				accountsByID: map[int64]*Account{account.ID: account},
+			}, cache, nil)
 
 			_, err := provider.GetAccessToken(context.Background(), account)
 			require.NoError(t, err)
@@ -664,7 +671,7 @@ func TestOpenAITokenProvider_Real_LockFailedWait(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	// Should get either the fallback token or the refreshed one
@@ -696,7 +703,7 @@ func TestOpenAITokenProvider_Real_CacheHitAfterWait(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
@@ -832,7 +839,7 @@ func TestOpenAITokenProvider_Real_LockRace_PollingHitsCache(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, "winner-token", token)
@@ -887,7 +894,7 @@ func TestOpenAITokenProvider_RuntimeMetrics_LockWaitHitAndSnapshot(t *testing.T)
 		cache.mu.Unlock()
 	}()
 
-	provider := NewOpenAITokenProvider(nil, cache, nil)
+	provider := NewOpenAITokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, "winner-token", token)

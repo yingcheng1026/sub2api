@@ -1,8 +1,15 @@
 <template>
   <!-- Row 1: Core Stats -->
-  <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+  <div
+    class="grid grid-cols-2 gap-4"
+    :class="!isSimple && !hideLegacyBalance ? 'lg:grid-cols-4' : 'lg:grid-cols-3'"
+  >
     <!-- Balance -->
-    <div v-if="!isSimple" class="card p-4">
+    <div
+      v-if="!isSimple && !hideLegacyBalance"
+      data-hfc-legacy-balance
+      class="card p-4"
+    >
       <div class="flex items-center gap-3">
         <div class="rounded-lg bg-emerald-100 p-2 dark:bg-emerald-900/30">
           <svg class="h-5 w-5 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -138,11 +145,14 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { UserDashboardStats as UserStatsType } from '@/api/usage'
 
-defineProps<{
+withDefaults(defineProps<{
   stats: UserStatsType
   balance: number
   isSimple: boolean
-}>()
+  hideLegacyBalance?: boolean
+}>(), {
+  hideLegacyBalance: false
+})
 const { t } = useI18n()
 
 const formatBalance = (b: number) =>

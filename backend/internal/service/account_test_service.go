@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +24,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -35,7 +32,6 @@ import (
 var sseDataPrefix = regexp.MustCompile(`^data:\s*`)
 
 const (
-	testClaudeAPIURL   = "https://api.anthropic.com/v1/messages?beta=true"
 	chatgptCodexAPIURL = "https://chatgpt.com/backend-api/codex/responses"
 )
 
@@ -107,27 +103,9 @@ func (s *AccountTestService) validateUpstreamBaseURL(raw string) (string, error)
 	return normalized, nil
 }
 
-// generateSessionString generates a Claude Code style session string.
-// The output format is determined by the UA version in claude.DefaultHeaders,
-// ensuring consistency between the user_id format and the UA sent to upstream.
-func generateSessionString() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	hex64 := hex.EncodeToString(b)
-	sessionUUID := uuid.New().String()
-	uaVersion := ExtractCLIVersion(claude.DefaultHeaders["User-Agent"])
-	return FormatMetadataUserID(hex64, "", sessionUUID, uaVersion), nil
-}
-
-// createTestPayload creates a Claude Code style test request payload
+// createTestPayload creates a neutral Anthropic API probe. It deliberately
+// avoids Claude Code identity, metadata, cache and billing-attribution fields.
 func createTestPayload(modelID string) (map[string]any, error) {
-	sessionID, err := generateSessionString()
-	if err != nil {
-		return nil, err
-	}
-
 	return map[string]any{
 		"model": modelID,
 		"messages": []map[string]any{
@@ -137,33 +115,17 @@ func createTestPayload(modelID string) (map[string]any, error) {
 					{
 						"type": "text",
 						"text": "hi",
-						"cache_control": map[string]string{
-							"type": "ephemeral",
-						},
 					},
 				},
 			},
 		},
-		"system": []map[string]any{
-			{
-				"type": "text",
-				"text": claudeCodeSystemPrompt,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
-			},
-		},
-		"metadata": map[string]string{
-			"user_id": sessionID,
-		},
-		"max_tokens":  1024,
+		"max_tokens":  64,
 		"temperature": 1,
 		"stream":      true,
 	}, nil
 }
 
-// TestAccountConnection tests an account's connection by sending a test request
-// All account types use full Claude Code client characteristics, only auth header differs
+// TestAccountConnection tests an account's connection by sending a provider-appropriate probe.
 // modelID is optional - if empty, defaults to claude.DefaultTestModel
 // mode is optional - "compact" routes OpenAI accounts to the /responses/compact probe path
 func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int64, modelID string, prompt string, mode string) error {
@@ -201,6 +163,9 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 // testClaudeAccountConnection tests an Anthropic Claude account's connection
 func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account *Account, modelID string) error {
 	ctx := c.Request.Context()
+	if err := rejectAnthropicOAuthGatewayCredential(account); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 
 	// Determine the model to use
 	testModelID := modelID
@@ -223,20 +188,10 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 
 	// Determine authentication method and API URL
 	var authToken string
-	var useBearer bool
 	var apiURL string
 
-	if account.IsOAuth() {
-		// OAuth or Setup Token - use Bearer token
-		useBearer = true
-		apiURL = testClaudeAPIURL
-		authToken = account.GetCredential("access_token")
-		if authToken == "" {
-			return s.sendErrorAndEnd(c, "No access token available")
-		}
-	} else if account.Type == "apikey" {
+	if account.Type == "apikey" {
 		// API Key - use x-api-key header
-		useBearer = false
 		authToken = account.GetCredential("api_key")
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No API key available")
@@ -262,7 +217,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// Create Claude Code style payload (same for all account types)
+	// Create a neutral provider-API payload.
 	payload, err := createTestPayload(testModelID)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
@@ -281,19 +236,9 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	// Apply Claude Code client headers
-	for key, value := range claude.DefaultHeaders {
-		req.Header.Set(key, value)
-	}
-
-	// Set authentication header
-	if useBearer {
-		req.Header.Set("anthropic-beta", claude.DefaultBetaHeader)
-		req.Header.Set("Authorization", "Bearer "+authToken)
-	} else {
-		req.Header.Set("anthropic-beta", claude.APIKeyBetaHeader)
-		req.Header.Set("x-api-key", authToken)
-	}
+	req.Header.Set("User-Agent", "sub2api-account-test/1")
+	req.Header.Set("anthropic-beta", claude.APIKeyBetaHeader)
+	req.Header.Set("x-api-key", authToken)
 
 	// Get proxy URL
 	proxyURL := ""
@@ -393,7 +338,10 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 
 // testBedrockAccountConnection tests a Bedrock (SigV4 or API Key) account using non-streaming invoke
 func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx context.Context, account *Account, testModelID string) error {
-	region := bedrockRuntimeRegion(account)
+	region, err := normalizeBedrockRegion(bedrockRuntimeRegion(account))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Invalid Bedrock AWS region")
+	}
 	resolvedModelID, ok := ResolveBedrockModelID(account, testModelID)
 	if !ok {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported Bedrock model: %s", testModelID))
@@ -427,7 +375,10 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 	bedrockBody, _ := json.Marshal(bedrockPayload)
 
 	// Use non-streaming endpoint (response is standard Claude JSON)
-	apiURL := BuildBedrockURL(region, testModelID, false)
+	apiURL, err := BuildBedrockURL(region, testModelID, false)
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Invalid Bedrock AWS region")
+	}
 
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 

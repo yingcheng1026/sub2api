@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -50,14 +52,68 @@ CREATE TABLE IF NOT EXISTS atlas_schema_revisions (
 // 任何稳定的 int64 值都可以，只要不与同一数据库中的其他锁冲突即可。
 const migrationsAdvisoryLockID int64 = 694208311321144027
 const migrationsLockRetryInterval = 500 * time.Millisecond
+const migrationsUnlockTimeout = 5 * time.Second
+const nonTransactionalMigrationTimeout = 10 * time.Minute
 const nonTransactionalMigrationSuffix = "_notx.sql"
 const paymentOrdersOutTradeNoUniqueMigration = "120_enforce_payment_orders_out_trade_no_unique_notx.sql"
 const paymentOrdersOutTradeNoUniqueIndex = "paymentorder_out_trade_no_unique"
+const apiKeyHashIndexMigration = "138_add_api_key_hash_indexes_notx.sql"
+const walletIntegrityIndexesMigration = "178_wallet_integrity_indexes_notx.sql"
+
+type requiredIndexSpec struct {
+	name      string
+	table     string
+	keyColumn string
+	predicate string
+}
+
+var paymentOrdersOutTradeNoIndexSpec = requiredIndexSpec{
+	name:      paymentOrdersOutTradeNoUniqueIndex,
+	table:     "payment_orders",
+	keyColumn: "out_trade_no",
+	predicate: "out_trade_no <> ''",
+}
+
+var apiKeyHashIndexSpec = requiredIndexSpec{
+	name:      "apikey_key_hash",
+	table:     "api_keys",
+	keyColumn: "key_hash",
+	predicate: "deleted_at IS NULL AND key_hash IS NOT NULL",
+}
+
+var walletIntegrityIndexes = []requiredIndexSpec{
+	{
+		name:      "idx_wallet_ledger_one_activation",
+		table:     "subscription_wallet_ledger",
+		keyColumn: "subscription_id",
+		predicate: "reason = 'activation'",
+	},
+	{
+		name:      "idx_user_subscriptions_one_active_credits_wallet",
+		table:     "user_subscriptions",
+		keyColumn: "user_id",
+		predicate: "wallet_balance_usd IS NOT NULL AND status = 'active' AND deleted_at IS NULL AND expires_at >= '2099-12-30 23:59:59+00'",
+	},
+}
+
+var postgresTimestampWithOffsetPattern = regexp.MustCompile(
+	`'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?[+-][0-9]{2}(:[0-9]{2}|[0-9]{2})?'`,
+)
+
+var concurrentCreateIndexNamePattern = regexp.MustCompile(
+	`(?i)\bCREATE\s+(UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+([a-z_][a-z0-9_$]*)`,
+)
 
 type migrationChecksumCompatibilityRule struct {
 	fileChecksum       string
 	acceptedDBChecksum map[string]struct{}
 	acceptedChecksums  map[string]struct{}
+}
+
+type migrationExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 // migrationChecksumCompatibilityRules 仅用于兼容历史上误修改过的迁移文件 checksum。
@@ -116,30 +172,57 @@ func ApplyMigrations(ctx context.Context, db *sql.DB) error {
 //   - ctx: 上下文
 //   - db: 数据库连接
 //   - fsys: 包含迁移文件的文件系统（通常是 embed.FS）
-func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
+func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) (retErr error) {
 	if db == nil {
 		return errors.New("nil sql db")
 	}
 
+	// PostgreSQL advisory locks are session-scoped. Pin one physical database
+	// session for lock acquisition, every migration statement (including
+	// *_notx.sql), and unlock. Running these calls through sql.DB would allow the
+	// pool to switch sessions and silently make the lock ineffective.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migrations connection: %w", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
 	// 获取分布式锁，确保多实例部署时只有一个实例执行迁移。
 	// 这是 PostgreSQL 特有的 Advisory Lock 机制。
-	if err := pgAdvisoryLock(ctx, db); err != nil {
+	if err := pgAdvisoryLock(ctx, conn); err != nil {
+		discardSQLConn(conn)
 		return err
 	}
 	defer func() {
 		// 无论迁移是否成功，都要释放锁。
-		// 使用 context.Background() 确保即使原 ctx 已取消也能释放锁。
-		_ = pgAdvisoryUnlock(context.Background(), db)
+		// 使用独立且有界的 context，确保原 ctx 取消后仍尝试释放，同时
+		// 避免数据库故障让启动流程永久卡在清理路径。
+		unlockCtx, cancel := context.WithTimeout(context.Background(), migrationsUnlockTimeout)
+		defer cancel()
+		if err := pgAdvisoryUnlock(unlockCtx, conn); err != nil {
+			retErr = errors.Join(retErr, err)
+			// Returning a session that may still own the advisory lock to the
+			// pool can deadlock every later startup. Mark it bad so database/sql
+			// closes the physical session and PostgreSQL releases session locks.
+			discardSQLConn(conn)
+		}
 	}()
+
+	return applyMigrationsFSOnConn(ctx, conn, fsys)
+}
+
+func applyMigrationsFSOnConn(ctx context.Context, conn *sql.Conn, fsys fs.FS) error {
 
 	// 创建迁移记录表（如果不存在）。
 	// 该表记录所有已应用的迁移及其校验和。
-	if _, err := db.ExecContext(ctx, schemaMigrationsTableDDL); err != nil {
+	if _, err := conn.ExecContext(ctx, schemaMigrationsTableDDL); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
 	// 自动对齐 Atlas 基线（如果检测到 legacy schema_migrations 且缺失 atlas_schema_revisions）。
-	if err := ensureAtlasBaselineAligned(ctx, db, fsys); err != nil {
+	if err := ensureAtlasBaselineAligned(ctx, conn, fsys); err != nil {
 		return err
 	}
 
@@ -170,7 +253,7 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 
 		// 检查该迁移是否已经应用
 		var existing string
-		rowErr := db.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE filename = $1", name).Scan(&existing)
+		rowErr := conn.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE filename = $1", name).Scan(&existing)
 		if rowErr == nil {
 			// 迁移已应用，验证校验和是否匹配
 			if existing != checksum {
@@ -211,33 +294,14 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 		}
 
 		if nonTx {
-			if err := prepareNonTransactionalMigration(ctx, db, name); err != nil {
-				return fmt.Errorf("prepare migration %s: %w", name, err)
-			}
-
-			// *_notx.sql：用于 CREATE/DROP INDEX CONCURRENTLY 场景，必须非事务执行。
-			// 逐条语句执行，避免将多条 CONCURRENTLY 语句放入同一个隐式事务块。
-			statements := splitSQLStatements(content)
-			for i, stmt := range statements {
-				trimmed := strings.TrimSpace(stmt)
-				if trimmed == "" {
-					continue
-				}
-				if stripSQLLineComment(trimmed) == "" {
-					continue
-				}
-				if _, err := db.ExecContext(ctx, trimmed); err != nil {
-					return fmt.Errorf("apply migration %s (non-tx statement %d): %w", name, i+1, err)
-				}
-			}
-			if _, err := db.ExecContext(ctx, "INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)", name, checksum); err != nil {
-				return fmt.Errorf("record migration %s (non-tx): %w", name, err)
+			if err := applyNonTransactionalMigration(ctx, conn, name, checksum, content); err != nil {
+				return err
 			}
 			continue
 		}
 
 		// 默认迁移在事务中执行，确保原子性：要么完全成功，要么完全回滚。
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin migration %s: %w", name, err)
 		}
@@ -272,16 +336,265 @@ func applyMigrationsFS(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 	return nil
 }
 
-func prepareNonTransactionalMigration(ctx context.Context, db *sql.DB, name string) error {
+func applyNonTransactionalMigration(ctx context.Context, conn *sql.Conn, name, checksum, content string) error {
+	nonTxCtx, cancel := context.WithTimeout(ctx, nonTransactionalMigrationTimeout)
+	defer cancel()
+
+	if err := prepareNonTransactionalMigration(nonTxCtx, conn, name); err != nil {
+		return fmt.Errorf("prepare migration %s: %w", name, err)
+	}
+	if err := prepareConcurrentIndexArtifacts(nonTxCtx, conn, content); err != nil {
+		return fmt.Errorf("prepare migration %s concurrent indexes: %w", name, err)
+	}
+
+	// *_notx.sql：用于 CREATE/DROP INDEX CONCURRENTLY 场景，必须在持有
+	// advisory lock 的同一 pinned session 上逐条非事务执行。
+	statements := splitSQLStatements(content)
+	for i, stmt := range statements {
+		trimmed := strings.TrimSpace(stmt)
+		if trimmed == "" || stripSQLLineComment(trimmed) == "" {
+			continue
+		}
+		if _, err := conn.ExecContext(nonTxCtx, trimmed); err != nil {
+			return fmt.Errorf("apply migration %s (non-tx statement %d): %w", name, i+1, err)
+		}
+	}
+	if _, err := conn.ExecContext(nonTxCtx, "INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)", name, checksum); err != nil {
+		return fmt.Errorf("record migration %s (non-tx): %w", name, err)
+	}
+	return nil
+}
+
+func prepareNonTransactionalMigration(ctx context.Context, db migrationExecutor, name string) error {
 	switch name {
 	case paymentOrdersOutTradeNoUniqueMigration:
 		return preparePaymentOrdersOutTradeNoUniqueMigration(ctx, db)
+	case apiKeyHashIndexMigration:
+		return prepareRequiredIndex(ctx, db, apiKeyHashIndexSpec)
+	case walletIntegrityIndexesMigration:
+		return prepareWalletIntegrityIndexesMigration(ctx, db)
 	default:
 		return nil
 	}
 }
 
-func preparePaymentOrdersOutTradeNoUniqueMigration(ctx context.Context, db *sql.DB) error {
+func prepareWalletIntegrityIndexesMigration(ctx context.Context, db migrationExecutor) error {
+	for _, spec := range walletIntegrityIndexes {
+		if err := prepareRequiredIndex(ctx, db, spec); err != nil {
+			if strings.Contains(err.Error(), "does not match required definition") {
+				return fmt.Errorf("prepare wallet integrity index %s: existing index does not match required wallet integrity definition: %w", spec.name, err)
+			}
+			return fmt.Errorf("prepare wallet integrity index %s: %w", spec.name, err)
+		}
+	}
+	return nil
+}
+
+func prepareRequiredIndex(ctx context.Context, db migrationExecutor, spec requiredIndexSpec) error {
+	state, err := inspectIndexDefinition(ctx, db, spec.name)
+	if err != nil {
+		return fmt.Errorf("inspect required index: %w", err)
+	}
+	if !state.exists {
+		return nil
+	}
+	if !state.valid {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP INDEX CONCURRENTLY IF EXISTS %s", spec.name)); err != nil {
+			return fmt.Errorf("drop invalid index: %w", err)
+		}
+		return nil
+	}
+	if !state.matches(spec) {
+		return fmt.Errorf(
+			"existing valid index does not match required definition (table=%s unique=%t keys=%d key=%s predicate=%q)",
+			state.table, state.unique, state.keyCount, state.keyColumn, state.predicate,
+		)
+	}
+	return nil
+}
+
+type indexDefinitionState struct {
+	exists    bool
+	valid     bool
+	unique    bool
+	table     string
+	keyCount  int
+	keyColumn string
+	predicate string
+}
+
+func (s indexDefinitionState) matches(spec requiredIndexSpec) bool {
+	return s.valid &&
+		s.unique &&
+		s.table == spec.table &&
+		s.keyCount == 1 &&
+		strings.EqualFold(strings.TrimSpace(s.keyColumn), spec.keyColumn) &&
+		normalizeIndexPredicate(s.predicate) == normalizeIndexPredicate(spec.predicate)
+}
+
+func inspectIndexDefinition(ctx context.Context, db migrationExecutor, indexName string) (indexDefinitionState, error) {
+	state := indexDefinitionState{}
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			i.indisvalid,
+			i.indisunique,
+			tbl.relname,
+			i.indnkeyatts,
+			pg_get_indexdef(i.indexrelid, 1, TRUE),
+			COALESCE(pg_get_expr(i.indpred, i.indrelid, TRUE), '')
+		FROM pg_class idx
+		JOIN pg_namespace ns ON ns.oid = idx.relnamespace
+		JOIN pg_index i ON i.indexrelid = idx.oid
+		JOIN pg_class tbl ON tbl.oid = i.indrelid
+		WHERE ns.nspname = 'public'
+		  AND idx.relname = $1
+	`, indexName).Scan(
+		&state.valid,
+		&state.unique,
+		&state.table,
+		&state.keyCount,
+		&state.keyColumn,
+		&state.predicate,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
+		return state, err
+	}
+	state.exists = true
+	return state, nil
+}
+
+func normalizeIndexPredicate(predicate string) string {
+	normalized := postgresTimestampWithOffsetPattern.ReplaceAllStringFunc(predicate, normalizePostgresTimestampLiteral)
+	return stripIndexPredicateCasts(normalizeSQLOutsideLiterals(normalized))
+}
+
+func normalizePostgresTimestampLiteral(literal string) string {
+	value := strings.Trim(literal, "'")
+	for _, layout := range []string{
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05Z0700",
+		"2006-01-02 15:04:05Z07",
+	} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return "'" + parsed.UTC().Format("2006-01-02 15:04:05.999999999") + "+00'"
+		}
+	}
+	return literal
+}
+
+func normalizeSQLOutsideLiterals(input string) string {
+	var out strings.Builder
+	out.Grow(len(input))
+	inLiteral := false
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		if ch == '\'' {
+			out.WriteByte(ch)
+			if inLiteral && i+1 < len(input) && input[i+1] == '\'' {
+				out.WriteByte(input[i+1])
+				i++
+				continue
+			}
+			inLiteral = !inLiteral
+			continue
+		}
+		if inLiteral {
+			out.WriteByte(ch)
+			continue
+		}
+		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '(' || ch == ')' {
+			continue
+		}
+		if ch >= 'A' && ch <= 'Z' {
+			ch += 'a' - 'A'
+		}
+		out.WriteByte(ch)
+	}
+	return out.String()
+}
+
+func stripIndexPredicateCasts(input string) string {
+	casts := []string{"::charactervarying", "::timestampwithtimezone", "::text"}
+	var out strings.Builder
+	out.Grow(len(input))
+	inLiteral := false
+	for i := 0; i < len(input); {
+		if input[i] == '\'' {
+			out.WriteByte(input[i])
+			if inLiteral && i+1 < len(input) && input[i+1] == '\'' {
+				out.WriteByte(input[i+1])
+				i += 2
+				continue
+			}
+			inLiteral = !inLiteral
+			i++
+			continue
+		}
+		if !inLiteral {
+			removed := false
+			for _, cast := range casts {
+				if strings.HasPrefix(input[i:], cast) {
+					i += len(cast)
+					removed = true
+					break
+				}
+			}
+			if removed {
+				continue
+			}
+		}
+		out.WriteByte(input[i])
+		i++
+	}
+	return out.String()
+}
+
+func prepareConcurrentIndexArtifacts(ctx context.Context, db migrationExecutor, content string) error {
+	for _, statement := range splitSQLStatements(content) {
+		cleanStatement := stripSQLLineComment(statement)
+		match := concurrentCreateIndexNamePattern.FindStringSubmatch(cleanStatement)
+		if len(match) != 3 {
+			upper := strings.ToUpper(cleanStatement)
+			if strings.Contains(upper, "CREATE") && strings.Contains(upper, "INDEX") && strings.Contains(upper, "CONCURRENTLY") {
+				return errors.New("unsupported CREATE INDEX CONCURRENTLY syntax; index name must be an unquoted, non-qualified SQL identifier")
+			}
+			continue
+		}
+		indexName := match[2]
+		if isCanonicalRequiredIndex(indexName) {
+			continue
+		}
+		invalid, err := indexIsInvalid(ctx, db, indexName)
+		if err != nil {
+			return fmt.Errorf("check invalid index %s: %w", indexName, err)
+		}
+		if !invalid {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP INDEX CONCURRENTLY IF EXISTS %s", indexName)); err != nil {
+			return fmt.Errorf("drop invalid index %s: %w", indexName, err)
+		}
+	}
+	return nil
+}
+
+func isCanonicalRequiredIndex(indexName string) bool {
+	if indexName == paymentOrdersOutTradeNoIndexSpec.name || indexName == apiKeyHashIndexSpec.name {
+		return true
+	}
+	for _, spec := range walletIntegrityIndexes {
+		if indexName == spec.name {
+			return true
+		}
+	}
+	return false
+}
+
+func preparePaymentOrdersOutTradeNoUniqueMigration(ctx context.Context, db migrationExecutor) error {
 	duplicates, err := findDuplicatePaymentOrderOutTradeNos(ctx, db)
 	if err != nil {
 		return fmt.Errorf("precheck duplicate out_trade_no: %w", err)
@@ -294,21 +607,10 @@ func preparePaymentOrdersOutTradeNoUniqueMigration(ctx context.Context, db *sql.
 		)
 	}
 
-	invalid, err := indexIsInvalid(ctx, db, paymentOrdersOutTradeNoUniqueIndex)
-	if err != nil {
-		return fmt.Errorf("check invalid index %s: %w", paymentOrdersOutTradeNoUniqueIndex, err)
-	}
-	if !invalid {
-		return nil
-	}
-
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP INDEX CONCURRENTLY IF EXISTS %s", paymentOrdersOutTradeNoUniqueIndex)); err != nil {
-		return fmt.Errorf("drop invalid index %s: %w", paymentOrdersOutTradeNoUniqueIndex, err)
-	}
-	return nil
+	return prepareRequiredIndex(ctx, db, paymentOrdersOutTradeNoIndexSpec)
 }
 
-func findDuplicatePaymentOrderOutTradeNos(ctx context.Context, db *sql.DB) ([]string, error) {
+func findDuplicatePaymentOrderOutTradeNos(ctx context.Context, db migrationExecutor) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT out_trade_no, COUNT(*) AS duplicate_count
 		FROM payment_orders
@@ -340,7 +642,7 @@ func findDuplicatePaymentOrderOutTradeNos(ctx context.Context, db *sql.DB) ([]st
 	return duplicates, nil
 }
 
-func indexIsInvalid(ctx context.Context, db *sql.DB, indexName string) (bool, error) {
+func indexIsInvalid(ctx context.Context, db migrationExecutor, indexName string) (bool, error) {
 	var invalid bool
 	err := db.QueryRowContext(ctx, `
 		SELECT EXISTS (
@@ -356,7 +658,7 @@ func indexIsInvalid(ctx context.Context, db *sql.DB, indexName string) (bool, er
 	return invalid, err
 }
 
-func ensureAtlasBaselineAligned(ctx context.Context, db *sql.DB, fsys fs.FS) error {
+func ensureAtlasBaselineAligned(ctx context.Context, db migrationExecutor, fsys fs.FS) error {
 	hasLegacy, err := tableExists(ctx, db, "schema_migrations")
 	if err != nil {
 		return fmt.Errorf("check schema_migrations: %w", err)
@@ -383,9 +685,15 @@ func ensureAtlasBaselineAligned(ctx context.Context, db *sql.DB, fsys fs.FS) err
 		return nil
 	}
 
-	version, description, hash, err := latestMigrationBaseline(fsys)
+	version, description, hash, ok, err := latestAppliedMigrationBaseline(ctx, db, fsys)
 	if err != nil {
 		return fmt.Errorf("atlas baseline version: %w", err)
+	}
+	if !ok {
+		// A fresh or partially migrated database must not advertise the newest
+		// embedded migration to a second runner. The next startup can align Atlas
+		// after this runner has recorded a contiguous applied prefix.
+		return nil
 	}
 
 	if _, err := db.ExecContext(ctx, `
@@ -397,7 +705,65 @@ func ensureAtlasBaselineAligned(ctx context.Context, db *sql.DB, fsys fs.FS) err
 	return nil
 }
 
-func tableExists(ctx context.Context, db *sql.DB, tableName string) (bool, error) {
+func latestAppliedMigrationBaseline(ctx context.Context, db migrationExecutor, fsys fs.FS) (string, string, string, bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT filename, checksum FROM schema_migrations")
+	if err != nil {
+		return "", "", "", false, fmt.Errorf("list applied migrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	applied := make(map[string]string)
+	for rows.Next() {
+		var name, checksum string
+		if err := rows.Scan(&name, &checksum); err != nil {
+			return "", "", "", false, fmt.Errorf("scan applied migration: %w", err)
+		}
+		applied[name] = checksum
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", "", false, fmt.Errorf("iterate applied migrations: %w", err)
+	}
+
+	files, err := fs.Glob(fsys, "*.sql")
+	if err != nil {
+		return "", "", "", false, err
+	}
+	sort.Strings(files)
+
+	var version, hash string
+	for _, name := range files {
+		contentBytes, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		content := strings.TrimSpace(string(contentBytes))
+		if content == "" {
+			continue
+		}
+
+		dbChecksum, exists := applied[name]
+		if !exists {
+			break
+		}
+		sum := sha256.Sum256([]byte(content))
+		fileChecksum := hex.EncodeToString(sum[:])
+		if dbChecksum != fileChecksum && !isMigrationChecksumCompatible(name, dbChecksum, fileChecksum, content) {
+			return "", "", "", false, fmt.Errorf(
+				"applied migration %s checksum mismatch (db=%s file=%s)",
+				name, dbChecksum, fileChecksum,
+			)
+		}
+		version = strings.TrimSuffix(name, ".sql")
+		hash = fileChecksum
+	}
+
+	if version == "" {
+		return "", "", "", false, nil
+	}
+	return version, version, hash, true, nil
+}
+
+func tableExists(ctx context.Context, db migrationExecutor, tableName string) (bool, error) {
 	var exists bool
 	err := db.QueryRowContext(ctx, `
 		SELECT EXISTS (
@@ -566,7 +932,7 @@ func stripSQLLineComment(s string) string {
 // pgAdvisoryLock 获取 PostgreSQL Advisory Lock。
 // Advisory Lock 是一种轻量级的锁机制，不与任何特定的数据库对象关联。
 // 它非常适合用于应用层面的分布式锁场景，如迁移序列化。
-func pgAdvisoryLock(ctx context.Context, db *sql.DB) error {
+func pgAdvisoryLock(ctx context.Context, db migrationExecutor) error {
 	ticker := time.NewTicker(migrationsLockRetryInterval)
 	defer ticker.Stop()
 
@@ -588,10 +954,19 @@ func pgAdvisoryLock(ctx context.Context, db *sql.DB) error {
 
 // pgAdvisoryUnlock 释放 PostgreSQL Advisory Lock。
 // 必须在获取锁后确保释放，否则会阻塞其他实例的迁移操作。
-func pgAdvisoryUnlock(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrationsAdvisoryLockID)
-	if err != nil {
+func pgAdvisoryUnlock(ctx context.Context, db migrationExecutor) error {
+	var unlocked bool
+	if err := db.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", migrationsAdvisoryLockID).Scan(&unlocked); err != nil {
 		return fmt.Errorf("release migrations lock: %w", err)
 	}
+	if !unlocked {
+		return errors.New("release migrations lock: current database session does not own the lock")
+	}
 	return nil
+}
+
+func discardSQLConn(conn *sql.Conn) {
+	_ = conn.Raw(func(any) error {
+		return driver.ErrBadConn
+	})
 }

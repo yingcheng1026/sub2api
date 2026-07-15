@@ -1,6 +1,10 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import EmailVerifyView from '@/views/auth/EmailVerifyView.vue'
+import {
+  clearPendingRegistration,
+  setPendingRegistration,
+} from '@/auth/pendingRegistration'
 
 const {
   pushMock,
@@ -111,6 +115,7 @@ describe('EmailVerifyView', () => {
     persistOAuthTokenContextMock.mockReset()
     apiClientPostMock.mockReset()
     authStoreState.pendingAuthSession = null
+    clearPendingRegistration()
     sessionStorage.clear()
     localStorage.clear()
 
@@ -132,14 +137,11 @@ describe('EmailVerifyView', () => {
       provider: 'wechat',
       redirect: '/profile',
     }
-    sessionStorage.setItem(
-      'register_data',
-      JSON.stringify({
-        email: 'fresh@example.com',
-        password: 'secret-123',
-        aff_code: 'AFF123',
-      })
-    )
+    setPendingRegistration({
+      email: 'fresh@example.com',
+      password: 'secret-123',
+      aff_code: 'AFF123',
+    })
 
     mount(EmailVerifyView, {
       global: {
@@ -174,13 +176,10 @@ describe('EmailVerifyView', () => {
       site_name: 'Sub2API',
       registration_email_suffix_whitelist: ['allowed.com'],
     })
-    sessionStorage.setItem(
-      'register_data',
-      JSON.stringify({
-        email: 'fresh@example.com',
-        password: 'secret-123',
-      })
-    )
+    setPendingRegistration({
+      email: 'fresh@example.com',
+      password: 'secret-123',
+    })
 
     mount(EmailVerifyView, {
       global: {
@@ -215,13 +214,10 @@ describe('EmailVerifyView', () => {
       site_name: 'Sub2API',
       registration_email_suffix_whitelist: ['allowed.com'],
     })
-    sessionStorage.setItem(
-      'register_data',
-      JSON.stringify({
-        email: 'fresh@example.com',
-        password: 'secret-123',
-      })
-    )
+    setPendingRegistration({
+      email: 'fresh@example.com',
+      password: 'secret-123',
+    })
 
     mount(EmailVerifyView, {
       global: {
@@ -262,13 +258,10 @@ describe('EmailVerifyView', () => {
       provider: 'oidc',
       redirect: '/profile/security',
     })
-    sessionStorage.setItem(
-      'register_data',
-      JSON.stringify({
-        email: 'fresh@example.com',
-        password: 'secret-123',
-      })
-    )
+    setPendingRegistration({
+      email: 'fresh@example.com',
+      password: 'secret-123',
+    })
 
     mount(EmailVerifyView, {
       global: {
@@ -300,14 +293,11 @@ describe('EmailVerifyView', () => {
       provider: 'wechat',
       redirect: '/profile',
     }
-    sessionStorage.setItem(
-      'register_data',
-      JSON.stringify({
-        email: 'fresh@example.com',
-        password: 'secret-123',
-        aff_code: 'AFF123',
-      })
-    )
+    setPendingRegistration({
+      email: 'fresh@example.com',
+      password: 'secret-123',
+      aff_code: 'AFF123',
+    })
     apiClientPostMock.mockResolvedValue({
       data: {
         access_token: 'oauth-access-token',
@@ -367,13 +357,10 @@ describe('EmailVerifyView', () => {
       site_name: 'Sub2API',
       registration_email_suffix_whitelist: ['allowed.com'],
     })
-    sessionStorage.setItem(
-      'register_data',
-      JSON.stringify({
-        email: 'fresh@example.com',
-        password: 'secret-123',
-      })
-    )
+    setPendingRegistration({
+      email: 'fresh@example.com',
+      password: 'secret-123',
+    })
     apiClientPostMock.mockResolvedValue({
       data: {
         auth_result: 'pending_session',
@@ -419,15 +406,12 @@ describe('EmailVerifyView', () => {
   })
 
   it('keeps the normal email registration flow unchanged', async () => {
-    sessionStorage.setItem(
-      'register_data',
-      JSON.stringify({
-        email: 'normal@example.com',
-        password: 'secret-456',
-        promo_code: 'PROMO',
-        invitation_code: 'INVITE',
-      })
-    )
+    setPendingRegistration({
+      email: 'normal@example.com',
+      password: 'secret-456',
+      promo_code: 'PROMO',
+      invitation_code: 'INVITE',
+    })
     registerMock.mockResolvedValue({})
 
     const wrapper = mount(EmailVerifyView, {
@@ -456,5 +440,28 @@ describe('EmailVerifyView', () => {
     })
     expect(apiClientPostMock).not.toHaveBeenCalled()
     expect(pushMock).toHaveBeenCalledWith('/dashboard')
+  })
+
+  it('purges legacy Web Storage credentials without restoring the password', async () => {
+    sessionStorage.setItem('register_data', JSON.stringify({
+      email: 'legacy@example.com',
+      password: 'legacy-plaintext-password',
+    }))
+
+    const wrapper = mount(EmailVerifyView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /><slot name="footer" /></div>' },
+          Icon: true,
+          TurnstileWidget: true,
+          transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(sessionStorage.getItem('register_data')).toBeNull()
+    expect(sendVerifyCodeMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('auth.sessionExpired')
   })
 })

@@ -12,12 +12,24 @@
         </div>
       </div>
 
+      <div class="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
+        {{ t('admin.users.walletRoutingBusinessRule') }}
+      </div>
+
       <!-- 加载状态 -->
       <div v-if="loading" class="flex justify-center py-12">
         <svg class="h-10 w-10 animate-spin text-primary-500" fill="none" viewBox="0 0 24 24">
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
         </svg>
+      </div>
+
+      <div
+        v-else-if="loadError"
+        data-test="group-load-error"
+        class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300"
+      >
+        {{ loadError }}
       </div>
 
       <div v-else class="space-y-6">
@@ -44,6 +56,7 @@
                     <input
                       type="checkbox"
                       :checked="config.isSelected"
+                      :disabled="submitting || loading"
                       @change="toggleExclusiveGroup(config.groupId)"
                       class="peer sr-only"
                     />
@@ -73,6 +86,9 @@
                       {{ t('admin.users.defaultRate') }}: <span class="font-medium text-gray-700 dark:text-gray-300">{{ config.defaultRate }}x</span>
                     </span>
                   </div>
+                  <p v-if="config.policyHintKey" class="mt-1.5 text-xs font-medium text-blue-700 dark:text-blue-300">
+                    {{ t(config.policyHintKey) }}
+                  </p>
                 </div>
 
                 <!-- 专属倍率输入 -->
@@ -83,6 +99,7 @@
                     step="0.001"
                     min="0.001"
                     :value="config.customRate ?? ''"
+                    :disabled="submitting || loading"
                     @input="updateCustomRate(config.groupId, ($event.target as HTMLInputElement).value)"
                     :placeholder="String(config.defaultRate)"
                     class="hide-spinner w-24 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium transition-colors focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20 dark:border-dark-500 dark:bg-dark-700 dark:focus:border-primary-500"
@@ -131,6 +148,9 @@
                       {{ t('admin.users.defaultRate') }}: <span class="font-medium text-gray-700 dark:text-gray-300">{{ config.defaultRate }}x</span>
                     </span>
                   </div>
+                  <p v-if="config.policyHintKey" class="mt-1.5 text-xs font-medium text-blue-700 dark:text-blue-300">
+                    {{ t(config.policyHintKey) }}
+                  </p>
                 </div>
 
                 <!-- 专属倍率输入 -->
@@ -141,6 +161,7 @@
                     step="0.001"
                     min="0.001"
                     :value="config.customRate ?? ''"
+                    :disabled="submitting || loading"
                     @input="updateCustomRate(config.groupId, ($event.target as HTMLInputElement).value)"
                     :placeholder="String(config.defaultRate)"
                     class="hide-spinner w-24 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium transition-colors focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20 dark:border-dark-500 dark:bg-dark-700 dark:focus:border-primary-500"
@@ -166,7 +187,12 @@
     <template #footer>
       <div class="flex justify-end gap-3">
         <button @click="$emit('close')" class="btn btn-secondary px-5">{{ t('common.cancel') }}</button>
-        <button @click="handleSave" :disabled="submitting" class="btn btn-primary px-6">
+        <button
+          data-test="save-groups"
+          @click="handleSave"
+          :disabled="!canSave"
+          class="btn btn-primary px-6"
+        >
           <svg v-if="submitting" class="-ml-1 mr-2 h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -195,6 +221,7 @@ interface GroupRateConfig {
   defaultRate: number
   customRate: number | null
   isSelected: boolean
+  policyHintKey: string | null
 }
 
 const props = defineProps<{ show: boolean; user: AdminUser | null }>()
@@ -207,6 +234,10 @@ const groupConfigs = ref<GroupRateConfig[]>([])
 const originalGroupRates = ref<Record<number, number>>({}) // 记录原始专属倍率，用于检测删除
 const loading = ref(false)
 const submitting = ref(false)
+const loadError = ref('')
+const loadedUserID = ref<number | null>(null)
+const baselineUserGroupState = ref('')
+let loadGeneration = 0
 
 // 分离专属分组和公开分组
 const exclusiveGroups = computed(() => groups.value.filter((g) => g.is_exclusive))
@@ -215,25 +246,91 @@ const publicGroups = computed(() => groups.value.filter((g) => !g.is_exclusive))
 const exclusiveGroupConfigs = computed(() => groupConfigs.value.filter((c) => c.isExclusive))
 const publicGroupConfigs = computed(() => groupConfigs.value.filter((c) => !c.isExclusive))
 
+const canSave = computed(() => (
+  !!props.user
+  && props.show
+  && !loading.value
+  && !submitting.value
+  && !loadError.value
+  && loadedUserID.value === props.user?.id
+))
+
+const resetLoadedState = () => {
+  groups.value = []
+  groupConfigs.value = []
+  originalGroupRates.value = {}
+  loadedUserID.value = null
+  baselineUserGroupState.value = ''
+  loadError.value = ''
+}
+
+const normalizeAllowedGroups = (allowedGroups: number[] | null | undefined) =>
+  [...new Set(allowedGroups || [])].sort((a, b) => a - b)
+
+const normalizeGroupRates = (groupRates: Record<number, number> | undefined) =>
+  Object.entries(groupRates || {})
+    .map(([groupID, rate]) => [Number(groupID), Number(rate)] as const)
+    .filter(([groupID, rate]) => Number.isInteger(groupID) && groupID > 0 && Number.isFinite(rate))
+    .sort(([left], [right]) => left - right)
+
+const userGroupStateFingerprint = (user: AdminUser) => JSON.stringify([
+  normalizeAllowedGroups(user.allowed_groups),
+  normalizeGroupRates(user.group_rates)
+])
+
+const groupPolicyHintKey = (group: Group): string | null => {
+  if (group.name === 'openai-default') return 'admin.users.openAIDefaultGroupHint'
+  if (group.name === 'vip') return 'admin.users.vipGroupHint'
+  return null
+}
+
+const reservedGroupPriority = (group: Group): number => {
+  if (group.name === 'openai-default') return 0
+  if (group.name === 'vip') return 1
+  return 2
+}
+
 watch(
-  () => props.show,
-  (v) => {
-    if (v && props.user) {
-      load()
-    }
-  }
+  [() => props.show, () => props.user?.id],
+  ([show]) => {
+    const generation = ++loadGeneration
+    resetLoadedState()
+    loading.value = false
+    if (show && props.user) void load(props.user, generation)
+  },
+  { immediate: true }
 )
 
-const load = async () => {
+async function load(targetUser: AdminUser, generation: number) {
   loading.value = true
   try {
-    const res = await adminAPI.groups.list(1, 1000)
+    const [res, currentUser] = await Promise.all([
+      adminAPI.groups.list(1, 1000),
+      adminAPI.users.getById(targetUser.id)
+    ])
+    if (
+      generation !== loadGeneration
+      || !props.show
+      || props.user?.id !== targetUser.id
+    ) {
+      return
+    }
+    if (currentUser.id !== targetUser.id) {
+      throw new Error('Loaded user does not match the requested user')
+    }
     // 只显示标准类型且活跃的分组
-    groups.value = res.items.filter((g) => g.subscription_type === 'standard' && g.status === 'active')
+    groups.value = res.items
+      .filter((g) => g.subscription_type === 'standard' && g.status === 'active')
+      .slice()
+      .sort((left, right) => (
+        reservedGroupPriority(left) - reservedGroupPriority(right)
+        || left.name.localeCompare(right.name)
+        || left.id - right.id
+      ))
 
     // 初始化配置
-    const userAllowedGroups = props.user?.allowed_groups || []
-    const userGroupRates = props.user?.group_rates || {}
+    const userAllowedGroups = currentUser.allowed_groups || []
+    const userGroupRates = currentUser.group_rates || {}
 
     // 保存原始专属倍率，用于检测删除操作
     originalGroupRates.value = { ...userGroupRates }
@@ -248,11 +345,28 @@ const load = async () => {
       // 专属分组：检查是否在 allowed_groups 中
       // 公开分组：始终选中
       isSelected: g.is_exclusive ? userAllowedGroups.includes(g.id) : true,
+      policyHintKey: groupPolicyHintKey(g)
     }))
+    baselineUserGroupState.value = userGroupStateFingerprint(currentUser)
+    loadedUserID.value = targetUser.id
   } catch (error) {
+    if (
+      generation !== loadGeneration
+      || !props.show
+      || props.user?.id !== targetUser.id
+    ) {
+      return
+    }
+    groups.value = []
+    groupConfigs.value = []
+    originalGroupRates.value = {}
+    loadedUserID.value = null
+    baselineUserGroupState.value = ''
+    loadError.value = t('admin.users.groupConfigLoadFailed')
+    appStore.showError(loadError.value)
     console.error('Failed to load groups:', error)
   } finally {
-    loading.value = false
+    if (generation === loadGeneration) loading.value = false
   }
 }
 
@@ -276,10 +390,30 @@ const updateCustomRate = (groupId: number, value: string) => {
 }
 
 const handleSave = async () => {
-  if (!props.user) return
+  if (!props.user || !canSave.value) {
+    if (loadError.value) appStore.showError(loadError.value)
+    return
+  }
+  const targetUserID = props.user.id
+  const generation = loadGeneration
   submitting.value = true
 
   try {
+    const currentUser = await adminAPI.users.getById(targetUserID)
+    if (
+      generation !== loadGeneration
+      || !props.show
+      || props.user?.id !== targetUserID
+    ) {
+      return
+    }
+    if (userGroupStateFingerprint(currentUser) !== baselineUserGroupState.value) {
+      loadError.value = t('admin.users.groupConfigStale')
+      loadedUserID.value = null
+      appStore.showError(loadError.value)
+      return
+    }
+
     // 构建 allowed_groups（仅包含专属分组中被勾选的）
     const allowedGroups = groupConfigs.value.filter((c) => c.isExclusive && c.isSelected).map((c) => c.groupId)
 
@@ -299,15 +433,30 @@ const handleSave = async () => {
       }
     }
 
-    await adminAPI.users.update(props.user.id, {
+    await adminAPI.users.update(targetUserID, {
       allowed_groups: allowedGroups,
       group_rates: Object.keys(groupRates).length > 0 ? groupRates : undefined,
     })
+
+    if (
+      generation !== loadGeneration
+      || !props.show
+      || props.user?.id !== targetUserID
+    ) {
+      return
+    }
 
     appStore.showSuccess(t('admin.users.groupConfigUpdated'))
     emit('success')
     emit('close')
   } catch (error) {
+    if (
+      generation === loadGeneration
+      && props.show
+      && props.user?.id === targetUserID
+    ) {
+      appStore.showError(t('admin.users.failedToUpdateAllowedGroups'))
+    }
     console.error('Failed to update user group config:', error)
   } finally {
     submitting.value = false

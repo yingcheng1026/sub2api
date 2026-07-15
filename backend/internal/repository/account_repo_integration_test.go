@@ -956,6 +956,40 @@ func (s *AccountRepoSuite) TestBulkUpdate_MergeCredentials() {
 	s.Require().Equal("new_value", got.Credentials["new_key"])
 }
 
+func (s *AccountRepoSuite) TestBulkUpdate_OAuthCredentialsAdvanceSystemVersionOnlyForOAuthRows() {
+	oauth := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name: "bulk-oauth-version",
+		Type: service.AccountTypeOAuth,
+		Credentials: map[string]any{
+			"existing":       "oauth-value",
+			"_token_version": int64(9_999_999_999_999),
+		},
+	})
+	apiKey := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "bulk-api-key-version",
+		Type:        service.AccountTypeAPIKey,
+		Credentials: map[string]any{"existing": "api-key-value"},
+	})
+
+	_, err := s.repo.BulkUpdate(s.ctx, []int64{oauth.ID, apiKey.ID}, service.AccountBulkUpdate{
+		Credentials: map[string]any{
+			"project_id":     "replacement-project",
+			"_token_version": int64(1),
+		},
+	})
+	s.Require().NoError(err)
+
+	updatedOAuth, err := s.repo.GetByID(s.ctx, oauth.ID)
+	s.Require().NoError(err)
+	s.Require().EqualValues(10_000_000_000_000, updatedOAuth.GetCredentialAsInt64("_token_version"))
+	s.Require().Equal("replacement-project", updatedOAuth.GetCredential("project_id"))
+
+	updatedAPIKey, err := s.repo.GetByID(s.ctx, apiKey.ID)
+	s.Require().NoError(err)
+	s.Require().Zero(updatedAPIKey.GetCredentialAsInt64("_token_version"))
+	s.Require().Equal("replacement-project", updatedAPIKey.GetCredential("project_id"))
+}
+
 func (s *AccountRepoSuite) TestBulkUpdate_MergeExtra() {
 	a1 := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:  "bulk-extra",

@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// resetQuotaUserSubRepoStub 支持 GetByID、ResetDailyUsage、ResetWeeklyUsage、ResetMonthlyUsage，
-// 其余方法继承 userSubRepoNoop（panic）。
+// resetQuotaUserSubRepoStub supports both explicit admin resets and the
+// compare-and-swap transitions used by request-path window maintenance.
 type resetQuotaUserSubRepoStub struct {
 	userSubRepoNoop
 
@@ -59,6 +59,56 @@ func (r *resetQuotaUserSubRepoStub) ResetMonthlyUsage(_ context.Context, _ int64
 		r.sub.MonthlyWindowStart = &windowStart
 	}
 	return r.resetMonthlyErr
+}
+
+func (r *resetQuotaUserSubRepoStub) AdvanceUsageWindow(_ context.Context, id int64, advance SubscriptionUsageWindowAdvance) (bool, error) {
+	if r.sub == nil || r.sub.ID != id {
+		return false, ErrSubscriptionNotFound
+	}
+	var current *time.Time
+	var transitionErr error
+	switch advance.Window {
+	case SubscriptionUsageWindowDaily:
+		r.resetDailyCalled = true
+		current = r.sub.DailyWindowStart
+		transitionErr = r.resetDailyErr
+	case SubscriptionUsageWindowWeekly:
+		r.resetWeeklyCalled = true
+		current = r.sub.WeeklyWindowStart
+		transitionErr = r.resetWeeklyErr
+	case SubscriptionUsageWindowMonthly:
+		r.resetMonthlyCalled = true
+		current = r.sub.MonthlyWindowStart
+		transitionErr = r.resetMonthlyErr
+	default:
+		return false, ErrInvalidInput
+	}
+	if transitionErr != nil {
+		return false, transitionErr
+	}
+	if !sameOptionalTime(current, advance.ExpectedStart) {
+		return false, nil
+	}
+
+	start := advance.NewStart
+	switch advance.Window {
+	case SubscriptionUsageWindowDaily:
+		r.sub.DailyWindowStart = &start
+		if advance.ResetUsage {
+			r.sub.DailyUsageUSD = 0
+		}
+	case SubscriptionUsageWindowWeekly:
+		r.sub.WeeklyWindowStart = &start
+		if advance.ResetUsage {
+			r.sub.WeeklyUsageUSD = 0
+		}
+	case SubscriptionUsageWindowMonthly:
+		r.sub.MonthlyWindowStart = &start
+		if advance.ResetUsage {
+			r.sub.MonthlyUsageUSD = 0
+		}
+	}
+	return true, nil
 }
 
 func (r *resetQuotaUserSubRepoStub) GetActiveByPlanCoveringGroup(_ context.Context, _, _ int64) (*UserSubscription, error) {

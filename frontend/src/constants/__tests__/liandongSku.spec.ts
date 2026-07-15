@@ -1,37 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { LIANDONG_MONTHLY_TIERS, matchMonthlyTier } from '../liandongSku'
+import { LIANDONG_CREDITS_TIERS } from '../liandongSku'
 
 describe('liandongSku', () => {
-  it('includes the paid-lite monthly tier used by renewal and dashboard top-up modals', () => {
-    expect(LIANDONG_MONTHLY_TIERS.map((tier) => tier.quotaUsd)).toEqual([
-      100,
-      400,
-      1500,
-      3000,
-      4500,
+  it('only exposes the three credit top-up SKUs', () => {
+    expect(LIANDONG_CREDITS_TIERS).toEqual([
+      { creditsUsd: 30, priceCny: 30, name: '$30 通用余额', url: 'https://pay.ldxp.cn/item/bbs9ki' },
+      { creditsUsd: 100, priceCny: 100, name: '$100 通用余额', url: 'https://pay.ldxp.cn/item/b4nrv0' },
+      { creditsUsd: 500, priceCny: 500, name: '$500 通用余额', url: 'https://pay.ldxp.cn/item/o5isg4' }
     ])
-
-    expect(matchMonthlyTier(100)).toMatchObject({
-      id: 'trial',
-      name: '体验版',
-      purchaseBadge: '限购一次',
-      tagline: '低门槛体验,先试再买',
-    })
-    expect(matchMonthlyTier(100)?.tagline).not.toContain('$15')
-    expect(matchMonthlyTier(100)?.tagline).not.toContain('注册送')
-
-    expect(matchMonthlyTier(400)).toMatchObject({
-      id: 'lite',
-      quotaUsd: 400,
-      dailyCapUsd: 50,
-      priceCny: 99,
-      name: '轻量正式版',
-      url: 'https://pay.ldxp.cn/item/neu4dr',
-    })
-    expect(matchMonthlyTier(4500)).toMatchObject({
-      id: 'flagship',
-      dailyCapUsd: 300,
-      url: 'https://pay.ldxp.cn/item/bdu9vx',
-    })
   })
 })

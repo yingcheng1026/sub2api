@@ -154,6 +154,10 @@ func TestEnsureAtlasBaselineAligned(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM atlas_schema_revisions").
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery("SELECT filename, checksum FROM schema_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"filename", "checksum"}).
+				AddRow("001_init.sql", migrationChecksum("CREATE TABLE t1(id int); ")).
+				AddRow("002_next.sql", migrationChecksum("CREATE TABLE t2(id int); ")))
 		mock.ExpectExec("INSERT INTO atlas_schema_revisions").
 			WithArgs("002_next", "002_next", 1, sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -235,6 +239,9 @@ func TestEnsureAtlasBaselineAligned(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM atlas_schema_revisions").
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery("SELECT filename, checksum FROM schema_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"filename", "checksum"}).
+				AddRow("001_init.sql", migrationChecksum("CREATE TABLE t(id int); ")))
 		mock.ExpectExec("INSERT INTO atlas_schema_revisions").
 			WithArgs("001_init", "001_init", 1, sqlmock.AnyArg()).
 			WillReturnError(errors.New("insert failed"))
@@ -245,6 +252,61 @@ func TestEnsureAtlasBaselineAligned(t *testing.T) {
 		err = ensureAtlasBaselineAligned(context.Background(), db, fsys)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "insert atlas baseline")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("baseline_stops_at_contiguous_applied_prefix", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery("SELECT EXISTS \\(").
+			WithArgs("schema_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectQuery("SELECT EXISTS \\(").
+			WithArgs("atlas_schema_revisions").
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM atlas_schema_revisions").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery("SELECT filename, checksum FROM schema_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"filename", "checksum"}).
+				AddRow("001_init.sql", migrationChecksum("CREATE TABLE t1(id int); ")).
+				AddRow("003_later.sql", migrationChecksum("CREATE TABLE t3(id int); ")))
+		mock.ExpectExec("INSERT INTO atlas_schema_revisions").
+			WithArgs("001_init", "001_init", 1, sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		fsys := fstest.MapFS{
+			"001_init.sql":    &fstest.MapFile{Data: []byte("CREATE TABLE t1(id int);")},
+			"002_missing.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t2(id int);")},
+			"003_later.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t3(id int);")},
+		}
+		err = ensureAtlasBaselineAligned(context.Background(), db, fsys)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("skip_baseline_when_no_embedded_migration_is_applied", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery("SELECT EXISTS \\(").
+			WithArgs("schema_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectQuery("SELECT EXISTS \\(").
+			WithArgs("atlas_schema_revisions").
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM atlas_schema_revisions").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery("SELECT filename, checksum FROM schema_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"filename", "checksum"}))
+
+		fsys := fstest.MapFS{
+			"001_init.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t1(id int);")},
+		}
+		err = ensureAtlasBaselineAligned(context.Background(), db, fsys)
+		require.NoError(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
@@ -258,9 +320,7 @@ func TestApplyMigrationsFS_ChecksumMismatchRejected(t *testing.T) {
 	mock.ExpectQuery("SELECT checksum FROM schema_migrations WHERE filename = \\$1").
 		WithArgs("001_init.sql").
 		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow("mismatched-checksum"))
-	mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
-		WithArgs(migrationsAdvisoryLockID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMigrationsUnlock(mock)
 
 	fsys := fstest.MapFS{
 		"001_init.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t(id int);")},
@@ -280,9 +340,7 @@ func TestApplyMigrationsFS_ChecksumMismatchForDataMigrationRequiresManualReview(
 	mock.ExpectQuery("SELECT checksum FROM schema_migrations WHERE filename = \\$1").
 		WithArgs("054_drop_legacy_cache_columns.sql").
 		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow("182c193f3359946cf094090cd9e57d5c3fd9abaffbc1e8fc378646b8a6fa12b4"))
-	mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
-		WithArgs(migrationsAdvisoryLockID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMigrationsUnlock(mock)
 
 	fsys := fstest.MapFS{
 		"054_drop_legacy_cache_columns.sql": &fstest.MapFile{Data: []byte("UPDATE groups SET allow_image_generation = true;")},
@@ -304,9 +362,7 @@ func TestApplyMigrationsFS_CheckMigrationQueryError(t *testing.T) {
 	mock.ExpectQuery("SELECT checksum FROM schema_migrations WHERE filename = \\$1").
 		WithArgs("001_err.sql").
 		WillReturnError(errors.New("query failed"))
-	mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
-		WithArgs(migrationsAdvisoryLockID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMigrationsUnlock(mock)
 
 	fsys := fstest.MapFS{
 		"001_err.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
@@ -329,9 +385,7 @@ func TestApplyMigrationsFS_SkipEmptyAndAlreadyApplied(t *testing.T) {
 	mock.ExpectQuery("SELECT checksum FROM schema_migrations WHERE filename = \\$1").
 		WithArgs("001_already.sql").
 		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow(checksum))
-	mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
-		WithArgs(migrationsAdvisoryLockID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMigrationsUnlock(mock)
 
 	fsys := fstest.MapFS{
 		"000_empty.sql":   &fstest.MapFile{Data: []byte("   \n\t ")},
@@ -348,9 +402,7 @@ func TestApplyMigrationsFS_ReadMigrationError(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	prepareMigrationsBootstrapExpectations(mock)
-	mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
-		WithArgs(migrationsAdvisoryLockID).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectMigrationsUnlock(mock)
 
 	fsys := fstest.MapFS{
 		"001_bad.sql": &fstest.MapFile{Mode: fs.ModeDir},
@@ -379,12 +431,12 @@ func TestPgAdvisoryLockAndUnlock_ErrorBranches(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("unlock_exec_error", func(t *testing.T) {
+	t.Run("unlock_query_error", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		require.NoError(t, err)
 		defer func() { _ = db.Close() }()
 
-		mock.ExpectExec("SELECT pg_advisory_unlock\\(\\$1\\)").
+		mock.ExpectQuery("SELECT pg_advisory_unlock\\(\\$1\\)").
 			WithArgs(migrationsAdvisoryLockID).
 			WillReturnError(errors.New("unlock failed"))
 

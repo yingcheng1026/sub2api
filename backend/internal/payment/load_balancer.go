@@ -2,7 +2,6 @@ package payment
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -83,7 +82,7 @@ type instanceCandidate struct {
 //  2. Batch-query daily usage (PENDING + PAID + COMPLETED + RECHARGING) for all candidates
 //  3. Filter out instances where: single-min/max violated OR daily remaining < orderAmount
 //  4. Pick from survivors using the configured strategy (round-robin / least-amount)
-//  5. If all filtered out, fall back to full list (let the provider itself reject)
+//  5. If no instance survives, fail closed without issuing a provider request
 func (lb *DefaultLoadBalancer) SelectInstance(
 	ctx context.Context,
 	providerKey string,
@@ -98,15 +97,21 @@ func (lb *DefaultLoadBalancer) SelectInstance(
 	}
 
 	// Step 2: batch-fetch daily usage for all candidates.
-	candidates := lb.attachDailyUsage(ctx, instances)
+	candidates, err := lb.attachDailyUsage(ctx, instances)
+	if err != nil {
+		return nil, err
+	}
 
 	// Step 3: filter by limits.
-	available := filterByLimits(candidates, paymentType, orderAmount)
+	available, err := filterByLimits(candidates, paymentType, orderAmount)
+	if err != nil {
+		return nil, err
+	}
 	if len(available) == 0 {
-		slog.Warn("all instances exceeded limits, using full candidate list",
+		slog.Warn("all payment provider instances rejected by configured limits",
 			"provider", providerKey, "payment_type", paymentType,
 			"order_amount", orderAmount, "count", len(candidates))
-		available = candidates
+		return nil, fmt.Errorf("no payment provider instance has capacity for %s", paymentType)
 	}
 
 	// Step 4: pick by strategy.
@@ -169,7 +174,7 @@ func (lb *DefaultLoadBalancer) queryEnabledInstances(
 func (lb *DefaultLoadBalancer) attachDailyUsage(
 	ctx context.Context,
 	instances []*dbent.PaymentProviderInstance,
-) []instanceCandidate {
+) ([]instanceCandidate, error) {
 	todayStart := startOfDay(time.Now())
 
 	// Collect instance IDs.
@@ -197,7 +202,7 @@ func (lb *DefaultLoadBalancer) attachDailyUsage(
 		Aggregate(dbent.Sum(paymentorder.FieldPayAmount)).
 		Scan(ctx, &rows)
 	if err != nil {
-		slog.Warn("batch daily usage query failed, treating all as zero", "error", err)
+		return nil, fmt.Errorf("query provider daily usage: %w", err)
 	}
 
 	usageMap := make(map[string]float64, len(rows))
@@ -212,16 +217,19 @@ func (lb *DefaultLoadBalancer) attachDailyUsage(
 			dailyUsed: usageMap[fmt.Sprintf("%d", inst.ID)],
 		}
 	}
-	return candidates
+	return candidates, nil
 }
 
 // filterByLimits removes instances that cannot accommodate the order:
 //   - orderAmount outside single-transaction [min, max]
 //   - daily remaining capacity (limit - used) < orderAmount
-func filterByLimits(candidates []instanceCandidate, paymentType PaymentType, orderAmount float64) []instanceCandidate {
+func filterByLimits(candidates []instanceCandidate, paymentType PaymentType, orderAmount float64) ([]instanceCandidate, error) {
 	var result []instanceCandidate
 	for _, c := range candidates {
-		cl := getInstanceChannelLimits(c.inst, paymentType)
+		cl, err := getInstanceChannelLimits(c.inst, paymentType)
+		if err != nil {
+			return nil, fmt.Errorf("provider instance %d has invalid limits: %w", c.inst.ID, err)
+		}
 
 		if cl.SingleMin > 0 && orderAmount < cl.SingleMin {
 			slog.Info("order below instance single min, skipping",
@@ -242,17 +250,17 @@ func filterByLimits(candidates []instanceCandidate, paymentType PaymentType, ord
 
 		result = append(result, c)
 	}
-	return result
+	return result, nil
 }
 
 // getInstanceChannelLimits returns the channel limits for a specific payment type.
-func getInstanceChannelLimits(inst *dbent.PaymentProviderInstance, paymentType PaymentType) ChannelLimits {
-	if inst.Limits == "" {
-		return ChannelLimits{}
+func getInstanceChannelLimits(inst *dbent.PaymentProviderInstance, paymentType PaymentType) (ChannelLimits, error) {
+	if err := ValidateInstanceLimits(inst.Limits, inst.ProviderKey, inst.SupportedTypes); err != nil {
+		return ChannelLimits{}, err
 	}
-	var limits InstanceLimits
-	if err := json.Unmarshal([]byte(inst.Limits), &limits); err != nil {
-		return ChannelLimits{}
+	limits, err := ParseInstanceLimits(inst.Limits)
+	if err != nil {
+		return ChannelLimits{}, err
 	}
 	// For Stripe, limits are stored under the provider key "stripe".
 	lookupKey := paymentType
@@ -260,14 +268,24 @@ func getInstanceChannelLimits(inst *dbent.PaymentProviderInstance, paymentType P
 		lookupKey = "stripe"
 	}
 	if cl, ok := limits[lookupKey]; ok {
-		return cl
+		return cl, nil
 	}
 	if aliasKey := legacyVisibleMethodAlias(lookupKey); aliasKey != "" {
 		if cl, ok := limits[aliasKey]; ok {
-			return cl
+			return cl, nil
 		}
 	}
-	return ChannelLimits{}
+	return ChannelLimits{}, nil
+}
+
+// GetInstanceChannelLimits exposes the exact runtime limit resolution used by
+// selection so the order transaction can re-check capacity while holding the
+// provider-instance admission lock.
+func GetInstanceChannelLimits(inst *dbent.PaymentProviderInstance, paymentType PaymentType) (ChannelLimits, error) {
+	if inst == nil {
+		return ChannelLimits{}, fmt.Errorf("payment provider instance is required")
+	}
+	return getInstanceChannelLimits(inst, paymentType)
 }
 
 // pickByStrategy selects one instance from the available candidates.
@@ -314,36 +332,9 @@ func (lb *DefaultLoadBalancer) buildSelection(selected *dbent.PaymentProviderIns
 	}, nil
 }
 
-// decryptConfig parses a stored provider config.
-// New records are plaintext JSON; legacy records are AES-256-GCM ciphertext.
-// Unreadable values (legacy ciphertext without a valid key, or malformed data)
-// are treated as empty so the service keeps running while the admin re-enters
-// the config via the UI.
-//
-// TODO(deprecated-legacy-ciphertext): The AES fallback branch below is a
-// transitional compatibility shim for pre-plaintext records. Remove it (and
-// the encryptionKey field + the Decrypt import) after a few releases once all
-// live deployments have re-saved their provider configs through the UI.
 func (lb *DefaultLoadBalancer) decryptConfig(stored string) (map[string]string, error) {
-	if stored == "" {
-		return nil, nil
-	}
-	var config map[string]string
-	if err := json.Unmarshal([]byte(stored), &config); err == nil {
-		return config, nil
-	}
-	// Deprecated: legacy AES-256-GCM ciphertext fallback — scheduled for removal.
-	if len(lb.encryptionKey) == AES256KeySize {
-		//nolint:staticcheck // SA1019: intentional legacy fallback, scheduled for removal
-		if plaintext, err := Decrypt(stored, lb.encryptionKey); err == nil {
-			if err := json.Unmarshal([]byte(plaintext), &config); err == nil {
-				return config, nil
-			}
-		}
-	}
-	slog.Warn("payment provider config unreadable, treating as empty for re-entry",
-		"stored_len", len(stored))
-	return nil, nil
+	config, _, err := DecryptProviderConfig(stored, lb.encryptionKey)
+	return config, err
 }
 
 // GetInstanceDailyAmount returns the total completed order amount for an instance today.

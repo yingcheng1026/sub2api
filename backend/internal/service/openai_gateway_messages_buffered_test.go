@@ -7,14 +7,70 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+func responsesFunctionCallStream(count int) string {
+	var body strings.Builder
+	for i := 0; i < count; i++ {
+		index := strconv.Itoa(i)
+		body.WriteString(`data: {"type":"response.output_item.added","output_index":`)
+		body.WriteString(index)
+		body.WriteString(`,"item":{"type":"function_call","call_id":"call_`)
+		body.WriteString(index)
+		body.WriteString(`","name":"tool"}}`)
+		body.WriteString("\n\n")
+	}
+	return body.String()
+}
+
+func TestReadOpenAICompatBufferedTerminalRejectsExcessiveFunctionCalls(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(responsesFunctionCallStream(129))),
+	}
+	svc := &OpenAIGatewayService{}
+
+	terminal, _, acc, err := svc.readOpenAICompatBufferedTerminal(resp, "test", "rid_limit")
+
+	require.Nil(t, terminal)
+	require.ErrorIs(t, err, apicompat.ErrResponsesCompatibilityResourceLimit)
+	require.ErrorIs(t, acc.Err(), apicompat.ErrResponsesCompatibilityResourceLimit)
+}
+
+func TestHandleChatStreamingResponseStopsOnCompatibilityLimit(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(responsesFunctionCallStream(129))),
+	}
+	svc := &OpenAIGatewayService{}
+
+	result, err := svc.handleChatStreamingResponse(
+		resp,
+		c,
+		"gpt-test",
+		"gpt-test",
+		"gpt-test",
+		false,
+		time.Now(),
+	)
+
+	require.NotNil(t, result)
+	require.ErrorIs(t, err, apicompat.ErrResponsesCompatibilityResourceLimit)
+}
 
 func TestForwardAsAnthropic_BufferedMissingTerminalWithTextSynthesizesResponse(t *testing.T) {
 	t.Parallel()

@@ -110,6 +110,12 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	billingRequestCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+	if err != nil {
+		h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "billing_service_error", "Billing service temporarily unavailable")
+		return
+	}
+	c.Request = c.Request.WithContext(billingRequestCtx)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 
@@ -177,7 +183,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
 		if err != nil {
 			if len(fs.FailedAccountIDs) == 0 {
-				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts: "+err.Error())
+				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 				return
 			}
 			action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -234,6 +240,53 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
+		billingParsedReq := *parsedReq
+		billingParsedReq.Body = forwardBody
+		if channelMapping.Mapped {
+			billingParsedReq.Model = channelMapping.MappedModel
+		}
+		requestCtx := c.Request.Context()
+		if fs.SwitchCount > 0 {
+			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
+		}
+		var usageBillingIdentity *service.GatewayUsageBillingIdentity
+		if subscription != nil && subscription.IsWalletMode() {
+			usageBillingIdentity, err = h.gatewayService.PrepareGatewayWalletUsageBillingAdmission(
+				requestCtx, apiKey, apiKey.User, account, subscription, &billingParsedReq,
+			)
+			if err != nil {
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				status := http.StatusServiceUnavailable
+				code := "billing_service_error"
+				message := "Billing service temporarily unavailable"
+				switch {
+				case errors.Is(err, service.ErrWalletInsufficient):
+					status, code, message, _ = billingErrorDetails(err)
+				case errors.Is(err, service.ErrUsageBillingRequestConflict),
+					errors.Is(err, service.ErrUsageBillingAdmissionFinalized):
+					status, code, message = http.StatusConflict, "billing_request_conflict", "Billing request identity conflict"
+				}
+				h.chatCompletionsErrorResponse(c, status, code, message)
+				return
+			}
+		}
+		markBillingAttemptFailed := func() {
+			if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingAttemptFailed(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gateway.cc.billing_attempt_fail_mark_failed", zap.Error(lifecycleErr))
+			}
+		}
+		markBillingOrphaned := func() {
+			if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gateway.cc.billing_attempt_orphan_mark_failed", zap.Error(lifecycleErr))
+			}
+		}
+		abandonBilling := func() {
+			if lifecycleErr := h.gatewayService.AbandonGatewayUsageBilling(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+				reqLog.Error("gateway.cc.billing_attempt_abandon_failed", zap.Error(lifecycleErr))
+			}
+		}
 		var result *service.ForwardResult
 		if account.Platform == service.PlatformKiro {
 			result, err = h.forwardKiroSidecar(c, account, kiroSidecarRequest{
@@ -259,20 +312,25 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				if c.Writer.Size() != writerSizeBeforeForward {
+					markBillingOrphaned()
 					h.handleCCFailoverExhausted(c, failoverErr, true)
 					return
 				}
+				markBillingAttemptFailed()
 				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, failoverErr)
 				switch action {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
+					abandonBilling()
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 					return
 				case FailoverCanceled:
+					abandonBilling()
 					return
 				}
 			}
+			markBillingOrphaned()
 			h.ensureForwardErrorResponse(c, streamStarted)
 			reqLog.Error("gateway.cc.forward_failed",
 				zap.Int64("account_id", account.ID),
@@ -280,15 +338,18 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			)
 			return
 		}
+		if result != nil {
+			result.UsageBillingIdentity = usageBillingIdentity
+		}
 
 		// 6. Record usage
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
-		requestPayloadHash := service.HashUsageRequestPayload(body)
+		requestPayloadHash := service.HashUsageRequestPayload(forwardBody)
 		inboundEndpoint := GetInboundEndpoint(c)
 		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
 
-		h.submitUsageRecordTask(func(ctx context.Context) {
+		h.submitGatewayUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 				Result:             result,
 				APIKey:             apiKey,
@@ -303,6 +364,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				APIKeyService:      h.apiKeyService,
 				ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 			}); err != nil {
+				if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(ctx, result.UsageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gateway.cc.billing_result_orphan_mark_failed", zap.Error(lifecycleErr))
+				}
 				reqLog.Error("gateway.cc.record_usage_failed",
 					zap.Int64("account_id", account.ID),
 					zap.Error(err),

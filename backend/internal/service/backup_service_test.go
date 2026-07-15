@@ -4,7 +4,9 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,6 +108,18 @@ func (e *plainEncryptor) Decrypt(ciphertext string) (string, error) {
 		return strings.TrimPrefix(ciphertext, "ENC:"), nil
 	}
 	return ciphertext, fmt.Errorf("not encrypted")
+}
+
+func (e *plainEncryptor) EncryptForDomain(domain, plaintext string) (string, error) {
+	return "DOMAIN:" + domain + ":" + plaintext, nil
+}
+
+func (e *plainEncryptor) DecryptForDomain(domain, ciphertext string) (string, error) {
+	prefix := "DOMAIN:" + domain + ":"
+	if !strings.HasPrefix(ciphertext, prefix) {
+		return "", fmt.Errorf("ciphertext domain mismatch")
+	}
+	return strings.TrimPrefix(ciphertext, prefix), nil
 }
 
 type mockDumper struct {
@@ -223,7 +237,7 @@ func seedS3Config(t *testing.T, repo *mockSettingRepo) {
 	cfg := BackupS3Config{
 		Bucket:          "test-bucket",
 		AccessKeyID:     "AKID",
-		SecretAccessKey: "ENC:secret123",
+		SecretAccessKey: "DOMAIN:" + SecretDomainBackupS3 + ":secret123",
 		Prefix:          "backups",
 	}
 	data, _ := json.Marshal(cfg)
@@ -249,7 +263,7 @@ func TestBackupService_S3ConfigEncryption(t *testing.T) {
 	raw, _ := repo.GetValue(context.Background(), settingKeyBackupS3Config)
 	var stored BackupS3Config
 	require.NoError(t, json.Unmarshal([]byte(raw), &stored))
-	require.Equal(t, "ENC:my-secret", stored.SecretAccessKey)
+	require.Equal(t, "DOMAIN:"+SecretDomainBackupS3+":my-secret", stored.SecretAccessKey)
 
 	// 通过 GetS3Config 获取应该脱敏
 	cfg, err := svc.GetS3Config(context.Background())
@@ -261,6 +275,18 @@ func TestBackupService_S3ConfigEncryption(t *testing.T) {
 	internal, err := svc.loadS3Config(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "my-secret", internal.SecretAccessKey)
+}
+
+func TestBackupServiceRejectsLegacyUnboundS3SecretAfterStartupMigration(t *testing.T) {
+	repo := newMockSettingRepo()
+	legacy := BackupS3Config{Bucket: "bucket", AccessKeyID: "access", SecretAccessKey: "ENC:legacy-secret"}
+	raw, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, repo.Set(context.Background(), settingKeyBackupS3Config, string(raw)))
+	svc := newTestBackupService(repo, &mockDumper{}, newMockObjectStore())
+
+	_, err = svc.loadS3Config(context.Background())
+	require.Error(t, err)
 }
 
 func TestBackupService_S3ConfigKeepExistingSecret(t *testing.T) {
@@ -281,6 +307,11 @@ func TestBackupService_S3ConfigKeepExistingSecret(t *testing.T) {
 		AccessKeyID: "AKID-NEW",
 	})
 	require.NoError(t, err)
+	raw, err := repo.GetValue(context.Background(), settingKeyBackupS3Config)
+	require.NoError(t, err)
+	var stored BackupS3Config
+	require.NoError(t, json.Unmarshal([]byte(raw), &stored))
+	require.Equal(t, "DOMAIN:"+SecretDomainBackupS3+":original-secret", stored.SecretAccessKey)
 
 	internal, err := svc.loadS3Config(context.Background())
 	require.NoError(t, err)
@@ -345,6 +376,7 @@ func TestBackupService_CreateBackup_Streaming(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "completed", record.Status)
 	require.Greater(t, record.SizeBytes, int64(0))
+	require.Len(t, record.SHA256, sha256.Size*2)
 	require.NotEmpty(t, record.S3Key)
 
 	// 验证 S3 上确实有文件
@@ -412,6 +444,77 @@ func TestBackupService_RestoreBackup_Streaming(t *testing.T) {
 
 	// 验证 psql 收到的数据是否与原始 dump 内容一致
 	require.Equal(t, dumpContent, string(dumper.restored))
+}
+
+func TestBackupService_RestoreBackupRejectsTamperedObjectBeforeDatabaseRestore(t *testing.T) {
+	repo := newMockSettingRepo()
+	seedS3Config(t, repo)
+	dumper := &mockDumper{dumpData: []byte("SELECT 1;")}
+	store := newMockObjectStore()
+	svc := newTestBackupService(repo, dumper, store)
+	record, err := svc.CreateBackup(context.Background(), "manual", 14)
+	require.NoError(t, err)
+
+	var tampered bytes.Buffer
+	zw := gzip.NewWriter(&tampered)
+	_, err = zw.Write([]byte("DROP TABLE users;"))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	store.mu.Lock()
+	store.objects[record.S3Key] = tampered.Bytes()
+	store.mu.Unlock()
+
+	err = svc.RestoreBackup(context.Background(), record.ID)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "integrity")
+	require.Empty(t, dumper.restored)
+}
+
+func TestBackupService_RestoreBackupRejectsLegacyRecordWithoutIntegrityMetadata(t *testing.T) {
+	repo := newMockSettingRepo()
+	seedS3Config(t, repo)
+	dumper := &mockDumper{dumpData: []byte("SELECT 1;")}
+	store := newMockObjectStore()
+	svc := newTestBackupService(repo, dumper, store)
+	record, err := svc.CreateBackup(context.Background(), "manual", 14)
+	require.NoError(t, err)
+	record.SHA256 = ""
+	require.NoError(t, svc.saveRecord(context.Background(), record))
+
+	err = svc.RestoreBackup(context.Background(), record.ID)
+
+	require.ErrorIs(t, err, ErrBackupIntegrityMetadataMissing)
+	require.Empty(t, dumper.restored)
+}
+
+func TestBackupService_StartRestoreRecordsTamperedObjectFailure(t *testing.T) {
+	repo := newMockSettingRepo()
+	seedS3Config(t, repo)
+	dumper := &mockDumper{dumpData: []byte("SELECT 1;")}
+	store := newMockObjectStore()
+	svc := newTestBackupService(repo, dumper, store)
+	record, err := svc.CreateBackup(context.Background(), "manual", 14)
+	require.NoError(t, err)
+
+	var tampered bytes.Buffer
+	zw := gzip.NewWriter(&tampered)
+	_, err = zw.Write([]byte("DROP TABLE users;"))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	store.mu.Lock()
+	store.objects[record.S3Key] = tampered.Bytes()
+	store.mu.Unlock()
+
+	_, err = svc.StartRestore(context.Background(), record.ID)
+	require.NoError(t, err)
+	svc.wg.Wait()
+	final, err := svc.GetBackupRecord(context.Background(), record.ID)
+
+	require.NoError(t, err)
+	require.Equal(t, "failed", final.RestoreStatus)
+	require.Contains(t, final.RestoreError, "integrity")
+	require.Empty(t, dumper.restored)
 }
 
 func TestBackupService_RestoreBackup_NotCompleted(t *testing.T) {
@@ -508,6 +611,72 @@ func TestBackupService_TestS3Connection(t *testing.T) {
 		SecretAccessKey: "sk",
 	})
 	require.NoError(t, err)
+}
+
+func TestBackupService_TestS3ConnectionRequiresSecretForCredentialIdentityChange(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		endpoint    string
+		accessKeyID string
+	}{
+		{name: "endpoint", endpoint: "https://attacker.example.com", accessKeyID: "ak"},
+		{name: "access key", endpoint: "https://trusted.example.com", accessKeyID: "other-ak"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newMockSettingRepo()
+			store := newMockObjectStore()
+			called := false
+			factory := func(_ context.Context, _ *BackupS3Config) (BackupObjectStore, error) {
+				called = true
+				return store, nil
+			}
+			svc := NewBackupService(repo, &config.Config{}, &plainEncryptor{}, factory, &mockDumper{})
+			_, err := svc.UpdateS3Config(context.Background(), BackupS3Config{
+				Endpoint:        "https://trusted.example.com",
+				Bucket:          "test",
+				AccessKeyID:     "ak",
+				SecretAccessKey: "saved-secret",
+			})
+			require.NoError(t, err)
+
+			err = svc.TestS3Connection(context.Background(), BackupS3Config{
+				Endpoint:    tc.endpoint,
+				Bucket:      "test",
+				AccessKeyID: tc.accessKeyID,
+			})
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "secret_access_key must be provided")
+			require.False(t, called)
+		})
+	}
+}
+
+func TestBackupService_TestS3ConnectionReusesSecretForSameCredentialIdentity(t *testing.T) {
+	repo := newMockSettingRepo()
+	store := newMockObjectStore()
+	var testedSecret string
+	factory := func(_ context.Context, cfg *BackupS3Config) (BackupObjectStore, error) {
+		testedSecret = cfg.SecretAccessKey
+		return store, nil
+	}
+	svc := NewBackupService(repo, &config.Config{}, &plainEncryptor{}, factory, &mockDumper{})
+	_, err := svc.UpdateS3Config(context.Background(), BackupS3Config{
+		Endpoint:        "https://trusted.example.com",
+		Bucket:          "test",
+		AccessKeyID:     "ak",
+		SecretAccessKey: "saved-secret",
+	})
+	require.NoError(t, err)
+
+	err = svc.TestS3Connection(context.Background(), BackupS3Config{
+		Endpoint:    "https://trusted.example.com",
+		Bucket:      "other-bucket",
+		AccessKeyID: "ak",
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "saved-secret", testedSecret)
 }
 
 func TestBackupService_TestS3Connection_Incomplete(t *testing.T) {

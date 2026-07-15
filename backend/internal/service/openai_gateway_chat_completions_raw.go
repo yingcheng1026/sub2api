@@ -129,6 +129,10 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithOptions(
 	if err != nil {
 		return nil, err
 	}
+	setOpenAIUsageBillingReservationBody(opts.UsageBilling, upstreamBody)
+	if err := s.prepareOpenAIForwardUsageBilling(ctx, account, billingIdentity, opts); err != nil {
+		return nil, err
+	}
 
 	// 5. Build upstream request
 	apiKey := account.GetOpenAIApiKey()
@@ -273,10 +277,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	c.Writer.WriteHeader(http.StatusOK)
 
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	var usage OpenAIUsage

@@ -1,8 +1,18 @@
 package service
 
-import "github.com/gin-gonic/gin"
+import (
+	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/model"
+	"github.com/gin-gonic/gin"
+)
 
 const errorPassthroughServiceContextKey = "error_passthrough_service"
+const maxErrorPassthroughClientMessageRunes = 512
+
+// DefaultErrorPassthroughClientMessage is the safe fallback when a rule does
+// not have an operator-authored client message.
+const DefaultErrorPassthroughClientMessage = "Upstream request failed"
 
 // BindErrorPassthroughService 将错误透传服务绑定到请求上下文，供 service 层在非 failover 场景下复用规则。
 func BindErrorPassthroughService(c *gin.Context, svc *ErrorPassthroughService) {
@@ -56,10 +66,7 @@ func applyErrorPassthroughRule(
 		status = *rule.ResponseCode
 	}
 
-	errMsg = ExtractUpstreamErrorMessage(responseBody)
-	if !rule.PassthroughBody && rule.CustomMessage != nil {
-		errMsg = *rule.CustomMessage
-	}
+	errMsg = ErrorPassthroughClientMessage(rule, defaultErrMsg)
 
 	// 命中 skip_monitoring 时在 context 中标记，供 ops_error_logger 跳过记录。
 	if rule.SkipMonitoring {
@@ -69,4 +76,26 @@ func applyErrorPassthroughRule(
 	// 与现有 failover 场景保持一致：命中规则时统一返回 upstream_error。
 	errType = "upstream_error"
 	return status, errType, errMsg, true
+}
+
+// ErrorPassthroughClientMessage returns only an operator-authored, bounded
+// message. PassthroughBody is retained for schema compatibility but raw
+// upstream bodies are never safe to reflect to tenants.
+func ErrorPassthroughClientMessage(rule *model.ErrorPassthroughRule, defaultMessage string) string {
+	defaultMessage = strings.TrimSpace(defaultMessage)
+	if defaultMessage == "" {
+		defaultMessage = DefaultErrorPassthroughClientMessage
+	}
+	if rule == nil || rule.CustomMessage == nil {
+		return defaultMessage
+	}
+	message := strings.TrimSpace(*rule.CustomMessage)
+	if message == "" {
+		return defaultMessage
+	}
+	runes := []rune(message)
+	if len(runes) > maxErrorPassthroughClientMessageRunes {
+		message = string(runes[:maxErrorPassthroughClientMessageRunes])
+	}
+	return message
 }

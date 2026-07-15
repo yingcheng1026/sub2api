@@ -2,10 +2,14 @@
 package routes
 
 import (
+	"time"
+
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	appmiddleware "github.com/Wei-Shaw/sub2api/internal/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 // RegisterAdminRoutes 注册管理员路由
@@ -13,6 +17,7 @@ func RegisterAdminRoutes(
 	v1 *gin.RouterGroup,
 	h *handler.Handlers,
 	adminAuth middleware.AdminAuthMiddleware,
+	redisClient *redis.Client,
 ) {
 	admin := v1.Group("/admin")
 	admin.Use(gin.HandlerFunc(adminAuth))
@@ -69,7 +74,7 @@ func RegisterAdminRoutes(
 		registerSubscriptionRoutes(admin, h)
 
 		// 使用记录管理
-		registerUsageRoutes(admin, h)
+		registerUsageRoutes(admin, h, redisClient)
 
 		// 用户属性管理
 		registerUserAttributeRoutes(admin, h)
@@ -171,6 +176,7 @@ func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		// WebSocket realtime (QPS/TPS)
 		ws := ops.Group("/ws")
 		{
+			ws.POST("/ticket", h.Auth.IssueAdminOpsWSTicket)
 			ws.GET("/qps", h.Admin.Ops.QPSWSHandler)
 		}
 
@@ -529,16 +535,27 @@ func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.GET("/users/:id/subscriptions", h.Admin.Subscription.ListByUser)
 }
 
-func registerUsageRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+func registerUsageRoutes(admin *gin.RouterGroup, h *handler.Handlers, redisClient *redis.Client) {
 	usage := admin.Group("/usage")
+	usageQueryLimit := appmiddleware.NewRateLimiter(redisClient).LimitWithOptions(
+		"admin-usage-query",
+		adminUsageQueryRequestsPerMinute,
+		time.Minute,
+		appmiddleware.RateLimitOptions{
+			FailureMode: appmiddleware.RateLimitFailClose,
+			KeyFunc:     authenticatedUsageRateLimitKey,
+		},
+	)
 	{
-		usage.GET("", h.Admin.Usage.List)
-		usage.GET("/stats", h.Admin.Usage.Stats)
-		usage.GET("/search-users", h.Admin.Usage.SearchUsers)
-		usage.GET("/search-api-keys", h.Admin.Usage.SearchAPIKeys)
-		usage.GET("/cleanup-tasks", h.Admin.Usage.ListCleanupTasks)
+		usage.GET("", usageQueryLimit, h.Admin.Usage.List)
+		usage.GET("/stats", usageQueryLimit, h.Admin.Usage.Stats)
+		usage.GET("/search-users", usageQueryLimit, h.Admin.Usage.SearchUsers)
+		usage.GET("/search-api-keys", usageQueryLimit, h.Admin.Usage.SearchAPIKeys)
+		usage.GET("/cleanup-tasks", usageQueryLimit, h.Admin.Usage.ListCleanupTasks)
 		usage.POST("/cleanup-tasks", h.Admin.Usage.CreateCleanupTask)
 		usage.POST("/cleanup-tasks/:id/cancel", h.Admin.Usage.CancelCleanupTask)
+		usage.GET("/reconciliation", usageQueryLimit, h.Admin.Usage.ListBillingReconciliationCases)
+		usage.POST("/reconciliation/resolve", h.Admin.Usage.ResolveBillingReconciliation)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +17,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestValidatedTransport_CacheHostValidation(t *testing.T) {
+func TestValidatedTransport_RevalidatesHostOnEveryRequest(t *testing.T) {
 	originalValidate := validateResolvedIP
 	defer func() { validateResolvedIP = originalValidate }()
 
@@ -39,55 +38,27 @@ func TestValidatedTransport_CacheHostValidation(t *testing.T) {
 		}, nil
 	})
 
-	now := time.Unix(1730000000, 0)
 	transport := newValidatedTransport(base)
-	transport.now = func() time.Time { return now }
 
 	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/responses", nil)
 	require.NoError(t, err)
 
 	_, err = transport.RoundTrip(req)
 	require.NoError(t, err)
-	_, err = transport.RoundTrip(req)
-	require.NoError(t, err)
-
-	require.Equal(t, int32(1), atomic.LoadInt32(&validateCalls))
-	require.Equal(t, int32(2), atomic.LoadInt32(&baseCalls))
-}
-
-func TestValidatedTransport_ExpiredCacheTriggersRevalidation(t *testing.T) {
-	originalValidate := validateResolvedIP
-	defer func() { validateResolvedIP = originalValidate }()
-
-	var validateCalls int32
-	validateResolvedIP = func(_ string) error {
-		atomic.AddInt32(&validateCalls, 1)
-		return nil
-	}
-
-	base := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
-	})
-
-	now := time.Unix(1730001000, 0)
-	transport := newValidatedTransport(base)
-	transport.now = func() time.Time { return now }
-
-	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/responses", nil)
-	require.NoError(t, err)
-
-	_, err = transport.RoundTrip(req)
-	require.NoError(t, err)
-
-	now = now.Add(validatedHostTTL + time.Second)
 	_, err = transport.RoundTrip(req)
 	require.NoError(t, err)
 
 	require.Equal(t, int32(2), atomic.LoadInt32(&validateCalls))
+	require.Equal(t, int32(2), atomic.LoadInt32(&baseCalls))
+}
+
+func TestBuildTransportUsesAddressBindingSafeDialer(t *testing.T) {
+	transport, err := buildTransport(Options{ValidateResolvedIP: true})
+	require.NoError(t, err)
+	require.NotNil(t, transport.DialContext)
+	_, err = transport.DialContext(t.Context(), "tcp", "127.0.0.1:1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not publicly routable")
 }
 
 func TestValidatedTransport_ValidationErrorStopsRoundTrip(t *testing.T) {

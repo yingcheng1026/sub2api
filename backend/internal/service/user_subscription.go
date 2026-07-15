@@ -53,11 +53,30 @@ type UserSubscription struct {
 
 	WalletUniversalKey        *APIKey
 	WalletUniversalKeyCreated bool
+
+	// WalletCreditDeltaUSD is runtime-only assignment metadata. For a credits
+	// activation or top-up it records the amount applied by this operation, not
+	// the wallet's cumulative wallet_initial_usd total.
+	WalletCreditDeltaUSD *float64
+
+	// AssignmentPlanType is the transaction-resolved plan type for the current
+	// assignment. It is runtime-only and must not be inferred from a plan ID.
+	AssignmentPlanType string
 }
 
 // IsWalletMode 钱包模式订阅判别。
 func (s *UserSubscription) IsWalletMode() bool {
 	return s.WalletBalanceUSD != nil
+}
+
+// IsUniversalWalletMode distinguishes permanent credits wallets from legacy
+// finite wallet-shaped monthly subscriptions. Only credits wallets may use a
+// group_id=NULL key and model-based routing.
+func (s *UserSubscription) IsUniversalWalletMode() bool {
+	if s == nil || !s.IsWalletMode() {
+		return false
+	}
+	return !s.ExpiresAt.Before(MaxExpiresAt.Add(-24 * time.Hour))
 }
 
 func (s *UserSubscription) LockedRateForGroup(groupID int64) (float64, bool) {

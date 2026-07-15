@@ -82,14 +82,16 @@ func TestEmailOAuthCallbackRequiresPendingRegistrationWhenInvitationEnabled(t *t
 	require.NotEmpty(t, findSetCookieValue(recorder.Result().Cookies(), oauthPendingBrowserCookieName))
 }
 
-func TestEmailOAuthCallbackExistingEmailLogsInWhenInvitationEnabled(t *testing.T) {
+func TestEmailOAuthCallbackExistingEmailRequiresLocalPasswordBeforeBinding(t *testing.T) {
 	handler, client := newOAuthPendingFlowTestHandler(t, true)
 	ctx := context.Background()
 
+	passwordHash, err := handler.authService.HashPassword("secret-123")
+	require.NoError(t, err)
 	user, err := client.User.Create().
 		SetEmail("existing@example.com").
 		SetUsername("existing").
-		SetPasswordHash("hash").
+		SetPasswordHash(passwordHash).
 		SetRole(service.RoleUser).
 		SetStatus(service.StatusActive).
 		Save(ctx)
@@ -114,20 +116,155 @@ func TestEmailOAuthCallbackExistingEmailLogsInWhenInvitationEnabled(t *testing.T
 
 	require.Equal(t, http.StatusFound, recorder.Code)
 	location := recorder.Header().Get("Location")
-	require.Contains(t, location, "access_token=")
-	require.Contains(t, location, "redirect=%252Fdashboard")
+	require.Equal(t, "/auth/oauth/callback", location)
+	require.NotContains(t, location, "access_token=")
+	require.NotContains(t, location, "refresh_token=")
 
-	sessionCount, err := client.PendingAuthSession.Query().Count(ctx)
+	session, err := client.PendingAuthSession.Query().Only(ctx)
 	require.NoError(t, err)
-	require.Zero(t, sessionCount)
+	require.NotNil(t, session.TargetUserID)
+	require.Equal(t, user.ID, *session.TargetUserID)
+	require.Equal(t, "/dashboard", session.RedirectTo)
+
+	sessionCookie := findSetCookieValue(recorder.Result().Cookies(), oauthPendingSessionCookieName)
+	browserCookie := findSetCookieValue(recorder.Result().Cookies(), oauthPendingBrowserCookieName)
+	require.NotEmpty(t, sessionCookie)
+	require.NotEmpty(t, browserCookie)
+
+	exchangeRecorder := httptest.NewRecorder()
+	exchangeContext, _ := gin.CreateTestContext(exchangeRecorder)
+	exchangeRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/pending/exchange", nil)
+	exchangeRequest.AddCookie(&http.Cookie{Name: oauthPendingSessionCookieName, Value: sessionCookie})
+	exchangeRequest.AddCookie(&http.Cookie{Name: oauthPendingBrowserCookieName, Value: browserCookie})
+	exchangeContext.Request = exchangeRequest
+
+	handler.ExchangePendingOAuthCompletion(exchangeContext)
+
+	require.Equal(t, http.StatusOK, exchangeRecorder.Code)
+	payload := decodeJSONResponseData(t, exchangeRecorder)
+	require.Equal(t, oauthPendingChoiceStep, payload["step"])
+	require.Equal(t, true, payload["existing_account_bindable"])
+	require.NotContains(t, payload, "access_token")
+	require.NotContains(t, payload, "refresh_token")
+	require.Equal(t, "/dashboard", payload["redirect"])
 
 	identityCount, err := client.AuthIdentity.Query().Where(
 		authidentity.ProviderTypeEQ("google"),
 		authidentity.ProviderSubjectEQ("google-123"),
 	).Count(ctx)
 	require.NoError(t, err)
+	require.Zero(t, identityCount)
+
+	bindRecorder := httptest.NewRecorder()
+	bindContext, _ := gin.CreateTestContext(bindRecorder)
+	bindRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/auth/oauth/pending/bind-login",
+		strings.NewReader(`{"email":"existing@example.com","password":"secret-123"}`),
+	)
+	bindRequest.Header.Set("Content-Type", "application/json")
+	bindRequest.AddCookie(&http.Cookie{Name: oauthPendingSessionCookieName, Value: sessionCookie})
+	bindRequest.AddCookie(&http.Cookie{Name: oauthPendingBrowserCookieName, Value: browserCookie})
+	bindContext.Request = bindRequest
+
+	handler.BindPendingOAuthLogin(bindContext)
+
+	require.Equal(t, http.StatusOK, bindRecorder.Code)
+	bindPayload := decodeJSONBody(t, bindRecorder)
+	require.NotEmpty(t, bindPayload["access_token"])
+	require.NotEmpty(t, bindPayload["refresh_token"])
+
+	identityCount, err = client.AuthIdentity.Query().Where(
+		authidentity.ProviderTypeEQ("google"),
+		authidentity.ProviderSubjectEQ("google-123"),
+	).Count(ctx)
+	require.NoError(t, err)
 	require.Equal(t, 1, identityCount)
-	_ = user
+}
+
+func TestBindPendingEmailOAuthLoginRejectsResolvedEmailMismatch(t *testing.T) {
+	handler, client := newOAuthPendingFlowTestHandler(t, false)
+	ctx := context.Background()
+
+	passwordHash, err := handler.authService.HashPassword("secret-123")
+	require.NoError(t, err)
+	user, err := client.User.Create().
+		SetEmail("victim@example.com").
+		SetUsername("victim").
+		SetPasswordHash(passwordHash).
+		SetRole(service.RoleUser).
+		SetStatus(service.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	session, err := client.PendingAuthSession.Create().
+		SetSessionToken("email-mismatch-session-token").
+		SetIntent("adopt_existing_user_by_email").
+		SetProviderType("google").
+		SetProviderKey("google").
+		SetProviderSubject("google-mismatch-subject").
+		SetTargetUserID(user.ID).
+		SetResolvedEmail("different@example.com").
+		SetBrowserSessionKey("email-mismatch-browser-key").
+		SetExpiresAt(time.Now().UTC().Add(10 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/auth/oauth/pending/bind-login",
+		strings.NewReader(`{"email":"victim@example.com","password":"secret-123"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: oauthPendingSessionCookieName, Value: encodeCookieValue(session.SessionToken)})
+	req.AddCookie(&http.Cookie{Name: oauthPendingBrowserCookieName, Value: encodeCookieValue(session.BrowserSessionKey)})
+	ginCtx.Request = req
+
+	handler.BindPendingOAuthLogin(ginCtx)
+
+	require.Equal(t, http.StatusConflict, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "PENDING_AUTH_TARGET_EMAIL_MISMATCH")
+	identityCount, err := client.AuthIdentity.Query().Where(
+		authidentity.ProviderTypeEQ("google"),
+		authidentity.ProviderSubjectEQ("google-mismatch-subject"),
+	).Count(ctx)
+	require.NoError(t, err)
+	require.Zero(t, identityCount)
+	storedSession, err := client.PendingAuthSession.Get(ctx, session.ID)
+	require.NoError(t, err)
+	require.Nil(t, storedSession.ConsumedAt)
+}
+
+func TestResolveVerifiedEmailOAuthRejectsUnboundExistingAccount(t *testing.T) {
+	handler, client := newOAuthPendingFlowTestHandler(t, false)
+	ctx := context.Background()
+
+	_, err := client.User.Create().
+		SetEmail("existing@example.com").
+		SetUsername("existing").
+		SetPasswordHash("hash").
+		SetRole(service.RoleUser).
+		SetStatus(service.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = handler.authService.ResolveVerifiedEmailOAuthWithInvitation(ctx, service.EmailOAuthIdentityInput{
+		ProviderType:    "google",
+		ProviderKey:     "google",
+		ProviderSubject: "unbound-google-subject",
+		Email:           "existing@example.com",
+		EmailVerified:   true,
+	}, "", "")
+	require.Error(t, err)
+
+	identityCount, countErr := client.AuthIdentity.Query().Where(
+		authidentity.ProviderTypeEQ("google"),
+		authidentity.ProviderSubjectEQ("unbound-google-subject"),
+	).Count(ctx)
+	require.NoError(t, countErr)
+	require.Zero(t, identityCount)
 }
 
 func TestEmailOAuthCallbackCreatesPasswordRegistrationSessionForNewEmail(t *testing.T) {

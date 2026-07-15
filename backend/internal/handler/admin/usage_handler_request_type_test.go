@@ -15,12 +15,18 @@ import (
 
 type adminUsageRepoCapture struct {
 	service.UsageLogRepository
-	listParams   pagination.PaginationParams
-	listFilters  usagestats.UsageLogFilters
-	statsFilters usagestats.UsageLogFilters
+	listParams              pagination.PaginationParams
+	listFilters             usagestats.UsageLogFilters
+	statsFilters            usagestats.UsageLogFilters
+	listCalls               int
+	statsCalls              int
+	listContextHadDeadline  bool
+	statsContextHadDeadline bool
 }
 
 func (s *adminUsageRepoCapture) ListWithFilters(ctx context.Context, params pagination.PaginationParams, filters usagestats.UsageLogFilters) ([]service.UsageLog, *pagination.PaginationResult, error) {
+	s.listCalls++
+	_, s.listContextHadDeadline = ctx.Deadline()
 	s.listParams = params
 	s.listFilters = filters
 	return []service.UsageLog{}, &pagination.PaginationResult{
@@ -32,6 +38,8 @@ func (s *adminUsageRepoCapture) ListWithFilters(ctx context.Context, params pagi
 }
 
 func (s *adminUsageRepoCapture) GetStatsWithFilters(ctx context.Context, filters usagestats.UsageLogFilters) (*usagestats.UsageStats, error) {
+	s.statsCalls++
+	_, s.statsContextHadDeadline = ctx.Deadline()
 	s.statsFilters = filters
 	return &usagestats.UsageStats{}, nil
 }
@@ -39,7 +47,7 @@ func (s *adminUsageRepoCapture) GetStatsWithFilters(ctx context.Context, filters
 func newAdminUsageRequestTypeTestRouter(repo *adminUsageRepoCapture) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	usageSvc := service.NewUsageService(repo, nil, nil, nil)
-	handler := NewUsageHandler(usageSvc, nil, nil, nil)
+	handler := NewUsageHandler(usageSvc, nil, nil, nil, nil)
 	router := gin.New()
 	router.GET("/admin/usage", handler.List)
 	router.GET("/admin/usage/stats", handler.Stats)
@@ -86,7 +94,7 @@ func TestAdminUsageListExactTotalTrue(t *testing.T) {
 	repo := &adminUsageRepoCapture{}
 	router := newAdminUsageRequestTypeTestRouter(repo)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/usage?exact_total=true", nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin/usage?user_id=42&exact_total=true&start_date=2026-01-01&end_date=2026-01-31", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 

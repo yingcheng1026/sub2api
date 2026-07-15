@@ -1889,7 +1889,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	}
 	preferredConnID := ""
 	if stateStore != nil && previousResponseID != "" {
-		if connID, ok := stateStore.GetResponseConn(previousResponseID); ok {
+		if connID, ok := stateStore.GetResponseConn(groupID, previousResponseID); ok {
 			preferredConnID = connID
 		}
 	}
@@ -2408,7 +2408,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if responseID != "" && stateStore != nil {
 		ttl := s.openAIWSResponseStickyTTL()
 		logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
-		stateStore.BindResponseConn(responseID, lease.ConnID(), ttl)
+		stateStore.BindResponseConn(groupID, responseID, lease.ConnID(), ttl)
 	}
 	if stateStore != nil && storeDisabled && sessionHash != "" {
 		stateStore.BindSessionConn(groupID, sessionHash, lease.ConnID(), s.openAIWSSessionStickyTTL())
@@ -2751,7 +2751,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	preferredConnID := ""
 	if stateStore != nil && firstPayload.previousResponseID != "" {
-		if connID, ok := stateStore.GetResponseConn(firstPayload.previousResponseID); ok {
+		if connID, ok := stateStore.GetResponseConn(groupID, firstPayload.previousResponseID); ok {
 			preferredConnID = connID
 		}
 	}
@@ -3676,7 +3676,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if responseID != "" && stateStore != nil {
 			ttl := s.openAIWSResponseStickyTTL()
 			logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
-			stateStore.BindResponseConn(responseID, connID, ttl)
+			stateStore.BindResponseConn(groupID, responseID, connID, ttl)
 		}
 		if stateStore != nil && storeDisabled && sessionHash != "" {
 			stateStore.BindSessionConn(groupID, sessionHash, connID, s.openAIWSSessionStickyTTL())
@@ -3730,7 +3730,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			)
 		}
 		if stateStore != nil && nextPayload.previousResponseID != "" {
-			if stickyConnID, ok := stateStore.GetResponseConn(nextPayload.previousResponseID); ok {
+			if stickyConnID, ok := stateStore.GetResponseConn(groupID, nextPayload.previousResponseID); ok {
 				if sessionConnID != "" && stickyConnID != "" && stickyConnID != sessionConnID {
 					logOpenAIWSModeInfo(
 						"ingress_ws_keep_session_conn account_id=%d turn=%d conn_id=%s sticky_conn_id=%s previous_response_id=%s",
@@ -3910,7 +3910,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	if prewarmResponseID != "" && stateStore != nil {
 		ttl := s.openAIWSResponseStickyTTL()
 		logOpenAIWSBindResponseAccountWarn(groupID, account.ID, prewarmResponseID, stateStore.BindResponseAccount(ctx, groupID, prewarmResponseID, account.ID, ttl))
-		stateStore.BindResponseConn(prewarmResponseID, lease.ConnID(), ttl)
+		stateStore.BindResponseConn(groupID, prewarmResponseID, lease.ConnID(), ttl)
 	}
 	logOpenAIWSModeInfo(
 		"prewarm_done account_id=%d conn_id=%s response_id=%s events=%d terminal_events=%d duration_ms=%d",
@@ -4061,7 +4061,7 @@ func (s *OpenAIGatewayService) SelectAccountByPreviousResponseID(
 		}
 	}
 
-	account, err := s.getSchedulableAccount(ctx, accountID)
+	account, err := s.getSchedulableOpenAIAccountInGroup(ctx, groupID, accountID)
 	if err != nil || account == nil {
 		_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 		return nil, nil
@@ -4115,6 +4115,31 @@ func (s *OpenAIGatewayService) SelectAccountByPreviousResponseID(
 				MaxWaiting:     cfg.StickySessionMaxWaiting,
 			},
 		}, nil
+	}
+	return nil, nil
+}
+
+func (s *OpenAIGatewayService) getSchedulableOpenAIAccountInGroup(ctx context.Context, groupID *int64, accountID int64) (*Account, error) {
+	if s == nil || s.accountRepo == nil || accountID <= 0 {
+		return nil, nil
+	}
+
+	var (
+		accounts []Account
+		err      error
+	)
+	if groupID == nil {
+		accounts, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, PlatformOpenAI)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, *groupID, PlatformOpenAI)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for i := range accounts {
+		if accounts[i].ID == accountID {
+			return &accounts[i], nil
+		}
 	}
 	return nil, nil
 }

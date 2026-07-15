@@ -14,6 +14,7 @@ func validUsageBillingEnvelopeInput() UsageBillingEnvelopeInput {
 	groupID := int64(44)
 	return UsageBillingEnvelopeInput{
 		RequestID:               "req-outbox-1",
+		RequestPayloadHash:      strings.Repeat("d", 64),
 		APIKeyID:                11,
 		AuthCacheLocator:        strings.Repeat("c", 64),
 		UserID:                  22,
@@ -81,7 +82,7 @@ func TestUsageBillingEnvelope_SerializesOnlyExplicitBillingFacts(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &payload))
 	for _, forbidden := range []string{
 		"key", "api_key", "credentials", "cookie", "headers", "body", "prompt",
-		"messages", "tools", "ip", "ip_address", "user_agent", "request_payload_hash",
+		"messages", "tools", "ip", "ip_address", "user_agent",
 	} {
 		_, exists := payload[forbidden]
 		require.Falsef(t, exists, "serialized envelope must not contain %q", forbidden)
@@ -89,6 +90,7 @@ func TestUsageBillingEnvelope_SerializesOnlyExplicitBillingFacts(t *testing.T) {
 	require.Equal(t, "gpt-5.6-sol", payload["billing_model"])
 	require.Equal(t, strings.Repeat("a", 64), payload["pricing_hash"])
 	require.Equal(t, strings.Repeat("c", 64), payload["auth_cache_locator"])
+	require.Equal(t, strings.Repeat("d", 64), payload["request_payload_hash"])
 	require.NotEmpty(t, payload["request_fingerprint"])
 }
 
@@ -239,8 +241,9 @@ func TestUsageBillingEnvelopeFromUsageLog_RoundTripsSafeReplaySnapshot(t *testin
 	}
 	cmd := &UsageBillingCommand{
 		RequestID: log.RequestID, APIKeyID: log.APIKeyID, UserID: log.UserID, AccountID: log.AccountID,
-		AuthCacheLocator: strings.Repeat("c", 64),
-		SubscriptionID:   &subscriptionID, EffectiveBillingGroupID: &effectiveBillingGroupID,
+		RequestPayloadHash: strings.Repeat("d", 64),
+		AuthCacheLocator:   strings.Repeat("c", 64),
+		SubscriptionID:     &subscriptionID, EffectiveBillingGroupID: &effectiveBillingGroupID,
 		AccountType: AccountTypeAPIKey, Model: billingModel,
 		ServiceTier: serviceTier, ReasoningEffort: reasoningEffort, BillingType: BillingTypeSubscription,
 		InputTokens: 100, OutputTokens: 20, CacheCreationTokens: 3, CacheReadTokens: 10,

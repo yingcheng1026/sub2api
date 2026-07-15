@@ -1379,6 +1379,21 @@ func TestGeminiOAuthService_RefreshAccountToken_UnauthorizedClient_NoFallback(t 
 // 新增测试：GeminiOAuthService.ExchangeCode
 // =====================
 
+func TestSafeProxyTargetForLogDropsCredentialsAndURLState(t *testing.T) {
+	raw := "http://proxy-user:proxy-password@proxy.example.com:8080/private?token=query-secret#fragment-secret"
+
+	got := safeProxyTargetForLog(raw)
+
+	if got != "http://proxy.example.com:8080" {
+		t.Fatalf("safe proxy target = %q", got)
+	}
+	for _, secret := range []string{"proxy-user", "proxy-password", "private", "query-secret", "fragment-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("safe proxy target leaked %q: %q", secret, got)
+		}
+	}
+}
+
 func TestGeminiOAuthService_ExchangeCode_SessionNotFound(t *testing.T) {
 	t.Parallel()
 

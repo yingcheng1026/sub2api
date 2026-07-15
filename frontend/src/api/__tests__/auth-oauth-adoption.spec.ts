@@ -181,6 +181,32 @@ describe('oauth adoption auth api', () => {
     expect(getOAuthCompletionKind({ redirect: '/profile' })).toBe('bind')
   })
 
+  it('does not persist oauth bearer credentials in localStorage', async () => {
+    localStorage.setItem('refresh_token', 'old-account-refresh')
+    localStorage.setItem('token_expires_at', '123')
+    const { persistOAuthTokenContext } = await import('@/api/auth')
+
+    persistOAuthTokenContext({
+      access_token: 'new-account-access',
+      refresh_token: 'new-account-refresh',
+      expires_in: 3600
+    })
+
+    expect(localStorage.getItem('refresh_token')).toBeNull()
+    expect(localStorage.getItem('token_expires_at')).toBeNull()
+  })
+
+  it('does not use legacy localStorage as oauth credential context', async () => {
+    localStorage.setItem('refresh_token', 'old-account-refresh')
+    localStorage.setItem('token_expires_at', '123')
+    const { persistOAuthTokenContext } = await import('@/api/auth')
+
+    persistOAuthTokenContext({ access_token: 'new-account-access' })
+
+    expect(localStorage.getItem('refresh_token')).toBeNull()
+    expect(localStorage.getItem('token_expires_at')).toBeNull()
+  })
+
   it('provides bind-login utility helpers for invitation and suggested profile states', async () => {
     const {
       getPendingOAuthBindLoginKind,
@@ -214,8 +240,8 @@ describe('oauth adoption auth api', () => {
   })
 
   it('requests an HttpOnly oauth bind cookie before redirect binding', async () => {
-    localStorage.setItem('auth_token', 'access-token-value')
-    const { prepareOAuthBindAccessTokenCookie } = await import('@/api/auth')
+    const { prepareOAuthBindAccessTokenCookie, setAuthToken } = await import('@/api/auth')
+    setAuthToken('access-token-value')
 
     await prepareOAuthBindAccessTokenCookie()
 

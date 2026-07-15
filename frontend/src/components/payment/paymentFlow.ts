@@ -8,6 +8,83 @@ import type {
 } from '@/types/payment'
 
 export const PAYMENT_RECOVERY_STORAGE_KEY = 'payment.recovery.current'
+export const PAYMENT_RECOVERY_SESSION_STORAGE_KEY = 'payment.recovery.launch.current'
+export const PAYMENT_RECOVERY_RETENTION_MS = 24 * 60 * 60 * 1000
+export const PAYMENT_LATE_SETTLEMENT_GRACE_MS = 5 * 60 * 1000
+
+const PAYMENT_PROCESSING_STATUSES = new Set([
+  'PENDING',
+  'CREATED',
+  'WAITING',
+  'PROCESSING',
+  'PAID',
+  'RECHARGING',
+])
+const PAYMENT_FULFILLMENT_PENDING_STATUSES = new Set(['PAID', 'RECHARGING'])
+const PAYMENT_TERMINAL_FAILURE_STATUSES = new Set(['CANCELLED', 'EXPIRED'])
+
+function normalizePaymentStatus(status: string | null | undefined): string {
+  return String(status || '').trim().toUpperCase()
+}
+
+/** The wallet/subscription has been fulfilled only after the backend commits COMPLETED. */
+export function isPaymentCompleted(status: string | null | undefined): boolean {
+  return normalizePaymentStatus(status) === 'COMPLETED'
+}
+
+/** Provider payment can be captured before wallet/subscription fulfillment finishes. */
+export function isPaymentStillProcessing(status: string | null | undefined): boolean {
+  return PAYMENT_PROCESSING_STATUSES.has(normalizePaymentStatus(status))
+}
+
+/** Payment was captured and must keep polling even after the provider deadline. */
+export function isPaymentFulfillmentPending(
+  status: string | null | undefined,
+  paidAt?: string | null
+): boolean {
+  const normalizedStatus = normalizePaymentStatus(status)
+  return PAYMENT_FULFILLMENT_PENDING_STATUSES.has(normalizedStatus)
+    || (normalizedStatus === 'FAILED' && hasPaymentCaptureEvidence(paidAt))
+}
+
+/** Provider payment succeeded but wallet/subscription fulfillment needs recovery. */
+export function isPaymentFulfillmentFailed(
+  status: string | null | undefined,
+  paidAt?: string | null
+): boolean {
+  return normalizePaymentStatus(status) === 'FAILED' && hasPaymentCaptureEvidence(paidAt)
+}
+
+export function isPaymentTerminalFailure(
+  status: string | null | undefined,
+  paidAt?: string | null
+): boolean {
+  const normalizedStatus = normalizePaymentStatus(status)
+  return PAYMENT_TERMINAL_FAILURE_STATUSES.has(normalizedStatus)
+    || (normalizedStatus === 'FAILED' && !hasPaymentCaptureEvidence(paidAt))
+}
+
+/**
+ * The backend accepts a late provider success for an expired order for a short
+ * grace period. During that window EXPIRED is not yet safe to present as an
+ * irreversible failure because the provider webhook can still complete it.
+ */
+export function isPaymentLateSettlementRecoverable(
+  status: string | null | undefined,
+  _paidAt: string | null | undefined,
+  expiresAt: string | null | undefined,
+  now = Date.now(),
+): boolean {
+  if (normalizePaymentStatus(status) !== 'EXPIRED') return false
+
+  const expiresAtMs = Date.parse(String(expiresAt || ''))
+  if (!Number.isFinite(expiresAtMs)) return false
+  return now <= expiresAtMs + PAYMENT_LATE_SETTLEMENT_GRACE_MS
+}
+
+function hasPaymentCaptureEvidence(paidAt: string | null | undefined): boolean {
+  return typeof paidAt === 'string' && paidAt.trim() !== ''
+}
 
 const VISIBLE_METHOD_ALIASES = {
   alipay: 'alipay',
@@ -30,6 +107,8 @@ export type PaymentLaunchKind =
 
 export interface PaymentRecoverySnapshot {
   orderId: number
+  userId?: number
+  revision?: string
   amount: number
   qrCode: string
   expiresAt: string
@@ -52,6 +131,8 @@ export interface PaymentLaunchContext {
   now?: number
   stripePopupUrl?: string
   stripeRouteUrl?: string
+  userId?: number
+  revision?: string
 }
 
 export interface PaymentLaunchDecision {
@@ -77,7 +158,18 @@ type CreateOrderFlowResult = CreateOrderResult & {
   resume_token?: string
 }
 
-type StorageWriter = Pick<Storage, 'removeItem' | 'setItem'>
+type RecoveryStorage = Pick<Storage, 'getItem' | 'removeItem' | 'setItem'>
+
+interface PaymentRecoveryEnvelope {
+  version: 2
+  entries: PaymentRecoverySnapshot[]
+}
+
+export interface PaymentRecoverySelector {
+  userId: number
+  orderId: number
+  revision: string
+}
 
 export function normalizeVisibleMethod(method: string): VisiblePaymentMethod | '' {
   const normalized = VISIBLE_METHOD_ALIASES[method.trim() as keyof typeof VISIBLE_METHOD_ALIASES]
@@ -131,6 +223,8 @@ export function decidePaymentLaunch(
   const visibleMethod = normalizeVisibleMethod(context.visibleMethod) || context.visibleMethod
   const baseState = createPaymentRecoverySnapshot({
     orderId: result.order_id,
+    userId: context.userId,
+    revision: context.revision,
     amount: result.amount,
     qrCode: result.qr_code || '',
     expiresAt: result.expires_at || '',
@@ -203,75 +297,165 @@ export function createPaymentRecoverySnapshot(
 ): PaymentRecoverySnapshot {
   return {
     ...state,
+    revision: state.revision || createRecoveryRevision(),
     createdAt: now,
   }
 }
 
+function createRecoveryRevision(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
+function recoveryEntryKey(snapshot: Pick<PaymentRecoverySnapshot, 'userId' | 'orderId' | 'revision'>): string {
+  return `${snapshot.userId || 0}:${snapshot.orderId}:${snapshot.revision || ''}`
+}
+
+function normalizeRecoverySnapshot(parsed: Partial<PaymentRecoverySnapshot>): PaymentRecoverySnapshot | null {
+  if (
+    typeof parsed.orderId !== 'number'
+    || !Number.isSafeInteger(parsed.orderId)
+    || parsed.orderId <= 0
+    || typeof parsed.amount !== 'number'
+    || typeof parsed.qrCode !== 'string'
+    || typeof parsed.expiresAt !== 'string'
+    || typeof parsed.paymentType !== 'string'
+    || typeof parsed.payUrl !== 'string'
+    || (parsed.outTradeNo != null && typeof parsed.outTradeNo !== 'string')
+    || typeof parsed.clientSecret !== 'string'
+    || typeof parsed.payAmount !== 'number'
+    || typeof parsed.paymentMode !== 'string'
+    || typeof parsed.resumeToken !== 'string'
+    || typeof parsed.createdAt !== 'number'
+    || (parsed.userId != null && (!Number.isSafeInteger(parsed.userId) || parsed.userId < 0))
+    || (parsed.revision != null && typeof parsed.revision !== 'string')
+  ) {
+    return null
+  }
+
+  return {
+    orderId: parsed.orderId,
+    userId: parsed.userId || 0,
+    revision: parsed.revision || '',
+    amount: parsed.amount,
+    qrCode: parsed.qrCode,
+    expiresAt: parsed.expiresAt,
+    paymentType: parsed.paymentType,
+    payUrl: parsed.payUrl,
+    outTradeNo: parsed.outTradeNo || '',
+    clientSecret: parsed.clientSecret,
+    payAmount: parsed.payAmount,
+    orderType: parsed.orderType === 'subscription' ? 'subscription' : 'balance',
+    paymentMode: parsed.paymentMode,
+    resumeToken: parsed.resumeToken,
+    createdAt: parsed.createdAt,
+  }
+}
+
+function parseRecoveryEntries(raw: string | null | undefined): PaymentRecoverySnapshot[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as Partial<PaymentRecoveryEnvelope> | Partial<PaymentRecoverySnapshot>
+    if (parsed && 'version' in parsed && parsed.version === 2 && Array.isArray(parsed.entries)) {
+      return parsed.entries
+        .map(entry => normalizeRecoverySnapshot(entry))
+        .filter((entry): entry is PaymentRecoverySnapshot => entry !== null)
+    }
+    const legacy = normalizeRecoverySnapshot(parsed as Partial<PaymentRecoverySnapshot>)
+    return legacy ? [legacy] : []
+  } catch {
+    return []
+  }
+}
+
+function isRecoveryRetained(snapshot: PaymentRecoverySnapshot, now: number): boolean {
+  return snapshot.createdAt > now || now - snapshot.createdAt <= PAYMENT_RECOVERY_RETENTION_MS
+}
+
+function writeRecoveryEntries(storage: RecoveryStorage, entries: PaymentRecoverySnapshot[], key: string): void {
+  if (entries.length === 0) {
+    storage.removeItem(key)
+    return
+  }
+  const envelope: PaymentRecoveryEnvelope = { version: 2, entries }
+  storage.setItem(key, JSON.stringify(envelope))
+}
+
 export function writePaymentRecoverySnapshot(
-  storage: StorageWriter,
+  storage: RecoveryStorage,
   snapshot: PaymentRecoverySnapshot,
   key = PAYMENT_RECOVERY_STORAGE_KEY,
 ): void {
-  storage.setItem(key, JSON.stringify(snapshot))
+  const normalized = normalizeRecoverySnapshot(snapshot)
+  if (!normalized) return
+  const now = Date.now()
+  const entryKey = recoveryEntryKey(normalized)
+  const entries = parseRecoveryEntries(storage.getItem(key))
+    .filter(entry => isRecoveryRetained(entry, now) && recoveryEntryKey(entry) !== entryKey)
+  entries.push(normalized)
+  entries.sort((left, right) => right.createdAt - left.createdAt)
+  writeRecoveryEntries(storage, entries.slice(0, 12), key)
 }
 
 export function clearPaymentRecoverySnapshot(
-  storage: Pick<Storage, 'removeItem'>,
+  storage: RecoveryStorage,
+  expected?: PaymentRecoverySelector | string,
   key = PAYMENT_RECOVERY_STORAGE_KEY,
-): void {
-  storage.removeItem(key)
+): boolean {
+  // Compatibility for older callers while all financial paths migrate to the
+  // compare-and-clear selector.
+  if (typeof expected === 'string') {
+    storage.removeItem(expected)
+    return true
+  }
+  if (!expected) {
+    storage.removeItem(key)
+    return true
+  }
+
+  const entries = parseRecoveryEntries(storage.getItem(key))
+  const expectedKey = recoveryEntryKey(expected)
+  const remaining = entries.filter(entry => recoveryEntryKey(entry) !== expectedKey)
+  if (remaining.length === entries.length) return false
+  writeRecoveryEntries(storage, remaining, key)
+  return true
+}
+
+export function clearPaymentRecoveryForUser(
+  storage: RecoveryStorage,
+  userId: number,
+  key = PAYMENT_RECOVERY_STORAGE_KEY,
+): number {
+  if (!Number.isSafeInteger(userId) || userId <= 0) return 0
+  const entries = parseRecoveryEntries(storage.getItem(key))
+  const remaining = entries.filter(entry => entry.userId !== userId)
+  const removed = entries.length - remaining.length
+  if (removed > 0) writeRecoveryEntries(storage, remaining, key)
+  return removed
 }
 
 export function readPaymentRecoverySnapshot(
   raw: string | null | undefined,
-  options: { now?: number; resumeToken?: string } = {},
+  options: {
+    now?: number
+    resumeToken?: string
+    userId?: number
+    orderId?: number
+    revision?: string
+    outTradeNo?: string
+    includeExpired?: boolean
+  } = {},
 ): PaymentRecoverySnapshot | null {
-  if (!raw) return null
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<PaymentRecoverySnapshot>
-    if (
-      typeof parsed.orderId !== 'number'
-      || typeof parsed.amount !== 'number'
-      || typeof parsed.qrCode !== 'string'
-      || typeof parsed.expiresAt !== 'string'
-      || typeof parsed.paymentType !== 'string'
-      || typeof parsed.payUrl !== 'string'
-      || (parsed.outTradeNo != null && typeof parsed.outTradeNo !== 'string')
-      || typeof parsed.clientSecret !== 'string'
-      || typeof parsed.payAmount !== 'number'
-      || typeof parsed.paymentMode !== 'string'
-      || typeof parsed.resumeToken !== 'string'
-      || typeof parsed.createdAt !== 'number'
-    ) {
-      return null
-    }
-
-    const now = options.now ?? Date.now()
-    const expiresAt = Date.parse(parsed.expiresAt)
-    if (Number.isFinite(expiresAt) && expiresAt <= now) {
-      return null
-    }
-    if (options.resumeToken && parsed.resumeToken !== options.resumeToken) {
-      return null
-    }
-
-    return {
-      orderId: parsed.orderId,
-      amount: parsed.amount,
-      qrCode: parsed.qrCode,
-      expiresAt: parsed.expiresAt,
-      paymentType: parsed.paymentType,
-      payUrl: parsed.payUrl,
-      outTradeNo: parsed.outTradeNo || '',
-      clientSecret: parsed.clientSecret,
-      payAmount: parsed.payAmount,
-      orderType: parsed.orderType === 'subscription' ? 'subscription' : 'balance',
-      paymentMode: parsed.paymentMode,
-      resumeToken: parsed.resumeToken,
-      createdAt: parsed.createdAt,
-    }
-  } catch {
-    return null
-  }
+  const now = options.now ?? Date.now()
+  const entries = parseRecoveryEntries(raw)
+    .filter(entry => options.includeExpired || isRecoveryRetained(entry, now))
+    .filter(entry => options.userId == null || entry.userId === options.userId)
+    .filter(entry => options.orderId == null || entry.orderId === options.orderId)
+    .filter(entry => !options.revision || entry.revision === options.revision)
+    .filter(entry => !options.resumeToken || entry.resumeToken === options.resumeToken)
+    .filter(entry => !options.outTradeNo || entry.outTradeNo === options.outTradeNo)
+    .sort((left, right) => right.createdAt - left.createdAt)
+  return entries[0] ?? null
 }

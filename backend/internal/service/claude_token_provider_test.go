@@ -68,18 +68,21 @@ func (s *claudeTokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey s
 	return nil
 }
 
-func (s *claudeTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, error) {
+func (s *claudeTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, string, error) {
 	atomic.AddInt32(&s.lockCalled, 1)
 	if s.lockErr != nil {
-		return false, s.lockErr
+		return false, "", s.lockErr
 	}
 	if s.simulateLockRace {
-		return false, nil
+		return false, "", nil
 	}
-	return s.lockAcquired, nil
+	if !s.lockAcquired {
+		return false, "", nil
+	}
+	return true, "claude-test-owner", nil
 }
 
-func (s *claudeTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string) error {
+func (s *claudeTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string, ownershipToken string) error {
 	atomic.AddInt32(&s.unlockCalled, 1)
 	return s.releaseLockErr
 }
@@ -154,9 +157,9 @@ func (p *testClaudeTokenProvider) GetAccessToken(ctx context.Context, account *A
 	needsRefresh := expiresAt == nil || time.Until(*expiresAt) <= claudeTokenRefreshSkew
 	refreshFailed := false
 	if needsRefresh && p.tokenCache != nil {
-		locked, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
+		locked, ownershipToken, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
 		if err == nil && locked {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, ownershipToken) }()
 
 			// Check cache again after acquiring lock
 			if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && token != "" {
@@ -242,7 +245,7 @@ func TestClaudeTokenProvider_CacheHit(t *testing.T) {
 	cacheKey := ClaudeTokenCacheKey(account)
 	cache.tokens[cacheKey] = "cached-token"
 
-	provider := NewClaudeTokenProvider(nil, cache, nil)
+	provider := NewClaudeTokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
@@ -265,7 +268,9 @@ func TestClaudeTokenProvider_CacheMiss_FromCredentials(t *testing.T) {
 		},
 	}
 
-	provider := NewClaudeTokenProvider(nil, cache, nil)
+	provider := NewClaudeTokenProvider(&mockAccountRepoForGemini{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}, cache, nil)
 
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
@@ -439,7 +444,7 @@ func TestClaudeTokenProvider_CacheGetError(t *testing.T) {
 		},
 	}
 
-	provider := NewClaudeTokenProvider(nil, cache, nil)
+	provider := NewClaudeTokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 
 	// Should gracefully degrade and return from credentials
 	token, err := provider.GetAccessToken(context.Background(), account)
@@ -462,7 +467,7 @@ func TestClaudeTokenProvider_CacheSetError(t *testing.T) {
 		},
 	}
 
-	provider := NewClaudeTokenProvider(nil, cache, nil)
+	provider := NewClaudeTokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 
 	// Should still work even if cache set fails
 	token, err := provider.GetAccessToken(context.Background(), account)
@@ -586,7 +591,9 @@ func TestClaudeTokenProvider_TTLCalculation(t *testing.T) {
 				},
 			}
 
-			provider := NewClaudeTokenProvider(nil, cache, nil)
+			provider := NewClaudeTokenProvider(&mockAccountRepoForGemini{
+				accountsByID: map[int64]*Account{account.ID: account},
+			}, cache, nil)
 
 			_, err := provider.GetAccessToken(context.Background(), account)
 			require.NoError(t, err)
@@ -794,7 +801,7 @@ func TestClaudeTokenProvider_Real_LockFailedWait(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewClaudeTokenProvider(nil, cache, nil)
+	provider := NewClaudeTokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
@@ -825,7 +832,7 @@ func TestClaudeTokenProvider_Real_CacheHitAfterWait(t *testing.T) {
 		cache.mu.Unlock()
 	}()
 
-	provider := NewClaudeTokenProvider(nil, cache, nil)
+	provider := NewClaudeTokenProvider(&mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}, cache, nil)
 	token, err := provider.GetAccessToken(context.Background(), account)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)

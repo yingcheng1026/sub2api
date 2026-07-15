@@ -75,6 +75,11 @@ func Reason(v string) predicate.SubscriptionWalletLedger {
 	return predicate.SubscriptionWalletLedger(sql.FieldEQ(FieldReason, v))
 }
 
+// PaymentOrderID applies equality check predicate on the "payment_order_id" field. It's identical to PaymentOrderIDEQ.
+func PaymentOrderID(v int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldEQ(FieldPaymentOrderID, v))
+}
+
 // UsageLogID applies equality check predicate on the "usage_log_id" field. It's identical to UsageLogIDEQ.
 func UsageLogID(v int64) predicate.SubscriptionWalletLedger {
 	return predicate.SubscriptionWalletLedger(sql.FieldEQ(FieldUsageLogID, v))
@@ -258,6 +263,56 @@ func ReasonEqualFold(v string) predicate.SubscriptionWalletLedger {
 // ReasonContainsFold applies the ContainsFold predicate on the "reason" field.
 func ReasonContainsFold(v string) predicate.SubscriptionWalletLedger {
 	return predicate.SubscriptionWalletLedger(sql.FieldContainsFold(FieldReason, v))
+}
+
+// PaymentOrderIDEQ applies the EQ predicate on the "payment_order_id" field.
+func PaymentOrderIDEQ(v int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldEQ(FieldPaymentOrderID, v))
+}
+
+// PaymentOrderIDNEQ applies the NEQ predicate on the "payment_order_id" field.
+func PaymentOrderIDNEQ(v int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldNEQ(FieldPaymentOrderID, v))
+}
+
+// PaymentOrderIDIn applies the In predicate on the "payment_order_id" field.
+func PaymentOrderIDIn(vs ...int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldIn(FieldPaymentOrderID, vs...))
+}
+
+// PaymentOrderIDNotIn applies the NotIn predicate on the "payment_order_id" field.
+func PaymentOrderIDNotIn(vs ...int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldNotIn(FieldPaymentOrderID, vs...))
+}
+
+// PaymentOrderIDGT applies the GT predicate on the "payment_order_id" field.
+func PaymentOrderIDGT(v int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldGT(FieldPaymentOrderID, v))
+}
+
+// PaymentOrderIDGTE applies the GTE predicate on the "payment_order_id" field.
+func PaymentOrderIDGTE(v int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldGTE(FieldPaymentOrderID, v))
+}
+
+// PaymentOrderIDLT applies the LT predicate on the "payment_order_id" field.
+func PaymentOrderIDLT(v int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldLT(FieldPaymentOrderID, v))
+}
+
+// PaymentOrderIDLTE applies the LTE predicate on the "payment_order_id" field.
+func PaymentOrderIDLTE(v int64) predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldLTE(FieldPaymentOrderID, v))
+}
+
+// PaymentOrderIDIsNil applies the IsNil predicate on the "payment_order_id" field.
+func PaymentOrderIDIsNil() predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldIsNull(FieldPaymentOrderID))
+}
+
+// PaymentOrderIDNotNil applies the NotNil predicate on the "payment_order_id" field.
+func PaymentOrderIDNotNil() predicate.SubscriptionWalletLedger {
+	return predicate.SubscriptionWalletLedger(sql.FieldNotNull(FieldPaymentOrderID))
 }
 
 // UsageLogIDEQ applies the EQ predicate on the "usage_log_id" field.

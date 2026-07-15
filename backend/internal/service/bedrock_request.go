@@ -15,7 +15,41 @@ import (
 
 const defaultBedrockRegion = "us-east-1"
 
-var bedrockCrossRegionPrefixes = []string{"us.", "eu.", "apac.", "jp.", "au.", "us-gov.", "global."}
+var (
+	bedrockCrossRegionPrefixes = []string{"us.", "eu.", "apac.", "jp.", "au.", "us-gov.", "global."}
+	bedrockRegionPattern       = regexp.MustCompile(`^[a-z][a-z0-9]{1,7}(?:-[a-z0-9]+)+-[0-9]+$`)
+)
+
+func normalizeBedrockRegion(region string) (string, error) {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return defaultBedrockRegion, nil
+	}
+	if len(region) > 63 || !bedrockRegionPattern.MatchString(region) {
+		return "", fmt.Errorf("invalid aws_region")
+	}
+	return region, nil
+}
+
+func validateBedrockAccountCredentials(accountType string, credentials map[string]any) error {
+	if accountType != AccountTypeBedrock || credentials == nil {
+		return nil
+	}
+	rawRegion, exists := credentials["aws_region"]
+	if !exists || rawRegion == nil {
+		return nil
+	}
+	region, ok := rawRegion.(string)
+	if !ok {
+		return fmt.Errorf("aws_region must be a string")
+	}
+	normalized, err := normalizeBedrockRegion(region)
+	if err != nil {
+		return err
+	}
+	credentials["aws_region"] = normalized
+	return nil
+}
 
 // BedrockCrossRegionPrefix 根据 AWS Region 返回 Bedrock 跨区域推理的模型 ID 前缀
 // 参考: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
@@ -159,18 +193,19 @@ func ResolveBedrockModelID(account *Account, requestedModel string) (string, boo
 // BuildBedrockURL 构建 Bedrock InvokeModel 的 URL
 // stream=true 时使用 invoke-with-response-stream 端点
 // modelID 中的特殊字符会被 URL 编码（与 litellm 的 urllib.parse.quote(safe="") 对齐）
-func BuildBedrockURL(region, modelID string, stream bool) string {
-	if region == "" {
-		region = defaultBedrockRegion
+func BuildBedrockURL(region, modelID string, stream bool) (string, error) {
+	region, err := normalizeBedrockRegion(region)
+	if err != nil {
+		return "", err
 	}
 	encodedModelID := url.PathEscape(modelID)
 	// url.PathEscape 不编码冒号（RFC 允许 path 中出现 ":"），
 	// 但 AWS Bedrock 期望模型 ID 中的冒号被编码为 %3A
 	encodedModelID = strings.ReplaceAll(encodedModelID, ":", "%3A")
 	if stream {
-		return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke-with-response-stream", region, encodedModelID)
+		return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke-with-response-stream", region, encodedModelID), nil
 	}
-	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke", region, encodedModelID)
+	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke", region, encodedModelID), nil
 }
 
 // PrepareBedrockRequestBody 处理请求体以适配 Bedrock API

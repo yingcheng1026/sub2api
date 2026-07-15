@@ -3,10 +3,10 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"os"
 	"strings"
 	"sync"
@@ -38,51 +38,67 @@ const (
 const (
 	// defaultMaxPendingOrders and defaultOrderTimeoutMin are defined in
 	// payment_config_service.go alongside other payment configuration defaults.
+	// paymentGraceMinutes protects recent expired/cancelled rows from plan or
+	// group deletion while settlement is still likely. Trusted paid evidence is
+	// accepted after this window too; late fulfillment may then require admin
+	// remediation if its historical target was removed.
 	paymentGraceMinutes = 5
+	// Read-only status endpoints may reconcile a missed webhook, but must not
+	// hammer the provider on every UI poll.
+	paymentStatusQueryCooldown = 5 * time.Second
 
 	defaultPageSize    = 20
 	maxPageSize        = 100
 	topUsersLimit      = 10
 	amountToleranceCNY = 0.01
 
+	// A RECHARGING row is a lightweight fulfillment lease. Fulfillment is
+	// expected to be local database work; after this window another worker may
+	// safely reclaim it using a compare-and-swap on status + updated_at.
+	paymentFulfillmentLeaseTimeout = 5 * time.Minute
+	defaultStaleRecoveryBatchSize  = 100
+	maxStaleRecoveryBatchSize      = 500
+	paymentCreateFailureReason     = "payment_create_failed"
+	fulfillmentFailureReasonPrefix = "fulfillment_failed: "
+
 	orderIDPrefix = "sub2_"
 )
 
-const paymentResumeSigningKeyEnv = "PAYMENT_RESUME_SIGNING_KEY"
+const (
+	paymentResumeSigningKeyEnv        = "PAYMENT_RESUME_SIGNING_KEY"
+	paymentResumeLegacyVerifyUntilEnv = "PAYMENT_RESUME_LEGACY_VERIFY_UNTIL"
+	paymentResumeLegacyMaxWindow      = 24 * time.Hour
+)
 
 // --- Types ---
 
-// generateOutTradeNo creates a unique external order ID for payment providers.
-// Format: sub2_20250409aB3kX9mQ (prefix + date + 8-char random)
-func generateOutTradeNo() string {
-	date := time.Now().Format("20060102")
-	rnd := generateRandomString(8)
-	return orderIDPrefix + date + rnd
-}
-
-func generateRandomString(n int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = charset[rand.IntN(len(charset))]
+// generateOutTradeNo creates a 128-bit, non-guessable provider order ID. The
+// 32 hexadecimal characters fit WeChat Pay's strict out_trade_no limit.
+func generateOutTradeNo() (string, error) {
+	randomBytes := make([]byte, 16)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", fmt.Errorf("generate out_trade_no randomness: %w", err)
 	}
-	return string(b)
+	return hex.EncodeToString(randomBytes), nil
 }
 
 type CreateOrderRequest struct {
-	UserID          int64
-	Amount          float64
-	PaymentType     string
-	OpenID          string
-	ClientIP        string
-	IsMobile        bool
-	IsWeChatBrowser bool
-	SrcHost         string
-	SrcURL          string
-	ReturnURL       string
-	PaymentSource   string
-	OrderType       string
-	PlanID          int64
+	UserID             int64
+	ResumeTokenUserID  int64
+	ResumeTokenJTI     string
+	Amount             float64
+	PaymentType        string
+	OpenID             string
+	ClientIP           string
+	IsMobile           bool
+	IsWeChatBrowser    bool
+	SrcHost            string
+	SrcURL             string
+	ReturnURL          string
+	TrustedFrontendURL string
+	PaymentSource      string
+	OrderType          string
+	PlanID             int64
 }
 
 type CreateOrderResponse struct {
@@ -115,25 +131,31 @@ type OrderListParams struct {
 }
 
 type RefundPlan struct {
-	OrderID         int64
-	Order           *dbent.PaymentOrder
-	RefundAmount    float64
-	GatewayAmount   float64
-	Reason          string
-	Force           bool
-	DeductBalance   bool
-	DeductionType   string
-	BalanceToDeduct float64
-	SubDaysToDeduct int
-	SubscriptionID  int64
+	OrderID                  int64
+	Order                    *dbent.PaymentOrder
+	RefundAmount             float64
+	GatewayAmount            float64
+	Reason                   string
+	Force                    bool
+	DeductBalance            bool
+	DeductionType            string
+	BalanceToDeduct          float64
+	SubDaysToDeduct          int
+	SubscriptionID           int64
+	WalletCreditToDeduct     float64
+	WalletFulfillmentAuditID int64
+	WalletFulfilledAt        time.Time
+	RefundLeaseUpdatedAt     time.Time
+	WalletRefundRecovered    bool
 }
 
 type RefundResult struct {
-	Success         bool    `json:"success"`
-	Warning         string  `json:"warning,omitempty"`
-	RequireForce    bool    `json:"require_force,omitempty"`
-	BalanceDeducted float64 `json:"balance_deducted,omitempty"`
-	SubDaysDeducted int     `json:"subscription_days_deducted,omitempty"`
+	Success              bool    `json:"success"`
+	Warning              string  `json:"warning,omitempty"`
+	RequireForce         bool    `json:"require_force,omitempty"`
+	BalanceDeducted      float64 `json:"balance_deducted,omitempty"`
+	SubDaysDeducted      int     `json:"subscription_days_deducted,omitempty"`
+	WalletCreditDeducted float64 `json:"wallet_credit_deducted,omitempty"`
 }
 
 type DashboardStats struct {
@@ -171,6 +193,8 @@ type TopUserStat struct {
 
 type PaymentService struct {
 	providerMu       sync.Mutex
+	statusQueryMu    sync.Mutex
+	lastStatusQuery  map[int64]time.Time
 	providersLoaded  bool
 	entClient        *dbent.Client
 	registry         *payment.Registry
@@ -278,7 +302,11 @@ func psNewPaymentResumeService(configService *PaymentConfigService) *PaymentResu
 }
 
 func newLegacyAwarePaymentResumeService(legacyKey []byte) *PaymentResumeService {
-	signingKey, verifyFallbacks := resolvePaymentResumeSigningKeys(legacyKey)
+	signingKey, verifyFallbacks, err := resolvePaymentResumeSigningKeys(legacyKey, time.Now())
+	if err != nil {
+		slog.Error("payment resume signing configuration is invalid", "error", err)
+		return NewPaymentResumeService(nil)
+	}
 	return NewPaymentResumeService(signingKey, verifyFallbacks...)
 }
 
@@ -289,31 +317,71 @@ func psResumeLegacyVerificationKey(configService *PaymentConfigService) []byte {
 	return configService.encryptionKey
 }
 
-func resolvePaymentResumeSigningKeys(legacyKey []byte) ([]byte, [][]byte) {
-	signingKey := parsePaymentResumeSigningKey(os.Getenv(paymentResumeSigningKeyEnv))
+func resolvePaymentResumeSigningKeys(legacyKey []byte, now time.Time) ([]byte, [][]byte, error) {
+	signingKey, err := parsePaymentResumeSigningKey(os.Getenv(paymentResumeSigningKeyEnv))
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(signingKey) == 0 {
 		if len(legacyKey) == 0 {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return legacyKey, nil
+		if len(legacyKey) < paymentResumeMinSigningKeyBytes {
+			return nil, nil, fmt.Errorf("legacy payment resume key must be at least %d bytes", paymentResumeMinSigningKeyBytes)
+		}
+		return legacyKey, nil, nil
 	}
 	if len(legacyKey) == 0 || bytes.Equal(legacyKey, signingKey) {
-		return signingKey, nil
+		return signingKey, nil, nil
 	}
-	return signingKey, [][]byte{legacyKey}
+	legacyAllowed, err := paymentResumeLegacyVerificationAllowed(os.Getenv(paymentResumeLegacyVerifyUntilEnv), now)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !legacyAllowed {
+		return signingKey, nil, nil
+	}
+	if len(legacyKey) < paymentResumeMinSigningKeyBytes {
+		return nil, nil, fmt.Errorf("legacy payment resume verification key must be at least %d bytes", paymentResumeMinSigningKeyBytes)
+	}
+	return signingKey, [][]byte{legacyKey}, nil
 }
 
-func parsePaymentResumeSigningKey(raw string) []byte {
+func parsePaymentResumeSigningKey(raw string) ([]byte, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	if len(raw) >= 64 && len(raw)%2 == 0 {
-		if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) > 0 {
-			return decoded
+		if decoded, err := hex.DecodeString(raw); err == nil {
+			if len(decoded) < paymentResumeMinSigningKeyBytes {
+				return nil, fmt.Errorf("payment resume signing key must be at least %d bytes", paymentResumeMinSigningKeyBytes)
+			}
+			return decoded, nil
 		}
 	}
-	return []byte(raw)
+	if len([]byte(raw)) < paymentResumeMinSigningKeyBytes {
+		return nil, fmt.Errorf("payment resume signing key must be at least %d bytes", paymentResumeMinSigningKeyBytes)
+	}
+	return []byte(raw), nil
+}
+
+func paymentResumeLegacyVerificationAllowed(raw string, now time.Time) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, nil
+	}
+	deadline, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be an RFC3339 timestamp", paymentResumeLegacyVerifyUntilEnv)
+	}
+	if !deadline.After(now) {
+		return false, nil
+	}
+	if deadline.After(now.Add(paymentResumeLegacyMaxWindow)) {
+		return false, fmt.Errorf("%s must be no more than %s in the future", paymentResumeLegacyVerifyUntilEnv, paymentResumeLegacyMaxWindow)
+	}
+	return true, nil
 }
 
 func psSliceContains(sl []string, s string) bool {

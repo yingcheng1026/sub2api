@@ -29,19 +29,6 @@ func TestWalletCreditsPlanPurchaseActivatesPermanentWallet(t *testing.T) {
 		PasswordHash: "hash",
 	})
 
-	gptGroup := mustCreateGroup(t, client, &service.Group{
-		Name:             "gpt-5-b28-buy",
-		Platform:         service.PlatformOpenAI,
-		SubscriptionType: service.SubscriptionTypeStandard,
-		RateMultiplier:   1.0,
-	})
-	sonnetGroup := mustCreateGroup(t, client, &service.Group{
-		Name:             "claude-sonnet-b28-buy",
-		Platform:         service.PlatformAnthropic,
-		SubscriptionType: service.SubscriptionTypeStandard,
-		RateMultiplier:   2.5,
-	})
-
 	creditsQuota := 100.0
 	plan, err := client.SubscriptionPlan.Create().
 		SetName("Credits 100 E2E Buy").
@@ -53,10 +40,10 @@ func TestWalletCreditsPlanPurchaseActivatesPermanentWallet(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	bindWalletPlanGroup(t, client, plan.ID, gptGroup.ID)
-	bindWalletPlanGroup(t, client, plan.ID, sonnetGroup.ID)
-
-	order, err := client.PaymentOrder.Create().
+	tx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	order, err := tx.Client().PaymentOrder.Create().
 		SetUserID(user.ID).
 		SetUserEmail(user.Email).
 		SetUserName(user.Username).
@@ -71,16 +58,19 @@ func TestWalletCreditsPlanPurchaseActivatesPermanentWallet(t *testing.T) {
 		SetPlanID(plan.ID).
 		SetSubscriptionDays(36500).
 		SetStatus(service.OrderStatusPaid).
+		SetPaidAt(time.Now()).
 		SetExpiresAt(time.Now().Add(time.Hour)).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
 		Save(ctx)
 	require.NoError(t, err)
+	insertCreditsPlanFulfillmentSnapshot(t, ctx, tx.Client(), order.ID, user.ID, plan.ID, 30, 36500, creditsQuota)
+	require.NoError(t, tx.Commit())
 	require.Nil(t, order.SubscriptionGroupID)
 
 	groupRepo := NewGroupRepository(client, integrationDB)
 	userRepo := NewUserRepository(client, integrationDB)
-	apiKeyRepo := NewAPIKeyRepository(client, integrationDB)
+	apiKeyRepo := NewAPIKeyRepository(client, integrationDB, strictAPIKeyTestProtector{})
 	subRepo := NewUserSubscriptionRepository(client)
 	walletRepo := NewWalletRepository(client, integrationDB)
 	walletSvc := service.NewWalletService(walletRepo)
@@ -110,10 +100,10 @@ func TestWalletCreditsPlanPurchaseActivatesPermanentWallet(t *testing.T) {
 	require.Nil(t, keys[0].GroupID, "universal key 的 group_id 必须为 NULL")
 }
 
-// B2.8 端到端回归 #2：月卡用户再买额度卡 → topup 叠加（不新建 user_subscriptions 行）。
-// 验证 §2.3 设计：wallet_balance_usd += quota；wallet_initial_usd += quota；
-// 写一笔 ledger reason='topup'；多 key 不重建。
-func TestWalletMonthlyUserBuysCreditsSKUStacksOntoExistingWallet(t *testing.T) {
+// Monthly entitlements and credits wallets are separate products, rows,
+// authorization paths, and ledgers. Buying credits after monthly access must
+// never turn the monthly row into a wallet or merge their money.
+func TestMonthlySubscriptionAndCreditsWalletRemainSeparate(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
 
@@ -124,18 +114,16 @@ func TestWalletMonthlyUserBuysCreditsSKUStacksOntoExistingWallet(t *testing.T) {
 	})
 
 	gptGroup := mustCreateGroup(t, client, &service.Group{
-		Name:             "gpt-5-b28-stack",
+		Name:             "monthly-openai-" + uuid.NewString(),
 		Platform:         service.PlatformOpenAI,
-		SubscriptionType: service.SubscriptionTypeStandard,
+		SubscriptionType: service.SubscriptionTypeSubscription,
 		RateMultiplier:   1.0,
 	})
 
-	// 月卡 plan
-	monthlyQuota := 1500.0
 	monthlyPlan, err := client.SubscriptionPlan.Create().
-		SetName("Standard Monthly E2E Stack").
+		SetName("Monthly Group E2E Separate").
 		SetPrice(299).
-		SetWalletQuotaUsd(monthlyQuota).
+		SetGroupID(gptGroup.ID).
 		SetValidityDays(30).
 		SetValidityUnit("day").
 		SetPlanType(service.PlanTypeSubscription).
@@ -143,7 +131,6 @@ func TestWalletMonthlyUserBuysCreditsSKUStacksOntoExistingWallet(t *testing.T) {
 	require.NoError(t, err)
 	bindWalletPlanGroup(t, client, monthlyPlan.ID, gptGroup.ID)
 
-	// 额度卡 plan
 	creditsQuota := 100.0
 	creditsPlan, err := client.SubscriptionPlan.Create().
 		SetName("Credits 100 E2E Stack").
@@ -154,11 +141,10 @@ func TestWalletMonthlyUserBuysCreditsSKUStacksOntoExistingWallet(t *testing.T) {
 		SetPlanType(service.PlanTypeCredits).
 		Save(ctx)
 	require.NoError(t, err)
-	bindWalletPlanGroup(t, client, creditsPlan.ID, gptGroup.ID)
 
 	groupRepo := NewGroupRepository(client, integrationDB)
 	userRepo := NewUserRepository(client, integrationDB)
-	apiKeyRepo := NewAPIKeyRepository(client, integrationDB)
+	apiKeyRepo := NewAPIKeyRepository(client, integrationDB, strictAPIKeyTestProtector{})
 	subRepo := NewUserSubscriptionRepository(client)
 	walletRepo := NewWalletRepository(client, integrationDB)
 	walletSvc := service.NewWalletService(walletRepo)
@@ -168,8 +154,10 @@ func TestWalletMonthlyUserBuysCreditsSKUStacksOntoExistingWallet(t *testing.T) {
 	subSvc.SetWalletTopupService(walletSvc)
 	paymentSvc := service.NewPaymentService(client, nil, nil, nil, subSvc, nil, userRepo, groupRepo, nil)
 
-	// step 1: 月卡支付 → 建钱包 ($1500)
-	monthlyOrder, err := client.PaymentOrder.Create().
+	monthlyTx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = monthlyTx.Rollback() }()
+	monthlyOrder, err := monthlyTx.Client().PaymentOrder.Create().
 		SetUserID(user.ID).
 		SetUserEmail(user.Email).
 		SetUserName(user.Username).
@@ -182,27 +170,36 @@ func TestWalletMonthlyUserBuysCreditsSKUStacksOntoExistingWallet(t *testing.T) {
 		SetPaymentTradeNo("trade-monthly-stack-" + uuid.NewString()).
 		SetOrderType(payment.OrderTypeSubscription).
 		SetPlanID(monthlyPlan.ID).
+		SetSubscriptionGroupID(gptGroup.ID).
 		SetSubscriptionDays(30).
 		SetStatus(service.OrderStatusPaid).
+		SetPaidAt(time.Now()).
 		SetExpiresAt(time.Now().Add(time.Hour)).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
 		Save(ctx)
 	require.NoError(t, err)
+	insertMonthlyPlanFulfillmentSnapshot(t, ctx, monthlyTx.Client(), monthlyOrder.ID, user.ID, monthlyPlan.ID, gptGroup.ID, 299, 30, gptGroup.RateMultiplier)
+	require.NoError(t, monthlyTx.Commit())
 	require.NoError(t, paymentSvc.ExecuteSubscriptionFulfillment(ctx, monthlyOrder.ID))
 
-	subAfterMonthly, err := subRepo.GetActiveWalletByUserID(ctx, user.ID)
+	monthlySub, err := subRepo.GetActiveByUserIDAndGroupID(ctx, user.ID, gptGroup.ID)
 	require.NoError(t, err)
-	require.InDelta(t, monthlyQuota, *subAfterMonthly.WalletBalanceUSD, 0.000001)
-	monthlyExpiresAt := subAfterMonthly.ExpiresAt
-	require.False(t, monthlyExpiresAt.Equal(service.MaxExpiresAt), "月卡不应永久有效")
+	require.Nil(t, monthlySub.WalletBalanceUSD)
+	require.Nil(t, monthlySub.WalletInitialUSD)
+	require.False(t, monthlySub.ExpiresAt.Equal(service.MaxExpiresAt))
+	_, err = subRepo.GetActiveWalletByUserID(ctx, user.ID)
+	require.ErrorIs(t, err, service.ErrSubscriptionNotFound,
+		"monthly group access must not create a hidden wallet")
 
 	keysAfterMonthly, _, err := apiKeyRepo.ListByUserID(ctx, user.ID, defaultWalletE2EPagination(), service.APIKeyListFilters{Status: service.StatusAPIKeyActive})
 	require.NoError(t, err)
-	require.Len(t, keysAfterMonthly, 1, "monthly plan 关联 1 个 group → 应建 1 把 key")
+	require.Empty(t, keysAfterMonthly, "monthly entitlement assignment must not mint a credits-wallet key")
 
-	// step 2: 再来一张额度卡 → topup 叠加（不新建 sub，余额合并）
-	creditsOrder, err := client.PaymentOrder.Create().
+	creditsTx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = creditsTx.Rollback() }()
+	creditsOrder, err := creditsTx.Client().PaymentOrder.Create().
 		SetUserID(user.ID).
 		SetUserEmail(user.Email).
 		SetUserName(user.Username).
@@ -217,40 +214,50 @@ func TestWalletMonthlyUserBuysCreditsSKUStacksOntoExistingWallet(t *testing.T) {
 		SetPlanID(creditsPlan.ID).
 		SetSubscriptionDays(36500).
 		SetStatus(service.OrderStatusPaid).
+		SetPaidAt(time.Now()).
 		SetExpiresAt(time.Now().Add(time.Hour)).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
 		Save(ctx)
 	require.NoError(t, err)
+	insertCreditsPlanFulfillmentSnapshot(t, ctx, creditsTx.Client(), creditsOrder.ID, user.ID, creditsPlan.ID, 30, 36500, creditsQuota)
+	require.NoError(t, creditsTx.Commit())
 	require.NoError(t, paymentSvc.ExecuteSubscriptionFulfillment(ctx, creditsOrder.ID))
 
-	subAfterStack, err := subRepo.GetActiveWalletByUserID(ctx, user.ID)
+	walletSub, err := subRepo.GetActiveCreditsWalletByUserID(ctx, user.ID)
 	require.NoError(t, err)
-	require.Equal(t, subAfterMonthly.ID, subAfterStack.ID, "topup 必须复用同一条钱包订阅（不新建行）")
+	require.NotEqual(t, monthlySub.ID, walletSub.ID)
+	require.Nil(t, walletSub.GroupID)
+	require.InDelta(t, creditsQuota, *walletSub.WalletBalanceUSD, 0.000001)
+	require.InDelta(t, creditsQuota, *walletSub.WalletInitialUSD, 0.000001)
+	require.True(t, walletSub.ExpiresAt.Equal(service.MaxExpiresAt))
 
-	expectedBalance := monthlyQuota + creditsQuota
-	require.InDelta(t, expectedBalance, *subAfterStack.WalletBalanceUSD, 0.000001,
-		"topup 后 wallet_balance_usd 必须 = $1500 + $100 = $1600")
-	require.InDelta(t, expectedBalance, *subAfterStack.WalletInitialUSD, 0.000001,
-		"topup 后 wallet_initial_usd 也叠加（用于「累计充值额度」展示）")
-	// expires_at 由月卡持有，credits topup 不应把它拉到 MaxExpiresAt。
-	require.True(t, subAfterStack.ExpiresAt.Equal(monthlyExpiresAt),
-		"topup 不应改变月卡 expires_at（仍按 30 天到期）")
-
-	// 多 key 不重建：仍是 1 把
-	keysAfterStack, _, err := apiKeyRepo.ListByUserID(ctx, user.ID, defaultWalletE2EPagination(), service.APIKeyListFilters{Status: service.StatusAPIKeyActive})
+	monthlyReloaded, err := subRepo.GetByID(ctx, monthlySub.ID)
 	require.NoError(t, err)
-	require.Len(t, keysAfterStack, 1, "topup 不应重复建 key")
-	require.Equal(t, keysAfterMonthly[0].ID, keysAfterStack[0].ID)
-
-	// ledger 校验：reason='topup' 一条 delta = +100
-	var topupCount int
-	var topupDeltaSum float64
+	require.Nil(t, monthlyReloaded.WalletBalanceUSD)
+	require.Nil(t, monthlyReloaded.WalletInitialUSD)
+	var subscriptionRows int
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(SUM(delta_usd), 0)
-		FROM subscription_wallet_ledger
-		WHERE subscription_id = $1 AND reason = 'topup'
-	`, subAfterStack.ID).Scan(&topupCount, &topupDeltaSum))
-	require.Equal(t, 1, topupCount, "应写一条 reason='topup' 的 ledger")
-	require.InDelta(t, creditsQuota, topupDeltaSum, 0.000001, "topup ledger delta_usd 必须 = +creditsQuota")
+		SELECT COUNT(*) FROM user_subscriptions
+		WHERE user_id = $1 AND deleted_at IS NULL
+	`, user.ID).Scan(&subscriptionRows))
+	require.Equal(t, 2, subscriptionRows)
+
+	keysAfterCredits, _, err := apiKeyRepo.ListByUserID(ctx, user.ID, defaultWalletE2EPagination(), service.APIKeyListFilters{Status: service.StatusAPIKeyActive})
+	require.NoError(t, err)
+	require.Len(t, keysAfterCredits, 1)
+	require.True(t, service.IsWalletUniversalKeyName(keysAfterCredits[0].Name))
+
+	var activationCount, topupCount int
+	var ledgerTotal float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE reason = 'activation'),
+			COUNT(*) FILTER (WHERE reason = 'topup'),
+			COALESCE(SUM(delta_usd), 0)
+		FROM subscription_wallet_ledger WHERE subscription_id = $1
+	`, walletSub.ID).Scan(&activationCount, &topupCount, &ledgerTotal))
+	require.Equal(t, 1, activationCount)
+	require.Zero(t, topupCount, "a monthly row must never be reused as a credits top-up target")
+	require.InDelta(t, creditsQuota, ledgerTotal, 0.000001)
 }

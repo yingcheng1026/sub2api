@@ -60,6 +60,25 @@ func TestRateLimiterFailureModes(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 }
 
+func TestRateLimiterNilClientHonorsFailureMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	limiter := NewRateLimiter(nil)
+
+	failCloseRouter := gin.New()
+	failCloseRouter.Use(limiter.LimitWithOptions("test", 1, time.Second, RateLimitOptions{FailureMode: RateLimitFailClose}))
+	failCloseRouter.GET("/test", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	recorder := httptest.NewRecorder()
+	failCloseRouter.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/test", nil))
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+
+	failOpenRouter := gin.New()
+	failOpenRouter.Use(limiter.Limit("test", 1, time.Second))
+	failOpenRouter.GET("/test", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	recorder = httptest.NewRecorder()
+	failOpenRouter.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/test", nil))
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+}
+
 func TestRateLimiterDifferentIPsIndependent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -140,4 +159,29 @@ func TestRateLimiterSuccessAndLimit(t *testing.T) {
 	recorder = httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+}
+
+func TestRateLimiterUsesConfiguredAuthenticatedIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	originalRun := rateLimitRun
+	var capturedKey string
+	rateLimitRun = func(ctx context.Context, client *redis.Client, key string, windowMillis int64) (int64, bool, error) {
+		capturedKey = key
+		return 1, false, nil
+	}
+	t.Cleanup(func() { rateLimitRun = originalRun })
+
+	limiter := NewRateLimiter(redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"}))
+	router := gin.New()
+	router.Use(limiter.LimitWithOptions("payment-auth-status", 120, time.Minute, RateLimitOptions{
+		KeyFunc: func(*gin.Context) string { return "user-42" },
+	}))
+	router.GET("/test", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "10.0.0.1:1234"
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+	require.Equal(t, "rate_limit:payment-auth-status:user-42", capturedKey)
 }

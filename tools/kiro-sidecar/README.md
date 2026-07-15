@@ -61,6 +61,16 @@ AWS SSO OIDC credential:
 
 The JSON can also be base64url encoded and prefixed with `base64url:` if the admin UI makes multiline JSON inconvenient. The sidecar caches refreshed access tokens in memory, but does not write refreshed credentials back to disk or the database.
 
+### Process-level credential fallback
+
+The normal Sub2API path sends a selected account credential in `X-Kiro-API-Key`; that caller-owned credential does not use a shared sidecar identity. If you instead configure `KIRO_API_KEY` or `KIRO_CREDENTIALS_JSON` in the sidecar process, also configure a random `KIRO_SIDECAR_AUTH_TOKEN` of at least 32 bytes. Requests that omit `X-Kiro-API-Key` must then send:
+
+```text
+Authorization: Bearer <KIRO_SIDECAR_AUTH_TOKEN>
+```
+
+The sidecar rejects process-level credential fallback when this independent caller token is missing, too short, or incorrect. Do not put either secret in a URL or commit it to Compose files.
+
 ## Sub2API config
 
 ```yaml

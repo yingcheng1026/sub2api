@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -18,18 +19,8 @@ func validatePlanRequired(name string, groupID *int64, walletQuotaUSD *float64, 
 	if strings.TrimSpace(name) == "" {
 		return infraerrors.BadRequest("PLAN_NAME_REQUIRED", "plan name is required")
 	}
-	isWalletPlan := walletQuotaUSD != nil && *walletQuotaUSD > 0
-	if !isWalletPlan && (groupID == nil || *groupID <= 0) {
-		return infraerrors.BadRequest("PLAN_GROUP_REQUIRED", "group is required for non-wallet plans")
-	}
-	if isWalletPlan && groupID != nil {
-		return infraerrors.BadRequest("PLAN_MODE_INVALID", "wallet plans must not set group_id")
-	}
-	if walletQuotaUSD != nil && *walletQuotaUSD <= 0 {
-		return infraerrors.BadRequest("PLAN_WALLET_QUOTA_INVALID", "wallet_quota_usd must be > 0")
-	}
-	if planType == PlanTypeCredits && !isWalletPlan {
-		return infraerrors.BadRequest("PLAN_TYPE_INVALID", "credits plans must be wallet plans")
+	if err := validatePlanFulfillmentShape(groupID, walletQuotaUSD, planType); err != nil {
+		return err
 	}
 	if price <= 0 {
 		return infraerrors.BadRequest("PLAN_PRICE_INVALID", "price must be > 0")
@@ -42,6 +33,28 @@ func validatePlanRequired(name string, groupID *int64, walletQuotaUSD *float64, 
 	}
 	if originalPrice != nil && *originalPrice < 0 {
 		return infraerrors.BadRequest("PLAN_ORIGINAL_PRICE_INVALID", "original price must be >= 0")
+	}
+	return nil
+}
+
+func validatePlanFulfillmentShape(groupID *int64, walletQuotaUSD *float64, planType string) error {
+	switch planType {
+	case PlanTypeSubscription:
+		if groupID == nil || *groupID <= 0 {
+			return infraerrors.BadRequest("PLAN_GROUP_REQUIRED", "monthly plans require a subscription group")
+		}
+		if walletQuotaUSD != nil {
+			return infraerrors.BadRequest("PLAN_MODE_INVALID", "monthly plans cannot use wallet quota")
+		}
+	case PlanTypeCredits:
+		if groupID != nil {
+			return infraerrors.BadRequest("PLAN_MODE_INVALID", "credits wallet plans must not set group_id")
+		}
+		if walletQuotaUSD == nil || *walletQuotaUSD <= 0 || math.IsNaN(*walletQuotaUSD) || math.IsInf(*walletQuotaUSD, 0) {
+			return infraerrors.BadRequest("PLAN_WALLET_QUOTA_INVALID", "credits plans require a finite wallet_quota_usd > 0")
+		}
+	default:
+		return infraerrors.BadRequest("PLAN_TYPE_INVALID", "plan_type must be 'subscription' or 'credits'")
 	}
 	return nil
 }
@@ -66,7 +79,7 @@ func validatePlanPatch(req UpdatePlanRequest) error {
 	if req.GroupID != nil && *req.GroupID <= 0 {
 		return infraerrors.BadRequest("PLAN_GROUP_REQUIRED", "group is required")
 	}
-	if req.WalletQuotaUSD != nil && *req.WalletQuotaUSD <= 0 {
+	if req.WalletQuotaUSD != nil && (*req.WalletQuotaUSD <= 0 || math.IsNaN(*req.WalletQuotaUSD) || math.IsInf(*req.WalletQuotaUSD, 0)) {
 		return infraerrors.BadRequest("PLAN_WALLET_QUOTA_INVALID", "wallet_quota_usd must be > 0")
 	}
 	if req.Price != nil && *req.Price <= 0 {
@@ -189,13 +202,26 @@ func (s *PaymentConfigService) ListPlans(ctx context.Context) ([]*dbent.Subscrip
 }
 
 func (s *PaymentConfigService) ListPlansForSale(ctx context.Context) ([]*dbent.SubscriptionPlan, error) {
-	return s.entClient.SubscriptionPlan.Query().Where(subscriptionplan.ForSaleEQ(true)).Order(subscriptionplan.BySortOrder()).All(ctx)
+	plans, err := s.entClient.SubscriptionPlan.Query().Where(
+		subscriptionplan.ForSaleEQ(true),
+		subscriptionplan.PlanTypeEQ(PlanTypeCredits),
+	).Order(subscriptionplan.BySortOrder()).All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validatePlanGroupAvailability(ctx, s.entClient, plans); err != nil {
+		return nil, err
+	}
+	return plans, nil
 }
 
 func (s *PaymentConfigService) CreatePlan(ctx context.Context, req CreatePlanRequest) (*dbent.SubscriptionPlan, error) {
 	planType, err := validatePlanType(req.PlanType)
 	if err != nil {
 		return nil, err
+	}
+	if planType != PlanTypeCredits {
+		return nil, infraerrors.BadRequest("MONTHLY_PLANS_RETIRED", "monthly plans have been retired; create a credits plan instead")
 	}
 	if err := validatePlanRequired(req.Name, req.GroupID, req.WalletQuotaUSD, planType, req.Price, req.ValidityDays, req.ValidityUnit, req.OriginalPrice); err != nil {
 		return nil, err
@@ -210,6 +236,12 @@ func (s *PaymentConfigService) CreatePlan(ctx context.Context, req CreatePlanReq
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.requireAvailableMonthlyPlanGroup(ctx, tx.Client(), planType, req.GroupID); err != nil {
+		return nil, err
+	}
+	if err := validatePlanCoverageGroupIDs(ctx, tx.Client(), planGroupIDs); err != nil {
+		return nil, err
+	}
 
 	b := tx.SubscriptionPlan.Create().
 		SetName(req.Name).SetDescription(req.Description).
@@ -267,6 +299,45 @@ func (s *PaymentConfigService) UpdatePlan(ctx context.Context, id int64, req Upd
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	existing, err := tx.SubscriptionPlan.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	nextPlanType, err := validatePlanType(existing.PlanType)
+	if err != nil {
+		return nil, err
+	}
+	nextGroupID := existing.GroupID
+	nextWalletQuota := existing.WalletQuotaUsd
+	if req.GroupID != nil {
+		nextGroupID = req.GroupID
+		nextWalletQuota = nil
+	}
+	if req.WalletQuotaUSD != nil {
+		nextWalletQuota = req.WalletQuotaUSD
+		nextGroupID = nil
+	}
+	if req.PlanType != nil {
+		nextPlanType, err = validatePlanType(*req.PlanType)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if nextPlanType != PlanTypeCredits && req.ForSale != nil && *req.ForSale {
+		return nil, infraerrors.BadRequest("MONTHLY_PLANS_RETIRED", "monthly plans cannot be put back on sale")
+	}
+	if err := validatePlanFulfillmentShape(nextGroupID, nextWalletQuota, nextPlanType); err != nil {
+		return nil, err
+	}
+	if err := s.requireAvailableMonthlyPlanGroup(ctx, tx.Client(), nextPlanType, nextGroupID); err != nil {
+		return nil, err
+	}
+	if req.PlanGroupIDs != nil {
+		if err := validatePlanCoverageGroupIDs(ctx, tx.Client(), planGroupIDs); err != nil {
+			return nil, err
+		}
+	}
 
 	u := tx.SubscriptionPlan.UpdateOneID(id)
 	if req.GroupID != nil {
@@ -353,6 +424,75 @@ func normalizePlanGroupIDs(ids []int64) ([]int64, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out, nil
+}
+
+func validatePlanCoverageGroupIDs(ctx context.Context, client *dbent.Client, groupIDs []int64) error {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	if client == nil {
+		return infraerrors.BadRequest("PLAN_COVERAGE_GROUP_UNAVAILABLE", "plan coverage group is unavailable")
+	}
+	groups, err := client.Group.Query().
+		Where(group.IDIn(groupIDs...), group.DeletedAtIsNil()).
+		All(ctx)
+	if err != nil {
+		return fmt.Errorf("validate plan coverage groups: %w", err)
+	}
+	if len(groups) != len(groupIDs) {
+		return infraerrors.BadRequest("PLAN_COVERAGE_GROUP_UNAVAILABLE", "plan coverage groups must exist and be active public standard groups")
+	}
+	for _, candidate := range groups {
+		if candidate.Status != StatusActive ||
+			candidate.SubscriptionType != SubscriptionTypeStandard ||
+			candidate.IsExclusive ||
+			candidate.Name == WalletDefaultVIPGroupName ||
+			candidate.DeletedAt != nil {
+			return infraerrors.BadRequest("PLAN_COVERAGE_GROUP_UNAVAILABLE", "plan coverage groups must exist and be active public standard groups")
+		}
+	}
+	return nil
+}
+
+func (s *PaymentConfigService) validatePlanGroupAvailability(ctx context.Context, client *dbent.Client, plans []*dbent.SubscriptionPlan) error {
+	for _, plan := range plans {
+		if plan == nil {
+			continue
+		}
+		planType, err := validatePlanType(plan.PlanType)
+		if err != nil {
+			return err
+		}
+		if err := validatePlanFulfillmentShape(plan.GroupID, plan.WalletQuotaUsd, planType); err != nil {
+			return err
+		}
+		if err := s.requireAvailableMonthlyPlanGroup(ctx, client, planType, plan.GroupID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *PaymentConfigService) requireAvailableMonthlyPlanGroup(ctx context.Context, client *dbent.Client, planType string, groupID *int64) error {
+	if planType != PlanTypeSubscription {
+		return nil
+	}
+	if client == nil || groupID == nil || *groupID <= 0 {
+		return infraerrors.BadRequest("PLAN_GROUP_UNAVAILABLE", "monthly plan group is unavailable")
+	}
+	exists, err := client.Group.Query().Where(
+		group.IDEQ(*groupID),
+		group.StatusEQ(StatusActive),
+		group.SubscriptionTypeEQ(SubscriptionTypeSubscription),
+		group.DeletedAtIsNil(),
+	).Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("validate monthly plan group: %w", err)
+	}
+	if !exists {
+		return infraerrors.BadRequest("PLAN_GROUP_UNAVAILABLE", "monthly plan group must be active and subscription type")
+	}
+	return nil
 }
 
 func replacePlanGroupIDs(ctx context.Context, tx *dbent.Tx, planID int64, groupIDs []int64) error {

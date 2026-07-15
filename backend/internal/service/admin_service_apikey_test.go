@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/stretchr/testify/require"
@@ -69,8 +70,12 @@ func (s *userRepoStubForGroupUpdate) UpdateConcurrency(context.Context, int64, i
 	panic("unexpected")
 }
 
-func (s *userRepoStubForGroupUpdate) BatchSetConcurrency(context.Context, []int64, int) (int, error) { return 0, nil }
-func (s *userRepoStubForGroupUpdate) BatchAddConcurrency(context.Context, []int64, int) (int, error) { return 0, nil }
+func (s *userRepoStubForGroupUpdate) BatchSetConcurrency(context.Context, []int64, int) (int, error) {
+	return 0, nil
+}
+func (s *userRepoStubForGroupUpdate) BatchAddConcurrency(context.Context, []int64, int) (int, error) {
+	return 0, nil
+}
 func (s *userRepoStubForGroupUpdate) ExistsByEmail(context.Context, string) (bool, error) {
 	panic("unexpected")
 }
@@ -163,10 +168,10 @@ func (s *apiKeyRepoStubForGroupUpdate) ClearGroupIDByGroupID(context.Context, in
 func (s *apiKeyRepoStubForGroupUpdate) CountByGroupID(context.Context, int64) (int64, error) {
 	panic("unexpected")
 }
-func (s *apiKeyRepoStubForGroupUpdate) ListKeysByUserID(context.Context, int64) ([]string, error) {
+func (s *apiKeyRepoStubForGroupUpdate) ListAuthCacheLocatorsByUserID(context.Context, int64) ([]string, error) {
 	panic("unexpected")
 }
-func (s *apiKeyRepoStubForGroupUpdate) ListKeysByGroupID(context.Context, int64) ([]string, error) {
+func (s *apiKeyRepoStubForGroupUpdate) ListAuthCacheLocatorsByGroupID(context.Context, int64) ([]string, error) {
 	panic("unexpected")
 }
 func (s *apiKeyRepoStubForGroupUpdate) IncrementQuotaUsed(context.Context, int64, float64) (float64, error) {
@@ -289,6 +294,23 @@ func TestAdminService_AdminUpdateAPIKeyGroupID_NilGroupID_NoOp(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), got.APIKey.ID)
 	// Update should NOT have been called (updated stays nil)
+	require.Nil(t, repo.updated)
+}
+
+func TestAdminServiceAdminUpdateAPIKeyGroupIDRejectsWalletUniversalPurpose(t *testing.T) {
+	existing := &APIKey{
+		ID:      1,
+		UserID:  42,
+		Key:     "wallet-system-key",
+		Name:    WalletUniversalAPIKeyName,
+		Purpose: APIKeyPurposeWalletUniversal,
+	}
+	repo := &apiKeyRepoStubForGroupUpdate{key: existing}
+	svc := &adminServiceImpl{apiKeyRepo: repo}
+
+	_, err := svc.AdminUpdateAPIKeyGroupID(context.Background(), 1, int64Ptr(3))
+
+	require.ErrorIs(t, err, ErrWalletUniversalKeyImmutable)
 	require.Nil(t, repo.updated)
 }
 
@@ -423,10 +445,10 @@ func TestAdminService_AdminUpdateAPIKeyGroupID_ExclusiveGroup_AddsAllowedGroup(t
 	apiKeyRepo := &apiKeyRepoStubForGroupUpdate{key: existing}
 	groupRepo := &groupRepoStubForGroupUpdate{group: &Group{ID: 10, Name: "Exclusive", Status: StatusActive, IsExclusive: true, SubscriptionType: SubscriptionTypeStandard}}
 	userRepo := &userRepoStubForGroupUpdate{}
-	cache := &authCacheInvalidatorStub{}
-	svc := &adminServiceImpl{apiKeyRepo: apiKeyRepo, groupRepo: groupRepo, userRepo: userRepo, authCacheInvalidator: cache}
+	svc := &adminServiceImpl{apiKeyRepo: apiKeyRepo, groupRepo: groupRepo, userRepo: userRepo}
 
-	got, err := svc.AdminUpdateAPIKeyGroupID(context.Background(), 1, int64Ptr(10))
+	txCtx := dbent.NewTxContext(context.Background(), &dbent.Tx{})
+	got, err := svc.AdminUpdateAPIKeyGroupID(txCtx, 1, int64Ptr(10))
 	require.NoError(t, err)
 	require.NotNil(t, got.APIKey.GroupID)
 	require.Equal(t, int64(10), *got.APIKey.GroupID)
@@ -439,6 +461,23 @@ func TestAdminService_AdminUpdateAPIKeyGroupID_ExclusiveGroup_AddsAllowedGroup(t
 	require.NotNil(t, got.GrantedGroupID)
 	require.Equal(t, int64(10), *got.GrantedGroupID)
 	require.Equal(t, "Exclusive", got.GrantedGroupName)
+}
+
+func TestAdminService_AdminUpdateAPIKeyGroupID_ExclusiveGroupRequiresAtomicTransaction(t *testing.T) {
+	existing := &APIKey{ID: 1, UserID: 42, Key: "sk-test"}
+	apiKeyRepo := &apiKeyRepoStubForGroupUpdate{key: existing}
+	groupRepo := &groupRepoStubForGroupUpdate{group: &Group{
+		ID: 10, Name: "Exclusive", Status: StatusActive, IsExclusive: true, SubscriptionType: SubscriptionTypeStandard,
+	}}
+	userRepo := &userRepoStubForGroupUpdate{}
+	svc := &adminServiceImpl{apiKeyRepo: apiKeyRepo, groupRepo: groupRepo, userRepo: userRepo}
+
+	_, err := svc.AdminUpdateAPIKeyGroupID(context.Background(), 1, int64Ptr(10))
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "atomic exclusive group binding transaction is not configured")
+	require.False(t, userRepo.addGroupCalled)
+	require.Nil(t, apiKeyRepo.updated)
 }
 
 func TestAdminService_AdminUpdateAPIKeyGroupID_NonExclusiveGroup_NoAllowedGroupUpdate(t *testing.T) {
@@ -514,7 +553,8 @@ func TestAdminService_AdminUpdateAPIKeyGroupID_ExclusiveGroup_AllowedGroupAddFai
 	svc := &adminServiceImpl{apiKeyRepo: apiKeyRepo, groupRepo: groupRepo, userRepo: userRepo}
 
 	// 严格模式：AddGroupToAllowedGroups 失败时，整体操作报错
-	_, err := svc.AdminUpdateAPIKeyGroupID(context.Background(), 1, int64Ptr(10))
+	txCtx := dbent.NewTxContext(context.Background(), &dbent.Tx{})
+	_, err := svc.AdminUpdateAPIKeyGroupID(txCtx, 1, int64Ptr(10))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "add group to user allowed groups")
 	require.True(t, userRepo.addGroupCalled)

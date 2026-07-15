@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
+	dbuser "github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/payment/provider"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -45,12 +47,18 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 	if normalized := NormalizeVisibleMethod(req.PaymentType); normalized != "" {
 		req.PaymentType = normalized
 	}
+	if err := validateWeChatResumeOrderBinding(req); err != nil {
+		return nil, err
+	}
 	cfg, err := s.configService.GetPaymentConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get payment config: %w", err)
 	}
 	if !cfg.Enabled {
 		return nil, infraerrors.Forbidden("PAYMENT_DISABLED", "payment system is disabled")
+	}
+	if err := s.configService.validateCreateOrderPaymentMethodEnabled(ctx, cfg, req.PaymentType); err != nil {
+		return nil, err
 	}
 	plan, err := s.validateOrderInput(ctx, req, cfg)
 	if err != nil {
@@ -97,12 +105,38 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 	}
 	resp, err := s.invokeProvider(ctx, order, req, cfg, limitAmount, payAmountStr, payAmount, plan, sel)
 	if err != nil {
-		_, _ = s.entClient.PaymentOrder.UpdateOneID(order.ID).
-			SetStatus(OrderStatusFailed).
-			Save(ctx)
+		s.markPaymentCreateFailed(ctx, order.ID, err)
 		return nil, err
 	}
 	return resp, nil
+}
+
+func (s *PaymentService) markPaymentCreateFailed(ctx context.Context, orderID int64, cause error) {
+	now := time.Now()
+	updated, err := s.entClient.PaymentOrder.Update().
+		Where(
+			paymentorder.IDEQ(orderID),
+			paymentorder.StatusEQ(OrderStatusPending),
+			paymentorder.PaidAtIsNil(),
+		).
+		SetStatus(OrderStatusFailed).
+		SetFailedAt(now).
+		SetFailedReason(paymentCreateFailureReason).
+		Save(ctx)
+	if err != nil {
+		slog.Error("mark payment creation FAILED", "orderID", orderID, "error", err)
+		return
+	}
+	if updated != 1 {
+		return
+	}
+	errorReason := infraerrors.Reason(cause)
+	if errorReason == "" {
+		errorReason = paymentCreateFailureReason
+	}
+	s.writeAuditLog(ctx, orderID, "PAYMENT_CREATE_FAILED", "system", map[string]any{
+		"reason": errorReason,
+	})
 }
 
 func (s *PaymentService) validateOrderInput(ctx context.Context, req CreateOrderRequest, cfg *PaymentConfig) (*dbent.SubscriptionPlan, error) {
@@ -130,6 +164,9 @@ func (s *PaymentService) validateSubOrder(ctx context.Context, req CreateOrderRe
 	if err != nil || !plan.ForSale {
 		return nil, infraerrors.NotFound("PLAN_NOT_AVAILABLE", "plan not found or not for sale")
 	}
+	if plan.PlanType != PlanTypeCredits {
+		return nil, infraerrors.BadRequest("MONTHLY_PLANS_RETIRED", "monthly plans are no longer available for purchase")
+	}
 	// v3 单 group 订阅:校验绑定的 group 仍可用
 	// v4 钱包模式 (plan.GroupID == nil):跳过单 group 校验, group 关联走 subscription_plan_groups 表
 	if plan.GroupID != nil {
@@ -150,13 +187,37 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockPaymentOrderAdmissionUser(ctx, tx.Client(), req.UserID); err != nil {
+		return nil, err
+	}
+	if err := s.reserveSelectedProviderCapacity(ctx, tx, req.PaymentType, payAmount, sel); err != nil {
+		return nil, err
+	}
 	if err := s.checkPendingLimit(ctx, tx, req.UserID, cfg.MaxPendingOrders); err != nil {
 		return nil, err
 	}
-	if err := s.checkDailyLimit(ctx, tx, req.UserID, limitAmount, cfg.DailyLimit); err != nil {
+	dailyLimitAmount := limitAmount
+	if req.OrderType == payment.OrderTypeBalance {
+		dailyLimitAmount = payAmount
+	}
+	if err := s.checkDailyLimit(ctx, tx, req.UserID, dailyLimitAmount, cfg.DailyLimit); err != nil {
 		return nil, err
 	}
-	if err := s.checkPlanPurchaseLimit(ctx, tx, req.UserID, plan); err != nil {
+	var planSnapshot *planFulfillmentSnapshot
+	purchaseLimitPlan := plan
+	if plan != nil {
+		planSnapshot, err = s.capturePlanFulfillmentSnapshot(ctx, tx.Client(), req.UserID, plan.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateCapturedPlanPrice(planSnapshot, orderAmount, limitAmount); err != nil {
+			return nil, err
+		}
+		lockedPlan := *plan
+		lockedPlan.Name = planSnapshot.PlanName
+		purchaseLimitPlan = &lockedPlan
+	}
+	if err := s.checkPlanPurchaseLimit(ctx, tx, req.UserID, purchaseLimitPlan); err != nil {
 		return nil, err
 	}
 	tm := cfg.OrderTimeoutMin
@@ -204,13 +265,19 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 	if providerSnapshot != nil {
 		b.SetProviderSnapshot(providerSnapshot)
 	}
-	if plan != nil {
-		// v3 单 group 订阅 plan.GroupID NOT NULL; v4 钱包模式 plan.GroupID NIL.
-		b.SetPlanID(plan.ID).SetNillableSubscriptionGroupID(plan.GroupID).SetSubscriptionDays(psComputeValidityDays(plan.ValidityDays, plan.ValidityUnit))
+	if planSnapshot != nil {
+		b.SetPlanID(planSnapshot.PlanID).
+			SetNillableSubscriptionGroupID(planSnapshot.GroupID).
+			SetSubscriptionDays(planSnapshot.SubscriptionDays)
 	}
 	order, err := b.Save(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create order: %w", err)
+	}
+	if planSnapshot != nil {
+		if err := persistPlanFulfillmentSnapshot(ctx, tx.Client(), order.ID, req.UserID, planSnapshot); err != nil {
+			return nil, err
+		}
 	}
 	code := fmt.Sprintf("PAY-%d-%d", order.ID, time.Now().UnixNano()%100000)
 	order, err = tx.PaymentOrder.UpdateOneID(order.ID).SetRechargeCode(code).Save(ctx)
@@ -223,10 +290,30 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 	return order, nil
 }
 
+func lockPaymentOrderAdmissionUser(ctx context.Context, client *dbent.Client, userID int64) error {
+	if client == nil || userID <= 0 {
+		return infraerrors.BadRequest("INVALID_USER", "payment order requires a valid user")
+	}
+	query := client.User.Query().Where(dbuser.IDEQ(userID))
+	if client.Driver().Dialect() == dialect.Postgres {
+		query = query.ForUpdate()
+	}
+	if _, err := query.OnlyID(ctx); err != nil {
+		if dbent.IsNotFound(err) {
+			return infraerrors.Conflict("PAYMENT_ADMISSION_USER_CHANGED", "user changed while creating the payment order")
+		}
+		return fmt.Errorf("lock payment order admission user: %w", err)
+	}
+	return nil
+}
+
 func (s *PaymentService) allocateOutTradeNo(ctx context.Context, tx *dbent.Tx) (string, error) {
 	const maxAttempts = 5
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		candidate := generateOutTradeNo()
+		candidate, err := generateOutTradeNo()
+		if err != nil {
+			return "", err
+		}
 		exists, err := tx.PaymentOrder.Query().Where(paymentorder.OutTradeNo(candidate)).Exist(ctx)
 		if err != nil {
 			return "", fmt.Errorf("check out_trade_no uniqueness: %w", err)
@@ -325,6 +412,9 @@ func buildPaymentOrderProviderSnapshot(sel *payment.InstanceSelection, req Creat
 			snapshot["merchant_id"] = merchantID
 		}
 	}
+	if providerKey == payment.TypeStripe {
+		snapshot["currency"] = "CNY"
+	}
 
 	if len(snapshot) == 1 {
 		return nil
@@ -347,23 +437,40 @@ func (s *PaymentService) checkDailyLimit(ctx context.Context, tx *dbent.Tx, user
 		return nil
 	}
 	ts := psStartOfDayUTC(time.Now())
-	orders, err := tx.PaymentOrder.Query().Where(paymentorder.UserIDEQ(userID), paymentorder.StatusIn(OrderStatusPaid, OrderStatusRecharging, OrderStatusCompleted), paymentorder.PaidAtGTE(ts)).All(ctx)
+	orders, err := tx.PaymentOrder.Query().Where(
+		paymentorder.UserIDEQ(userID),
+		paymentorder.Or(
+			paymentorder.StatusEQ(OrderStatusPending),
+			paymentorder.And(
+				paymentorder.StatusIn(OrderStatusPaid, OrderStatusRecharging, OrderStatusCompleted),
+				paymentorder.PaidAtGTE(ts),
+			),
+		),
+	).All(ctx)
 	if err != nil {
-		return fmt.Errorf("query daily usage: %w", err)
+		return fmt.Errorf("query daily usage and reservations: %w", err)
 	}
-	var used float64
-	for _, o := range orders {
-		if o.OrderType == payment.OrderTypeBalance {
-			used += o.PayAmount
-			continue
-		}
-		used += o.Amount
-	}
-	if used+amount > limit {
+	exposure := sumPaymentOrderDailyLimitAmount(orders)
+	if exposure+amount > limit {
 		return infraerrors.TooManyRequests("DAILY_LIMIT_EXCEEDED", "daily_limit_exceeded").
-			WithMetadata(map[string]string{"remaining": fmt.Sprintf("%.2f", math.Max(0, limit-used))})
+			WithMetadata(map[string]string{"remaining": fmt.Sprintf("%.2f", math.Max(0, limit-exposure))})
 	}
 	return nil
+}
+
+func sumPaymentOrderDailyLimitAmount(orders []*dbent.PaymentOrder) float64 {
+	var total float64
+	for _, order := range orders {
+		if order == nil {
+			continue
+		}
+		if order.OrderType == payment.OrderTypeBalance {
+			total += order.PayAmount
+			continue
+		}
+		total += order.Amount
+	}
+	return total
 }
 
 func (s *PaymentService) selectCreateOrderInstance(ctx context.Context, req CreateOrderRequest, cfg *PaymentConfig, payAmount float64) (*payment.InstanceSelection, error) {
@@ -435,7 +542,7 @@ func (s *PaymentService) invokeProvider(ctx context.Context, order *dbent.Paymen
 	}
 	subject := s.buildPaymentSubject(plan, limitAmount, cfg)
 	outTradeNo := order.OutTradeNo
-	canonicalReturnURL, err := CanonicalizeReturnURL(req.ReturnURL, req.SrcHost, req.SrcURL)
+	canonicalReturnURL, err := CanonicalizeReturnURL(req.ReturnURL, req.TrustedFrontendURL)
 	if err != nil {
 		return nil, err
 	}
@@ -455,7 +562,7 @@ func (s *PaymentService) invokeProvider(ctx context.Context, order *dbent.Paymen
 			}
 		}
 	}
-	providerReturnURL, err := buildPaymentReturnURL(canonicalReturnURL, order.ID, outTradeNo, resumeToken)
+	providerReturnURL, err := buildPaymentReturnURL(canonicalReturnURL, order.ID, outTradeNo)
 	if err != nil {
 		return nil, err
 	}
@@ -473,6 +580,9 @@ func (s *PaymentService) invokeProvider(ctx context.Context, order *dbent.Paymen
 			return nil, appErr
 		}
 		return nil, classifyCreatePaymentError(req, sel.ProviderKey, err)
+	}
+	if err := validateStripeClientSecretBinding(sel.ProviderKey, outTradeNo, pr.ClientSecret); err != nil {
+		return nil, err
 	}
 	_, err = s.entClient.PaymentOrder.UpdateOneID(order.ID).
 		SetNillablePaymentTradeNo(psNilIfEmpty(pr.TradeNo)).
@@ -557,11 +667,16 @@ func (s *PaymentService) buildWeChatOAuthRequiredResponse(ctx context.Context, r
 	if err != nil {
 		return nil, err
 	}
-	if err := s.paymentResume().ensureSigningKey(); err != nil {
+	resumeService := s.paymentResume()
+	if err := resumeService.ensureSigningKey(); err != nil {
+		return nil, err
+	}
+	subjectToken, err := resumeService.CreateWeChatPaymentOAuthSubjectToken(req.UserID)
+	if err != nil {
 		return nil, err
 	}
 
-	authorizeURL, err := buildWeChatPaymentOAuthStartURL(req, "snsapi_base")
+	authorizeURL, err := buildWeChatPaymentOAuthStartURL(req, "snsapi_base", subjectToken)
 	if err != nil {
 		return nil, err
 	}
@@ -660,12 +775,29 @@ func buildCreateOrderResponse(order *dbent.PaymentOrder, req CreateOrderRequest,
 	}
 }
 
-func buildWeChatPaymentOAuthStartURL(req CreateOrderRequest, scope string) (string, error) {
+func validateStripeClientSecretBinding(providerKey, outTradeNo, clientSecret string) error {
+	if payment.GetBasePaymentType(providerKey) != payment.TypeStripe {
+		return nil
+	}
+	outTradeNo = strings.TrimSpace(outTradeNo)
+	clientSecret = strings.TrimSpace(clientSecret)
+	if outTradeNo == "" || clientSecret == "" || !strings.HasPrefix(clientSecret, outTradeNo+"_secret_") {
+		return infraerrors.ServiceUnavailable("STRIPE_CLIENT_SECRET_MISMATCH", "stripe payment session binding failed")
+	}
+	return nil
+}
+
+func buildWeChatPaymentOAuthStartURL(req CreateOrderRequest, scope string, subjectToken string) (string, error) {
 	u, err := url.Parse("/api/v1/auth/oauth/wechat/payment/start")
 	if err != nil {
 		return "", fmt.Errorf("build wechat payment oauth start url: %w", err)
 	}
 	q := u.Query()
+	subjectToken = strings.TrimSpace(subjectToken)
+	if subjectToken == "" {
+		return "", infraerrors.ServiceUnavailable("PAYMENT_RESUME_NOT_CONFIGURED", "wechat payment oauth subject binding is unavailable")
+	}
+	q.Set("subject_token", subjectToken)
 	q.Set("payment_type", strings.TrimSpace(req.PaymentType))
 	if req.Amount > 0 {
 		q.Set("amount", strconv.FormatFloat(req.Amount, 'f', -1, 64))
@@ -684,6 +816,29 @@ func buildWeChatPaymentOAuthStartURL(req CreateOrderRequest, scope string) (stri
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func validateWeChatResumeOrderBinding(req CreateOrderRequest) error {
+	source := NormalizePaymentSource(req.PaymentSource)
+	hasOpenID := strings.TrimSpace(req.OpenID) != ""
+	hasBinding := req.ResumeTokenUserID != 0 || strings.TrimSpace(req.ResumeTokenJTI) != ""
+
+	if !hasBinding {
+		if source == PaymentSourceWechatInAppResume && hasOpenID {
+			return infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat in-app payment requires a signed user-bound resume token")
+		}
+		return nil
+	}
+	if source != PaymentSourceWechatInAppResume || !hasOpenID {
+		return infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume binding is inconsistent")
+	}
+	if req.ResumeTokenUserID <= 0 || req.ResumeTokenUserID != req.UserID {
+		return infraerrors.Forbidden("WECHAT_PAYMENT_RESUME_USER_MISMATCH", "wechat payment resume token belongs to a different user")
+	}
+	if !isValidPaymentResumeJTI(req.ResumeTokenJTI) {
+		return infraerrors.BadRequest("INVALID_WECHAT_PAYMENT_RESUME_TOKEN", "wechat payment resume token replay binding is invalid")
+	}
+	return nil
 }
 
 func paymentRedirectPathFromURL(rawURL string) string {
@@ -735,7 +890,7 @@ func (s *PaymentService) GetOrder(ctx context.Context, orderID, userID int64) (*
 	if o.UserID != userID {
 		return nil, infraerrors.Forbidden("FORBIDDEN", "no permission for this order")
 	}
-	return o, nil
+	return s.reconcileVisiblePaymentOrder(ctx, o)
 }
 
 func (s *PaymentService) GetOrderByID(ctx context.Context, orderID int64) (*dbent.PaymentOrder, error) {

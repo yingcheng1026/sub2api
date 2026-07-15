@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -73,6 +74,12 @@ func TestGetOIDCConnectOAuthConfig_ResolvesEndpointsFromIssuerDiscovery(t *testi
 	baseURL = srv.URL
 
 	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{
+				AllowInsecureHTTP: true,
+				AllowPrivateHosts: true,
+			},
+		},
 		OIDC: config.OIDCConnectConfig{
 			Enabled:             true,
 			ProviderName:        "OIDC",
@@ -100,6 +107,47 @@ func TestGetOIDCConnectOAuthConfig_ResolvesEndpointsFromIssuerDiscovery(t *testi
 	require.Equal(t, srv.URL+"/issuer/protocol/openid-connect/token", got.TokenURL)
 	require.Equal(t, srv.URL+"/issuer/protocol/openid-connect/userinfo", got.UserInfoURL)
 	require.Equal(t, srv.URL+"/issuer/protocol/openid-connect/certs", got.JWKSURL)
+}
+
+func TestOIDCResolveProviderMetadataRejectsPrivateDestinationByDefault(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"authorization_endpoint":"https://issuer.example.com/auth"}`))
+	}))
+	defer srv.Close()
+
+	_, err := oidcResolveProviderMetadataWithPolicy(context.Background(), srv.URL, true, false)
+	require.Error(t, err)
+	require.Zero(t, hits, "private destination must be rejected before the HTTP request")
+}
+
+func TestOIDCResolveProviderMetadataRejectsRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"authorization_endpoint":"https://issuer.example.com/auth"}`))
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	_, err := oidcResolveProviderMetadataWithPolicy(context.Background(), source.URL, true, true)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "redirect")
+}
+
+func TestOIDCResolveProviderMetadataRejectsOversizedDocument(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"authorization_endpoint":"` + strings.Repeat("a", oidcDiscoveryMaxResponseBytes) + `"}`))
+	}))
+	defer srv.Close()
+
+	_, err := oidcResolveProviderMetadataWithPolicy(context.Background(), srv.URL, true, true)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "too large")
 }
 
 func TestSettingService_ParseSettings_PreservesOptionalOIDCCompatibilityFlags(t *testing.T) {

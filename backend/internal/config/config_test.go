@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,47 @@ func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	if cfg.JWT.Secret != "" {
 		t.Fatalf("LoadForBootstrap() should keep empty jwt.secret during bootstrap")
 	}
+}
+
+func TestLoadIndependentSecretEncryptionRootsFromEnvironment(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("SECRET_ENCRYPTION_TOTP_SECRET_KEY", strings.Repeat("1", 64))
+	t.Setenv("SECRET_ENCRYPTION_TOTP_CACHE_KEY", strings.Repeat("2", 64))
+	t.Setenv("SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY", strings.Repeat("3", 64))
+	t.Setenv("SECRET_ENCRYPTION_BACKUP_S3_KEY", strings.Repeat("4", 64))
+	t.Setenv("SECRET_ENCRYPTION_CONTENT_MODERATION_KEY", strings.Repeat("5", 64))
+	t.Setenv("SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY", strings.Repeat("6", 64))
+	t.Setenv("SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY", strings.Repeat("7", 64))
+	t.Setenv("SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY", strings.Repeat("8", 64))
+	t.Setenv("SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY", strings.Repeat("9", 64))
+	t.Setenv("SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY", strings.Repeat("b", 64))
+	t.Setenv("SECRET_ENCRYPTION_JWT_HMAC_KEY", strings.Repeat("c", 64))
+	t.Setenv("SECRET_ENCRYPTION_SETTING_SECRET_KEY", strings.Repeat("d", 64))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, strings.Repeat("1", 64), cfg.SecretEncryption.TOTPSecretKey)
+	require.Equal(t, strings.Repeat("2", 64), cfg.SecretEncryption.TOTPCacheKey)
+	require.Equal(t, strings.Repeat("3", 64), cfg.SecretEncryption.AccountCredentialKey)
+	require.Equal(t, strings.Repeat("4", 64), cfg.SecretEncryption.BackupS3Key)
+	require.Equal(t, strings.Repeat("5", 64), cfg.SecretEncryption.ContentModerationKey)
+	require.Equal(t, strings.Repeat("6", 64), cfg.SecretEncryption.ChannelMonitorKey)
+	require.Equal(t, strings.Repeat("7", 64), cfg.SecretEncryption.PaymentProviderKey)
+	require.Equal(t, strings.Repeat("8", 64), cfg.SecretEncryption.ProxyCredentialKey)
+	require.Equal(t, strings.Repeat("9", 64), cfg.SecretEncryption.SchedulerCacheKey)
+	require.Equal(t, strings.Repeat("b", 64), cfg.SecretEncryption.OAuthTokenCacheKey)
+	require.Equal(t, strings.Repeat("c", 64), cfg.SecretEncryption.JWTHMACKey)
+	require.Equal(t, strings.Repeat("d", 64), cfg.SecretEncryption.SettingSecretKey)
+}
+
+func TestLoadDoesNotGenerateLegacyTOTPEncryptionKey(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("TOTP_ENCRYPTION_KEY", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.Totp.EncryptionKey)
+	require.False(t, cfg.Totp.EncryptionKeyConfigured)
 }
 
 func TestNormalizeRunMode(t *testing.T) {
@@ -300,11 +342,14 @@ func TestLoadDefaultSecurityToggles(t *testing.T) {
 	if cfg.Security.URLAllowlist.Enabled {
 		t.Fatalf("URLAllowlist.Enabled = true, want false")
 	}
-	if !cfg.Security.URLAllowlist.AllowInsecureHTTP {
-		t.Fatalf("URLAllowlist.AllowInsecureHTTP = false, want true")
+	if cfg.Security.URLAllowlist.AllowInsecureHTTP {
+		t.Fatalf("URLAllowlist.AllowInsecureHTTP = true, want false")
 	}
-	if !cfg.Security.URLAllowlist.AllowPrivateHosts {
-		t.Fatalf("URLAllowlist.AllowPrivateHosts = false, want true")
+	if cfg.Security.URLAllowlist.AllowPrivateHosts {
+		t.Fatalf("URLAllowlist.AllowPrivateHosts = true, want false")
+	}
+	if cfg.Gateway.MaxLineSize != 8*1024*1024 {
+		t.Fatalf("Gateway.MaxLineSize = %d, want %d", cfg.Gateway.MaxLineSize, 8*1024*1024)
 	}
 	if !cfg.Security.ResponseHeaders.Enabled {
 		t.Fatalf("ResponseHeaders.Enabled = false, want true")
@@ -1218,6 +1263,30 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.max_body_size",
 		},
 		{
+			name: "h2c frame size above protocol limit",
+			mutate: func(c *Config) {
+				c.Server.H2C.Enabled = true
+				c.Server.H2C.MaxReadFrameSize = 1 << 24
+			},
+			wantErr: "server.h2c.max_read_frame_size",
+		},
+		{
+			name: "h2c connection buffer overflows int32",
+			mutate: func(c *Config) {
+				c.Server.H2C.Enabled = true
+				c.Server.H2C.MaxUploadBufferPerConnection = int(math.MaxInt32) + 1
+			},
+			wantErr: "server.h2c.max_upload_buffer_per_connection",
+		},
+		{
+			name: "h2c stream buffer must be non-negative",
+			mutate: func(c *Config) {
+				c.Server.H2C.Enabled = true
+				c.Server.H2C.MaxUploadBufferPerStream = -1
+			},
+			wantErr: "server.h2c.max_upload_buffer_per_stream",
+		},
+		{
 			name:    "gateway max idle conns",
 			mutate:  func(c *Config) { c.Gateway.MaxIdleConns = 0 },
 			wantErr: "gateway.max_idle_conns",
@@ -1331,6 +1400,11 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway max line size negative",
 			mutate:  func(c *Config) { c.Gateway.MaxLineSize = -1 },
 			wantErr: "gateway.max_line_size must be non-negative",
+		},
+		{
+			name:    "gateway max line size above hard ceiling",
+			mutate:  func(c *Config) { c.Gateway.MaxLineSize = 16*1024*1024 + 1 },
+			wantErr: "gateway.max_line_size must be at most",
 		},
 		{
 			name:    "gateway usage record worker count",
@@ -1824,8 +1898,8 @@ func TestLoad_DefaultGatewayUsageRecordConfig(t *testing.T) {
 	if cfg.Gateway.UsageRecord.TaskTimeoutSeconds != 5 {
 		t.Fatalf("task_timeout_seconds = %d, want 5", cfg.Gateway.UsageRecord.TaskTimeoutSeconds)
 	}
-	if cfg.Gateway.UsageRecord.OverflowPolicy != UsageRecordOverflowPolicySample {
-		t.Fatalf("overflow_policy = %s, want %s", cfg.Gateway.UsageRecord.OverflowPolicy, UsageRecordOverflowPolicySample)
+	if cfg.Gateway.UsageRecord.OverflowPolicy != UsageRecordOverflowPolicySync {
+		t.Fatalf("overflow_policy = %s, want %s", cfg.Gateway.UsageRecord.OverflowPolicy, UsageRecordOverflowPolicySync)
 	}
 	if cfg.Gateway.UsageRecord.OverflowSamplePercent != 10 {
 		t.Fatalf("overflow_sample_percent = %d, want 10", cfg.Gateway.UsageRecord.OverflowSamplePercent)

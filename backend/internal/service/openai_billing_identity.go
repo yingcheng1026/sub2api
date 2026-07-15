@@ -83,6 +83,8 @@ type ResolvedOpenAIBillingIdentity struct {
 	Pricing            *PricingQuote
 	TextBillingModel   string
 	TextPricing        *PricingQuote
+	AdmissionAttemptID string
+	AdmissionRef       UsageBillingAdmissionAttemptRef
 }
 
 type OpenAIBillingIdentityInput struct {
@@ -106,6 +108,8 @@ type OpenAIForwardOptions struct {
 	GroupID                 *int64
 	ImagePriceConfig        *ImagePriceConfig
 	RequirePricingPreflight bool
+	RequireBillingAdmission bool
+	UsageBilling            *OpenAIUsageBillingAdmissionInput
 }
 
 func (s *OpenAIGatewayService) resolveForwardBillingIdentity(

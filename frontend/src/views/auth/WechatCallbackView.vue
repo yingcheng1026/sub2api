@@ -337,7 +337,6 @@ import {
   persistOAuthTokenContext,
   resolveWeChatOAuthStartStrict,
   type OAuthAdoptionDecision,
-  type OAuthTokenResponse,
   type PendingOAuthExchangeResponse
 } from '@/api/auth'
 import {
@@ -444,30 +443,6 @@ function parseFragmentParams(): URLSearchParams {
   const raw = typeof window !== 'undefined' ? window.location.hash : ''
   const hash = raw.startsWith('#') ? raw.slice(1) : raw
   return new URLSearchParams(hash)
-}
-
-function readLegacyFragmentLogin(params: URLSearchParams): OAuthTokenResponse | null {
-  const accessToken = params.get('access_token')?.trim() || ''
-  if (!accessToken) {
-    return null
-  }
-
-  const completion: OAuthTokenResponse = {
-    access_token: accessToken
-  }
-  const refreshToken = params.get('refresh_token')?.trim() || ''
-  if (refreshToken) {
-    completion.refresh_token = refreshToken
-  }
-  const expiresIn = Number.parseInt(params.get('expires_in')?.trim() || '', 10)
-  if (Number.isFinite(expiresIn) && expiresIn > 0) {
-    completion.expires_in = expiresIn
-  }
-  const tokenType = params.get('token_type')?.trim() || ''
-  if (tokenType) {
-    completion.token_type = tokenType
-  }
-  return completion
 }
 
 function sanitizeRedirectPath(path: string | null | undefined): string {
@@ -1014,7 +989,6 @@ onMounted(async () => {
   }
 
   const params = parseFragmentParams()
-  const legacyLogin = readLegacyFragmentLogin(params)
   const legacyPendingToken = params.get('pending_oauth_token')?.trim() || ''
   const error = params.get('error')
   const errorDesc = params.get('error_description') || params.get('error_message') || ''
@@ -1023,15 +997,6 @@ onMounted(async () => {
   )
 
   try {
-    if (legacyLogin) {
-      persistOAuthTokenContext(legacyLogin)
-      await authStore.setToken(legacyLogin.access_token)
-      clearAllAffiliateReferralCodes()
-      appStore.showSuccess(t('auth.loginSuccess'))
-      await router.replace(redirect)
-      return
-    }
-
     if (error === 'invitation_required' && legacyPendingToken) {
       legacyPendingOAuthToken.value = legacyPendingToken
       redirectTo.value = redirect

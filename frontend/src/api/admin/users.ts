@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { postFinancialWrite, type FinancialWriteOptions } from './financialIdempotency'
 import type { AdminUser, UpdateUserRequest, PaginatedResponse, ApiKey } from '@/types'
 
 export interface AdminBindAuthIdentityChannelRequest {
@@ -156,14 +157,19 @@ export async function updateBalance(
   id: number,
   balance: number,
   operation: 'set' | 'add' | 'subtract' = 'set',
-  notes?: string
+  notes?: string,
+  options: FinancialWriteOptions = {}
 ): Promise<AdminUser> {
-  const { data } = await apiClient.post<AdminUser>(`/admin/users/${id}/balance`, {
-    balance,
-    operation,
-    notes: notes || ''
-  })
-  return data
+  return postFinancialWrite<AdminUser>(
+    `/admin/users/${id}/balance`,
+    {
+      balance,
+      operation,
+      notes: notes || ''
+    },
+    'admin-users-balance',
+    options
+  )
 }
 
 /**

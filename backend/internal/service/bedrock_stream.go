@@ -241,6 +241,8 @@ type bedrockEventStreamDecoder struct {
 	reader *bufio.Reader
 }
 
+const bedrockEventStreamMaxFrameBytes uint32 = 16 * 1024 * 1024
+
 func newBedrockEventStreamDecoder(r io.Reader) *bedrockEventStreamDecoder {
 	return &bedrockEventStreamDecoder{
 		reader: bufio.NewReaderSize(r, 64*1024),
@@ -267,6 +269,12 @@ func (d *bedrockEventStreamDecoder) Decode() ([]byte, error) {
 
 		if totalLength < 16 { // minimum: 12 prelude + 4 message_crc
 			return nil, fmt.Errorf("invalid eventstream frame: total_length=%d", totalLength)
+		}
+		if totalLength > bedrockEventStreamMaxFrameBytes {
+			return nil, fmt.Errorf("invalid eventstream frame: total_length=%d exceeds limit=%d", totalLength, bedrockEventStreamMaxFrameBytes)
+		}
+		if headersLength > totalLength-16 {
+			return nil, fmt.Errorf("invalid eventstream frame: headers_length=%d exceeds frame content=%d", headersLength, totalLength-16)
 		}
 
 		// 读取 headers + payload + message_crc

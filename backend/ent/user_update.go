@@ -411,6 +411,132 @@ func (_u *UserUpdate) AddRpmLimit(v int) *UserUpdate {
 	return _u
 }
 
+// SetSignupIP sets the "signup_ip" field.
+func (_u *UserUpdate) SetSignupIP(v string) *UserUpdate {
+	_u.mutation.SetSignupIP(v)
+	return _u
+}
+
+// SetNillableSignupIP sets the "signup_ip" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableSignupIP(v *string) *UserUpdate {
+	if v != nil {
+		_u.SetSignupIP(*v)
+	}
+	return _u
+}
+
+// SetSignupIPPrefix sets the "signup_ip_prefix" field.
+func (_u *UserUpdate) SetSignupIPPrefix(v string) *UserUpdate {
+	_u.mutation.SetSignupIPPrefix(v)
+	return _u
+}
+
+// SetNillableSignupIPPrefix sets the "signup_ip_prefix" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableSignupIPPrefix(v *string) *UserUpdate {
+	if v != nil {
+		_u.SetSignupIPPrefix(*v)
+	}
+	return _u
+}
+
+// SetSignupUserAgentHash sets the "signup_user_agent_hash" field.
+func (_u *UserUpdate) SetSignupUserAgentHash(v string) *UserUpdate {
+	_u.mutation.SetSignupUserAgentHash(v)
+	return _u
+}
+
+// SetNillableSignupUserAgentHash sets the "signup_user_agent_hash" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableSignupUserAgentHash(v *string) *UserUpdate {
+	if v != nil {
+		_u.SetSignupUserAgentHash(*v)
+	}
+	return _u
+}
+
+// SetSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field.
+func (_u *UserUpdate) SetSignupDeviceFingerprintHash(v string) *UserUpdate {
+	_u.mutation.SetSignupDeviceFingerprintHash(v)
+	return _u
+}
+
+// SetNillableSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableSignupDeviceFingerprintHash(v *string) *UserUpdate {
+	if v != nil {
+		_u.SetSignupDeviceFingerprintHash(*v)
+	}
+	return _u
+}
+
+// SetTrialBonusEligible sets the "trial_bonus_eligible" field.
+func (_u *UserUpdate) SetTrialBonusEligible(v bool) *UserUpdate {
+	_u.mutation.SetTrialBonusEligible(v)
+	return _u
+}
+
+// SetNillableTrialBonusEligible sets the "trial_bonus_eligible" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableTrialBonusEligible(v *bool) *UserUpdate {
+	if v != nil {
+		_u.SetTrialBonusEligible(*v)
+	}
+	return _u
+}
+
+// SetTrialBonusHoldReason sets the "trial_bonus_hold_reason" field.
+func (_u *UserUpdate) SetTrialBonusHoldReason(v string) *UserUpdate {
+	_u.mutation.SetTrialBonusHoldReason(v)
+	return _u
+}
+
+// SetNillableTrialBonusHoldReason sets the "trial_bonus_hold_reason" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableTrialBonusHoldReason(v *string) *UserUpdate {
+	if v != nil {
+		_u.SetTrialBonusHoldReason(*v)
+	}
+	return _u
+}
+
+// SetTrialBonusRiskScore sets the "trial_bonus_risk_score" field.
+func (_u *UserUpdate) SetTrialBonusRiskScore(v int) *UserUpdate {
+	_u.mutation.ResetTrialBonusRiskScore()
+	_u.mutation.SetTrialBonusRiskScore(v)
+	return _u
+}
+
+// SetNillableTrialBonusRiskScore sets the "trial_bonus_risk_score" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableTrialBonusRiskScore(v *int) *UserUpdate {
+	if v != nil {
+		_u.SetTrialBonusRiskScore(*v)
+	}
+	return _u
+}
+
+// AddTrialBonusRiskScore adds value to the "trial_bonus_risk_score" field.
+func (_u *UserUpdate) AddTrialBonusRiskScore(v int) *UserUpdate {
+	_u.mutation.AddTrialBonusRiskScore(v)
+	return _u
+}
+
+// SetTokenVersion sets the "token_version" field.
+func (_u *UserUpdate) SetTokenVersion(v int64) *UserUpdate {
+	_u.mutation.ResetTokenVersion()
+	_u.mutation.SetTokenVersion(v)
+	return _u
+}
+
+// SetNillableTokenVersion sets the "token_version" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableTokenVersion(v *int64) *UserUpdate {
+	if v != nil {
+		_u.SetTokenVersion(*v)
+	}
+	return _u
+}
+
+// AddTokenVersion adds value to the "token_version" field.
+func (_u *UserUpdate) AddTokenVersion(v int64) *UserUpdate {
+	_u.mutation.AddTokenVersion(v)
+	return _u
+}
+
 // AddAPIKeyIDs adds the "api_keys" edge to the APIKey entity by IDs.
 func (_u *UserUpdate) AddAPIKeyIDs(ids ...int64) *UserUpdate {
 	_u.mutation.AddAPIKeyIDs(ids...)
@@ -958,6 +1084,36 @@ func (_u *UserUpdate) check() error {
 			return &ValidationError{Name: "signup_source", err: fmt.Errorf(`ent: validator failed for field "User.signup_source": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SignupIP(); ok {
+		if err := user.SignupIPValidator(v); err != nil {
+			return &ValidationError{Name: "signup_ip", err: fmt.Errorf(`ent: validator failed for field "User.signup_ip": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.SignupIPPrefix(); ok {
+		if err := user.SignupIPPrefixValidator(v); err != nil {
+			return &ValidationError{Name: "signup_ip_prefix", err: fmt.Errorf(`ent: validator failed for field "User.signup_ip_prefix": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.SignupUserAgentHash(); ok {
+		if err := user.SignupUserAgentHashValidator(v); err != nil {
+			return &ValidationError{Name: "signup_user_agent_hash", err: fmt.Errorf(`ent: validator failed for field "User.signup_user_agent_hash": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.SignupDeviceFingerprintHash(); ok {
+		if err := user.SignupDeviceFingerprintHashValidator(v); err != nil {
+			return &ValidationError{Name: "signup_device_fingerprint_hash", err: fmt.Errorf(`ent: validator failed for field "User.signup_device_fingerprint_hash": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.TrialBonusHoldReason(); ok {
+		if err := user.TrialBonusHoldReasonValidator(v); err != nil {
+			return &ValidationError{Name: "trial_bonus_hold_reason", err: fmt.Errorf(`ent: validator failed for field "User.trial_bonus_hold_reason": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.TokenVersion(); ok {
+		if err := user.TokenVersionValidator(v); err != nil {
+			return &ValidationError{Name: "token_version", err: fmt.Errorf(`ent: validator failed for field "User.token_version": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -1071,6 +1227,36 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedRpmLimit(); ok {
 		_spec.AddField(user.FieldRpmLimit, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.SignupIP(); ok {
+		_spec.SetField(user.FieldSignupIP, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SignupIPPrefix(); ok {
+		_spec.SetField(user.FieldSignupIPPrefix, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SignupUserAgentHash(); ok {
+		_spec.SetField(user.FieldSignupUserAgentHash, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SignupDeviceFingerprintHash(); ok {
+		_spec.SetField(user.FieldSignupDeviceFingerprintHash, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.TrialBonusEligible(); ok {
+		_spec.SetField(user.FieldTrialBonusEligible, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.TrialBonusHoldReason(); ok {
+		_spec.SetField(user.FieldTrialBonusHoldReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.TrialBonusRiskScore(); ok {
+		_spec.SetField(user.FieldTrialBonusRiskScore, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedTrialBonusRiskScore(); ok {
+		_spec.AddField(user.FieldTrialBonusRiskScore, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.TokenVersion(); ok {
+		_spec.SetField(user.FieldTokenVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedTokenVersion(); ok {
+		_spec.AddField(user.FieldTokenVersion, field.TypeInt64, value)
 	}
 	if _u.mutation.APIKeysCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -2060,6 +2246,132 @@ func (_u *UserUpdateOne) AddRpmLimit(v int) *UserUpdateOne {
 	return _u
 }
 
+// SetSignupIP sets the "signup_ip" field.
+func (_u *UserUpdateOne) SetSignupIP(v string) *UserUpdateOne {
+	_u.mutation.SetSignupIP(v)
+	return _u
+}
+
+// SetNillableSignupIP sets the "signup_ip" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableSignupIP(v *string) *UserUpdateOne {
+	if v != nil {
+		_u.SetSignupIP(*v)
+	}
+	return _u
+}
+
+// SetSignupIPPrefix sets the "signup_ip_prefix" field.
+func (_u *UserUpdateOne) SetSignupIPPrefix(v string) *UserUpdateOne {
+	_u.mutation.SetSignupIPPrefix(v)
+	return _u
+}
+
+// SetNillableSignupIPPrefix sets the "signup_ip_prefix" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableSignupIPPrefix(v *string) *UserUpdateOne {
+	if v != nil {
+		_u.SetSignupIPPrefix(*v)
+	}
+	return _u
+}
+
+// SetSignupUserAgentHash sets the "signup_user_agent_hash" field.
+func (_u *UserUpdateOne) SetSignupUserAgentHash(v string) *UserUpdateOne {
+	_u.mutation.SetSignupUserAgentHash(v)
+	return _u
+}
+
+// SetNillableSignupUserAgentHash sets the "signup_user_agent_hash" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableSignupUserAgentHash(v *string) *UserUpdateOne {
+	if v != nil {
+		_u.SetSignupUserAgentHash(*v)
+	}
+	return _u
+}
+
+// SetSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field.
+func (_u *UserUpdateOne) SetSignupDeviceFingerprintHash(v string) *UserUpdateOne {
+	_u.mutation.SetSignupDeviceFingerprintHash(v)
+	return _u
+}
+
+// SetNillableSignupDeviceFingerprintHash sets the "signup_device_fingerprint_hash" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableSignupDeviceFingerprintHash(v *string) *UserUpdateOne {
+	if v != nil {
+		_u.SetSignupDeviceFingerprintHash(*v)
+	}
+	return _u
+}
+
+// SetTrialBonusEligible sets the "trial_bonus_eligible" field.
+func (_u *UserUpdateOne) SetTrialBonusEligible(v bool) *UserUpdateOne {
+	_u.mutation.SetTrialBonusEligible(v)
+	return _u
+}
+
+// SetNillableTrialBonusEligible sets the "trial_bonus_eligible" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTrialBonusEligible(v *bool) *UserUpdateOne {
+	if v != nil {
+		_u.SetTrialBonusEligible(*v)
+	}
+	return _u
+}
+
+// SetTrialBonusHoldReason sets the "trial_bonus_hold_reason" field.
+func (_u *UserUpdateOne) SetTrialBonusHoldReason(v string) *UserUpdateOne {
+	_u.mutation.SetTrialBonusHoldReason(v)
+	return _u
+}
+
+// SetNillableTrialBonusHoldReason sets the "trial_bonus_hold_reason" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTrialBonusHoldReason(v *string) *UserUpdateOne {
+	if v != nil {
+		_u.SetTrialBonusHoldReason(*v)
+	}
+	return _u
+}
+
+// SetTrialBonusRiskScore sets the "trial_bonus_risk_score" field.
+func (_u *UserUpdateOne) SetTrialBonusRiskScore(v int) *UserUpdateOne {
+	_u.mutation.ResetTrialBonusRiskScore()
+	_u.mutation.SetTrialBonusRiskScore(v)
+	return _u
+}
+
+// SetNillableTrialBonusRiskScore sets the "trial_bonus_risk_score" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTrialBonusRiskScore(v *int) *UserUpdateOne {
+	if v != nil {
+		_u.SetTrialBonusRiskScore(*v)
+	}
+	return _u
+}
+
+// AddTrialBonusRiskScore adds value to the "trial_bonus_risk_score" field.
+func (_u *UserUpdateOne) AddTrialBonusRiskScore(v int) *UserUpdateOne {
+	_u.mutation.AddTrialBonusRiskScore(v)
+	return _u
+}
+
+// SetTokenVersion sets the "token_version" field.
+func (_u *UserUpdateOne) SetTokenVersion(v int64) *UserUpdateOne {
+	_u.mutation.ResetTokenVersion()
+	_u.mutation.SetTokenVersion(v)
+	return _u
+}
+
+// SetNillableTokenVersion sets the "token_version" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTokenVersion(v *int64) *UserUpdateOne {
+	if v != nil {
+		_u.SetTokenVersion(*v)
+	}
+	return _u
+}
+
+// AddTokenVersion adds value to the "token_version" field.
+func (_u *UserUpdateOne) AddTokenVersion(v int64) *UserUpdateOne {
+	_u.mutation.AddTokenVersion(v)
+	return _u
+}
+
 // AddAPIKeyIDs adds the "api_keys" edge to the APIKey entity by IDs.
 func (_u *UserUpdateOne) AddAPIKeyIDs(ids ...int64) *UserUpdateOne {
 	_u.mutation.AddAPIKeyIDs(ids...)
@@ -2620,6 +2932,36 @@ func (_u *UserUpdateOne) check() error {
 			return &ValidationError{Name: "signup_source", err: fmt.Errorf(`ent: validator failed for field "User.signup_source": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SignupIP(); ok {
+		if err := user.SignupIPValidator(v); err != nil {
+			return &ValidationError{Name: "signup_ip", err: fmt.Errorf(`ent: validator failed for field "User.signup_ip": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.SignupIPPrefix(); ok {
+		if err := user.SignupIPPrefixValidator(v); err != nil {
+			return &ValidationError{Name: "signup_ip_prefix", err: fmt.Errorf(`ent: validator failed for field "User.signup_ip_prefix": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.SignupUserAgentHash(); ok {
+		if err := user.SignupUserAgentHashValidator(v); err != nil {
+			return &ValidationError{Name: "signup_user_agent_hash", err: fmt.Errorf(`ent: validator failed for field "User.signup_user_agent_hash": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.SignupDeviceFingerprintHash(); ok {
+		if err := user.SignupDeviceFingerprintHashValidator(v); err != nil {
+			return &ValidationError{Name: "signup_device_fingerprint_hash", err: fmt.Errorf(`ent: validator failed for field "User.signup_device_fingerprint_hash": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.TrialBonusHoldReason(); ok {
+		if err := user.TrialBonusHoldReasonValidator(v); err != nil {
+			return &ValidationError{Name: "trial_bonus_hold_reason", err: fmt.Errorf(`ent: validator failed for field "User.trial_bonus_hold_reason": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.TokenVersion(); ok {
+		if err := user.TokenVersionValidator(v); err != nil {
+			return &ValidationError{Name: "token_version", err: fmt.Errorf(`ent: validator failed for field "User.token_version": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -2750,6 +3092,36 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if value, ok := _u.mutation.AddedRpmLimit(); ok {
 		_spec.AddField(user.FieldRpmLimit, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.SignupIP(); ok {
+		_spec.SetField(user.FieldSignupIP, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SignupIPPrefix(); ok {
+		_spec.SetField(user.FieldSignupIPPrefix, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SignupUserAgentHash(); ok {
+		_spec.SetField(user.FieldSignupUserAgentHash, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.SignupDeviceFingerprintHash(); ok {
+		_spec.SetField(user.FieldSignupDeviceFingerprintHash, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.TrialBonusEligible(); ok {
+		_spec.SetField(user.FieldTrialBonusEligible, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.TrialBonusHoldReason(); ok {
+		_spec.SetField(user.FieldTrialBonusHoldReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.TrialBonusRiskScore(); ok {
+		_spec.SetField(user.FieldTrialBonusRiskScore, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedTrialBonusRiskScore(); ok {
+		_spec.AddField(user.FieldTrialBonusRiskScore, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.TokenVersion(); ok {
+		_spec.SetField(user.FieldTokenVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedTokenVersion(); ok {
+		_spec.AddField(user.FieldTokenVersion, field.TypeInt64, value)
 	}
 	if _u.mutation.APIKeysCleared() {
 		edge := &sqlgraph.EdgeSpec{

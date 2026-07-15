@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -13,6 +14,28 @@ type balanceUserRepoStub struct {
 	*userRepoStub
 	updateErr error
 	updated   []*User
+}
+
+func (s *balanceUserRepoStub) AdjustAdminBalance(_ context.Context, id int64, amount float64, operation string) (*User, float64, error) {
+	if s.updateErr != nil {
+		return nil, 0, s.updateErr
+	}
+	user, err := s.GetByID(context.Background(), id)
+	if err != nil {
+		return nil, 0, err
+	}
+	oldBalance := user.Balance
+	switch operation {
+	case "set":
+		user.Balance = amount
+	case "add":
+		user.Balance += amount
+	case "subtract":
+		user.Balance -= amount
+	}
+	clone := *user
+	s.userRepoStub.user = &clone
+	return &clone, clone.Balance - oldBalance, nil
 }
 
 func (s *balanceUserRepoStub) Update(ctx context.Context, user *User) error {
@@ -73,7 +96,8 @@ func TestAdminService_UpdateUserBalance_InvalidatesAuthCache(t *testing.T) {
 		authCacheInvalidator: invalidator,
 	}
 
-	_, err := svc.UpdateUserBalance(context.Background(), 7, 5, "add", "")
+	txCtx := dbent.NewTxContext(context.Background(), &dbent.Tx{})
+	_, err := svc.UpdateUserBalance(txCtx, 7, 5, "add", "")
 	require.NoError(t, err)
 	require.Equal(t, []int64{7}, invalidator.userIDs)
 	require.Len(t, redeemRepo.created, 1)
@@ -90,8 +114,24 @@ func TestAdminService_UpdateUserBalance_NoChangeNoInvalidate(t *testing.T) {
 		authCacheInvalidator: invalidator,
 	}
 
-	_, err := svc.UpdateUserBalance(context.Background(), 7, 10, "set", "")
+	txCtx := dbent.NewTxContext(context.Background(), &dbent.Tx{})
+	_, err := svc.UpdateUserBalance(txCtx, 7, 10, "set", "")
 	require.NoError(t, err)
 	require.Empty(t, invalidator.userIDs)
 	require.Empty(t, redeemRepo.created)
+}
+
+func TestAdminService_UpdateUserAllowedGroups_InvalidatesAuthCache(t *testing.T) {
+	baseRepo := &userRepoStub{user: &User{ID: 7, Status: StatusActive, Role: RoleUser, AllowedGroups: []int64{3}}}
+	repo := &balanceUserRepoStub{userRepoStub: baseRepo}
+	invalidator := &authCacheInvalidatorStub{}
+	svc := &adminServiceImpl{
+		userRepo:             repo,
+		authCacheInvalidator: invalidator,
+	}
+
+	allowedGroups := []int64{3, 22}
+	_, err := svc.UpdateUser(context.Background(), 7, &UpdateUserInput{AllowedGroups: &allowedGroups})
+	require.NoError(t, err)
+	require.Equal(t, []int64{7}, invalidator.userIDs, "VIP grants must invalidate cached wallet authorization immediately")
 }

@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { postFinancialWrite, type FinancialWriteOptions } from './financialIdempotency'
 import type {
   RedeemCode,
   GenerateRedeemCodesRequest,
@@ -60,6 +61,7 @@ export async function getById(id: number): Promise<RedeemCode> {
  * @param value - Value of the code
  * @param groupId - Group ID (required for subscription type)
  * @param validityDays - Validity days (for subscription type)
+ * @param planId - Credits plan ID (required for wallet type)
  * @returns Array of generated redeem codes
  */
 export async function generate(
@@ -67,7 +69,9 @@ export async function generate(
   type: RedeemCodeType,
   value: number,
   groupId?: number | null,
-  validityDays?: number
+  validityDays?: number,
+  planId?: number | null,
+  options: FinancialWriteOptions = {}
 ): Promise<RedeemCode[]> {
   const payload: GenerateRedeemCodesRequest = {
     count,
@@ -83,8 +87,16 @@ export async function generate(
     }
   }
 
-  const { data } = await apiClient.post<RedeemCode[]>('/admin/redeem-codes/generate', payload)
-  return data
+  if (type === 'wallet') {
+    payload.plan_id = planId
+  }
+
+  return postFinancialWrite<RedeemCode[]>(
+    '/admin/redeem-codes/generate',
+    payload,
+    'admin-redeem-generate',
+    options
+  )
 }
 
 /**

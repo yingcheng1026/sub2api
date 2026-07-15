@@ -42,13 +42,14 @@ type UserGroupRateRepository interface {
 	// GetByGroupID 获取指定分组下所有用户的专属配置（rate 与 rpm_override 任一非 NULL 即返回）
 	GetByGroupID(ctx context.Context, groupID int64) ([]UserGroupRateEntry, error)
 
-	// SyncUserGroupRates 同步用户的分组专属倍率；nil 表示清空该分组的 rate_multiplier
+	// SyncUserGroupRates 原子同步用户的分组专属倍率；nil 表示清空该分组的 rate_multiplier。
+	// 若 ctx 携带 Ent 事务，必须加入该事务，供管理员用户策略跨表同成同败。
 	SyncUserGroupRates(ctx context.Context, userID int64, rates map[int64]*float64) error
 
-	// SyncGroupRateMultipliers 批量同步分组的用户专属倍率（替换整组 rate 部分）
+	// SyncGroupRateMultipliers 原子批量同步分组的用户专属倍率（替换整组 rate 部分）
 	SyncGroupRateMultipliers(ctx context.Context, groupID int64, entries []GroupRateMultiplierInput) error
 
-	// SyncGroupRPMOverrides 批量同步分组的用户专属 RPM（替换整组 rpm_override 部分）。
+	// SyncGroupRPMOverrides 原子批量同步分组的用户专属 RPM（替换整组 rpm_override 部分）。
 	// 条目中 RPMOverride 为 nil 时清空对应行的 rpm_override；非 nil 时 upsert。
 	SyncGroupRPMOverrides(ctx context.Context, groupID int64, entries []GroupRPMOverrideInput) error
 

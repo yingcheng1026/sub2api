@@ -29,11 +29,11 @@ func (s *APIKeyService) InvalidateAuthCacheByUserIDReliable(ctx context.Context,
 	if userID <= 0 {
 		return nil
 	}
-	keys, err := s.apiKeyRepo.ListKeysByUserID(ctx, userID)
+	locators, err := s.apiKeyRepo.ListAuthCacheLocatorsByUserID(ctx, userID)
 	if err != nil {
 		return err
 	}
-	return s.deleteAuthCacheByKeysReliable(ctx, keys)
+	return s.deleteAuthCacheByLocatorsReliable(ctx, locators)
 }
 
 // InvalidateAuthCacheByLocatorReliable invalidates one frozen cache locator
@@ -52,27 +52,25 @@ func (s *APIKeyService) InvalidateAuthCacheByGroupID(ctx context.Context, groupI
 	if groupID <= 0 {
 		return
 	}
-	keys, err := s.apiKeyRepo.ListKeysByGroupID(ctx, groupID)
+	locators, err := s.apiKeyRepo.ListAuthCacheLocatorsByGroupID(ctx, groupID)
 	if err != nil {
 		return
 	}
-	s.deleteAuthCacheByKeys(ctx, keys)
+	_ = s.deleteAuthCacheByLocatorsReliable(ctx, locators)
 }
 
-func (s *APIKeyService) deleteAuthCacheByKeys(ctx context.Context, keys []string) {
-	_ = s.deleteAuthCacheByKeysReliable(ctx, keys)
-}
-
-func (s *APIKeyService) deleteAuthCacheByKeysReliable(ctx context.Context, keys []string) error {
-	if len(keys) == 0 {
+func (s *APIKeyService) deleteAuthCacheByLocatorsReliable(ctx context.Context, locators []string) error {
+	if len(locators) == 0 {
 		return nil
 	}
 	var invalidateErrors []error
-	for _, key := range keys {
-		if key == "" {
+	for _, locator := range locators {
+		locator = strings.ToLower(strings.TrimSpace(locator))
+		if !validSHA256(locator) {
+			invalidateErrors = append(invalidateErrors, fmt.Errorf("invalid API key auth cache locator"))
 			continue
 		}
-		if err := s.deleteAuthCacheReliable(ctx, s.authCacheKey(key)); err != nil {
+		if err := s.deleteAuthCacheReliable(ctx, locator); err != nil {
 			invalidateErrors = append(invalidateErrors, err)
 		}
 	}

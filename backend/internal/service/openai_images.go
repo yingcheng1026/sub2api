@@ -779,6 +779,10 @@ func (s *OpenAIGatewayService) ForwardImages(
 			return nil, err
 		}
 	}
+	setOpenAIUsageBillingReservationBody(forwardOptions.Billing.UsageBilling, body)
+	if err := s.prepareOpenAIForwardUsageBilling(ctx, account, billingIdentity, forwardOptions.Billing); err != nil {
+		return nil, err
+	}
 	var result *OpenAIForwardResult
 	var err error
 	switch account.Type {
@@ -1248,7 +1252,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 	seenSSEData := false
 	seenTerminal := false
 	fallbackTooLarge := false
-	var sseData openAISSEDataAccumulator
+	sseData := newOpenAISSEDataAccumulator(fallbackLimit)
 
 	processSSEData := func(dataBytes []byte) {
 		seenSSEData = true
@@ -1267,13 +1271,13 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		imageCounter.AddSSEData(dataBytes)
 	}
 
-	flushSSEEvent := func() {
-		sseData.Flush(processSSEData)
+	flushSSEEvent := func() error {
+		return sseData.Flush(processSSEData)
 	}
 
-	processLine := func(line []byte) {
+	processLine := func(line []byte) error {
 		if len(line) == 0 {
-			return
+			return nil
 		}
 		if firstTokenMs == nil {
 			ms := int(time.Since(startTime).Milliseconds())
@@ -1291,8 +1295,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 
 		trimmedLine := strings.TrimRight(string(line), "\r\n")
 		if _, ok := extractOpenAISSEDataLine(trimmedLine); ok || strings.TrimSpace(trimmedLine) == "" {
-			sseData.AddLine(trimmedLine, processSSEData)
-			return
+			return sseData.AddLine(trimmedLine, processSSEData)
 		}
 		if !seenSSEData && !fallbackTooLarge {
 			fallbackBytes += int64(len(line))
@@ -1303,6 +1306,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 				fallbackBody.Reset()
 			}
 		}
+		return nil
 	}
 
 	finalizeFallbackBody := func() {
@@ -1335,17 +1339,21 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 	if streamInterval <= 0 && keepaliveInterval <= 0 {
 		reader := bufio.NewReader(resp.Body)
 		for {
-			line, err := reader.ReadBytes('\n')
-			processLine(line)
+			line, err := readOpenAISSELineBounded(reader, fallbackLimit)
+			if processErr := processLine(line); processErr != nil {
+				return usage, imageCounter.Count(), firstTokenMs, processErr
+			}
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
-				flushSSEEvent()
+				_ = flushSSEEvent()
 				return usage, imageCounter.Count(), firstTokenMs, err
 			}
 		}
-		flushSSEEvent()
+		if err := flushSSEEvent(); err != nil {
+			return usage, imageCounter.Count(), firstTokenMs, err
+		}
 		finalizeFallbackBody()
 		if err := validateStreamCompletion(); err != nil {
 			return usage, imageCounter.Count(), firstTokenMs, err
@@ -1357,7 +1365,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		line []byte
 		err  error
 	}
-	events := make(chan readEvent, 16)
+	events := make(chan readEvent, 1)
 	done := make(chan struct{})
 	sendEvent := func(ev readEvent) bool {
 		select {
@@ -1373,7 +1381,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		defer close(events)
 		reader := bufio.NewReader(resp.Body)
 		for {
-			line, err := reader.ReadBytes('\n')
+			line, err := readOpenAISSELineBounded(reader, fallbackLimit)
 			if len(line) > 0 {
 				atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 			}
@@ -1415,7 +1423,9 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				flushSSEEvent()
+				if err := flushSSEEvent(); err != nil {
+					return usage, imageCounter.Count(), firstTokenMs, err
+				}
 				finalizeFallbackBody()
 				if err := validateStreamCompletion(); err != nil {
 					return usage, imageCounter.Count(), firstTokenMs, err
@@ -1423,10 +1433,12 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 				return usage, imageCounter.Count(), firstTokenMs, nil
 			}
 			if ev.err != nil {
-				flushSSEEvent()
+				_ = flushSSEEvent()
 				return usage, imageCounter.Count(), firstTokenMs, ev.err
 			}
-			processLine(ev.line)
+			if err := processLine(ev.line); err != nil {
+				return usage, imageCounter.Count(), firstTokenMs, err
+			}
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 			if time.Since(lastRead) < streamInterval {

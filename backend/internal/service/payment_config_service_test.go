@@ -432,6 +432,60 @@ func TestUpdatePaymentConfig_PersistsVisibleMethodRouting(t *testing.T) {
 	}
 }
 
+func TestUpdatePaymentConfig_PartialPatchPreservesUnspecifiedControls(t *testing.T) {
+	maxAmount := "900.00"
+	dailyLimit := "2500.00"
+	repo := &paymentConfigSettingRepoStub{values: map[string]string{
+		SettingMaxRechargeAmount:  maxAmount,
+		SettingDailyRechargeLimit: dailyLimit,
+	}}
+	svc := &PaymentConfigService{settingRepo: repo}
+	helpText := "updated help text"
+
+	err := svc.UpdatePaymentConfig(context.Background(), UpdatePaymentConfigRequest{
+		HelpText: &helpText,
+	})
+	if err != nil {
+		t.Fatalf("UpdatePaymentConfig returned error: %v", err)
+	}
+
+	if got := repo.values[SettingMaxRechargeAmount]; got != maxAmount {
+		t.Fatalf("max amount changed from %q to %q during unrelated patch", maxAmount, got)
+	}
+	if got := repo.values[SettingDailyRechargeLimit]; got != dailyLimit {
+		t.Fatalf("daily limit changed from %q to %q during unrelated patch", dailyLimit, got)
+	}
+	if len(repo.updates) != 1 || repo.updates[SettingHelpText] != helpText {
+		t.Fatalf("partial patch persisted unexpected keys: %#v", repo.updates)
+	}
+}
+
+func TestBuildPaymentConfigUpdates_DistinguishesOmittedFromExplicitClear(t *testing.T) {
+	svc := &PaymentConfigService{}
+	zero := 0.0
+	emptyTypes := []string{}
+
+	updates, err := svc.BuildPaymentConfigUpdates(UpdatePaymentConfigRequest{
+		MaxAmount:    &zero,
+		EnabledTypes: emptyTypes,
+	})
+	if err != nil {
+		t.Fatalf("BuildPaymentConfigUpdates returned error: %v", err)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("updates = %#v, want only two explicitly supplied fields", updates)
+	}
+	if value, ok := updates[SettingMaxRechargeAmount]; !ok || value != "" {
+		t.Fatalf("explicit max amount clear = %q, present=%v", value, ok)
+	}
+	if value, ok := updates[SettingEnabledPaymentTypes]; !ok || value != "" {
+		t.Fatalf("explicit enabled-types clear = %q, present=%v", value, ok)
+	}
+	if _, ok := updates[SettingDailyRechargeLimit]; ok {
+		t.Fatal("omitted daily limit must not be serialized")
+	}
+}
+
 func paymentConfigStrPtr(value string) *string {
 	return &value
 }

@@ -45,8 +45,8 @@ func (ChannelMonitorRequestTemplate) Fields() []ent.Field {
 			Default("").
 			MaxLen(500),
 		// extra_headers: 用户自定义 HTTP 头（如 User-Agent 伪装）。
-		// 运行时 merge 进 adapter 默认 headers，用户值优先；
-		// hop-by-hop 黑名单（Host/Content-Length/...）由 checker 过滤。
+		// 数据库只保存 marker-only 的 domain-bound 加密 envelope；service 解密后
+		// 才会用于运行时 merge。鉴权、hop-by-hop 和客户端自管 header 均禁止覆盖。
 		field.JSON("extra_headers", map[string]string{}).
 			Default(map[string]string{}),
 		// body_override_mode: 'off' | 'merge' | 'replace'
@@ -59,7 +59,8 @@ func (ChannelMonitorRequestTemplate) Fields() []ent.Field {
 			Default("off").
 			MaxLen(10),
 		// body_override: JSON 对象，根据 body_override_mode 使用。
-		// 用 map[string]any 以便前端传任意结构（含嵌套）。
+		// 用 map[string]any 以便前端传任意结构（含嵌套）；非 NULL 数据在库内
+		// 保存为 marker-only 的 domain-bound 加密 envelope。
 		field.JSON("body_override", map[string]any{}).
 			Optional(),
 	}

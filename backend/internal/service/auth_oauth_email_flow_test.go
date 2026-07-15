@@ -63,6 +63,14 @@ func (s *redeemCodeRepoStub) Delete(context.Context, int64) error {
 	panic("unexpected Delete call")
 }
 
+func (s *redeemCodeRepoStub) DeleteIfUnused(context.Context, int64) (bool, error) {
+	panic("unexpected DeleteIfUnused call")
+}
+
+func (s *redeemCodeRepoStub) ExpireIfUnused(context.Context, int64) (bool, error) {
+	panic("unexpected ExpireIfUnused call")
+}
+
 func (s *redeemCodeRepoStub) Use(_ context.Context, id, userID int64) error {
 	for code, redeemCode := range s.codesByCode {
 		if redeemCode.ID != id {

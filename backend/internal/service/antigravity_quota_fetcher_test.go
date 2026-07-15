@@ -482,9 +482,34 @@ func TestExtractValidationURL(t *testing.T) {
 			expected: "https://support.google.com/appeal/123",
 		},
 		{
-			name:     "validation_url takes priority over appeal_url",
-			body:     `{"error":{"details":[{"metadata":{"validation_url":"https://v.com","appeal_url":"https://a.com"}}]}}`,
-			expected: "https://v.com",
+			name:     "trusted validation_url takes priority over trusted appeal_url",
+			body:     `{"error":{"details":[{"metadata":{"validation_url":"https://accounts.google.com/verify","appeal_url":"https://support.google.com/appeal"}}]}}`,
+			expected: "https://accounts.google.com/verify",
+		},
+		{
+			name:     "untrusted validation_url falls through to trusted appeal_url",
+			body:     `{"error":{"details":[{"metadata":{"validation_url":"https://evil.example/verify","appeal_url":"https://support.google.com/appeal"}}]}}`,
+			expected: "https://support.google.com/appeal",
+		},
+		{
+			name:     "rejects unsafe scheme",
+			body:     `{"error":{"details":[{"metadata":{"validation_url":"javascript:alert(1)"}}]}}`,
+			expected: "",
+		},
+		{
+			name:     "rejects lookalike google host",
+			body:     `{"error":{"details":[{"metadata":{"validation_url":"https://accounts.google.com.evil.example/verify"}}]}}`,
+			expected: "",
+		},
+		{
+			name:     "rejects embedded credentials",
+			body:     `{"error":{"details":[{"metadata":{"validation_url":"https://accounts.google.com@evil.example/verify"}}]}}`,
+			expected: "",
+		},
+		{
+			name:     "rejects non-default port",
+			body:     `{"error":{"details":[{"metadata":{"validation_url":"https://accounts.google.com:8443/verify"}}]}}`,
+			expected: "",
 		},
 		{
 			name:     "fallback regex with verify keyword",

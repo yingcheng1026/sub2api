@@ -86,9 +86,8 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	defer localMu.Unlock()
 
 	// 1. 获取分布式锁
-	lockAcquired := false
 	if api.tokenCache != nil {
-		acquired, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
+		acquired, ownershipToken, lockErr := api.tokenCache.AcquireRefreshLock(ctx, cacheKey, api.lockTTL)
 		if lockErr != nil {
 			// Redis 错误，降级为无锁刷新（进程内互斥锁仍生效）
 			slog.Warn("oauth_refresh_lock_failed_degraded",
@@ -100,22 +99,23 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 			// 锁被其他 worker 持有
 			return &OAuthRefreshResult{LockHeld: true}, nil
 		} else {
-			lockAcquired = true
-			defer func() { _ = api.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+			defer func() { _ = api.tokenCache.ReleaseRefreshLock(ctx, cacheKey, ownershipToken) }()
 		}
 	}
 
 	// 2. 从 DB 重读最新 account（锁保护下，确保使用最新的 refresh_token）
+	if api.accountRepo == nil {
+		return nil, fmt.Errorf("read authoritative account before oauth refresh: account repository is nil")
+	}
 	freshAccount, err := api.accountRepo.GetByID(ctx, account.ID)
 	if err != nil {
 		slog.Warn("oauth_refresh_db_reread_failed",
 			"account_id", account.ID,
 			"error", err,
 		)
-		// 降级使用传入的 account
-		freshAccount = account
+		return nil, fmt.Errorf("read authoritative account before oauth refresh: %w", err)
 	} else if freshAccount == nil {
-		freshAccount = account
+		return nil, fmt.Errorf("read authoritative account before oauth refresh: account %d not found", account.ID)
 	}
 
 	// 3. 二次检查是否仍需刷新（另一条路径可能已刷新）
@@ -155,8 +155,6 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 			return nil, fmt.Errorf("oauth refresh succeeded but DB update failed: %w", updateErr)
 		}
 	}
-
-	_ = lockAcquired // suppress unused warning when tokenCache is nil
 
 	return &OAuthRefreshResult{
 		Refreshed:      true,

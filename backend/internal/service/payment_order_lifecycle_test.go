@@ -105,6 +105,14 @@ func (r *paymentOrderLifecycleRedeemRepo) Delete(context.Context, int64) error {
 	panic("unexpected call")
 }
 
+func (r *paymentOrderLifecycleRedeemRepo) DeleteIfUnused(context.Context, int64) (bool, error) {
+	panic("unexpected call")
+}
+
+func (r *paymentOrderLifecycleRedeemRepo) ExpireIfUnused(context.Context, int64) (bool, error) {
+	panic("unexpected call")
+}
+
 func (r *paymentOrderLifecycleRedeemRepo) Use(_ context.Context, id, userID int64) error {
 	for code, redeemCode := range r.codesByCode {
 		if redeemCode.ID != id {
@@ -144,7 +152,7 @@ func (r *paymentOrderLifecycleRedeemRepo) SumPositiveBalanceByUser(context.Conte
 	panic("unexpected call")
 }
 
-func TestVerifyOrderByOutTradeNoBackfillsTradeNoFromPaidQuery(t *testing.T) {
+func TestVerifyOrderByOutTradeNoRecoversLongExpiredOrderAndBackfillsTradeNo(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentOrderLifecycleTestClient(t)
 
@@ -167,7 +175,8 @@ func TestVerifyOrderByOutTradeNoBackfillsTradeNoFromPaidQuery(t *testing.T) {
 		SetPaymentType(payment.TypeAlipay).
 		SetPaymentTradeNo("").
 		SetOrderType(payment.OrderTypeBalance).
-		SetStatus(OrderStatusPending).
+		SetStatus(OrderStatusExpired).
+		SetUpdatedAt(time.Now().Add(-24 * time.Hour)).
 		SetExpiresAt(time.Now().Add(time.Hour)).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
@@ -562,9 +571,107 @@ func TestPaymentOrderQueryReferenceUsesOutTradeNoForOfficialProviders(t *testing
 	}))
 }
 
+func TestCancelCoreCASMissReloadsAuthoritativePaidOrder(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentOrderLifecycleTestClient(t)
+
+	user, err := client.User.Create().
+		SetEmail("cancel-race-paid@example.com").
+		SetPasswordHash("hash").
+		SetUsername("cancel-race-paid-user").
+		Save(ctx)
+	require.NoError(t, err)
+
+	order, err := client.PaymentOrder.Create().
+		SetUserID(user.ID).
+		SetUserEmail(user.Email).
+		SetUserName(user.Username).
+		SetAmount(10).
+		SetPayAmount(10).
+		SetFeeRate(0).
+		SetRechargeCode("CANCEL-RACE-PAID").
+		SetOutTradeNo("sub2_cancel_race_paid").
+		SetPaymentType(payment.TypeAlipay).
+		SetPaymentTradeNo("").
+		SetOrderType(payment.OrderTypeBalance).
+		SetStatus(OrderStatusPending).
+		SetExpiresAt(time.Now().Add(time.Hour)).
+		SetClientIP("127.0.0.1").
+		SetSrcHost("api.example.com").
+		Save(ctx)
+	require.NoError(t, err)
+
+	// cancelCore received this stale PENDING snapshot before a concurrent
+	// webhook completed the order. Clear the local payment type so this test
+	// isolates the compare-and-swap miss path from provider reconciliation.
+	stale := *order
+	stale.PaymentType = ""
+	paidAt := time.Now()
+	_, err = client.PaymentOrder.UpdateOneID(order.ID).
+		SetStatus(OrderStatusCompleted).
+		SetPaidAt(paidAt).
+		SetPaymentTradeNo("pi_paid_during_cancel").
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentService{entClient: client}
+	result, err := svc.cancelCore(ctx, &stale, OrderStatusCancelled, "user:1", "user cancelled order")
+	require.NoError(t, err)
+	require.Equal(t, checkPaidResultAlreadyPaid, result)
+	authoritative, err := client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, err)
+	require.Equal(t, OrderStatusCompleted, authoritative.Status)
+	require.NotEqual(t, checkPaidResultCancelled, result)
+}
+
+func TestCancelCoreCASMissReloadsAuthoritativeCancelledOrder(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentOrderLifecycleTestClient(t)
+
+	user, err := client.User.Create().
+		SetEmail("cancel-race-cancelled@example.com").
+		SetPasswordHash("hash").
+		SetUsername("cancel-race-cancelled-user").
+		Save(ctx)
+	require.NoError(t, err)
+
+	order, err := client.PaymentOrder.Create().
+		SetUserID(user.ID).
+		SetUserEmail(user.Email).
+		SetUserName(user.Username).
+		SetAmount(10).
+		SetPayAmount(10).
+		SetFeeRate(0).
+		SetRechargeCode("CANCEL-RACE-CANCELLED").
+		SetOutTradeNo("sub2_cancel_race_cancelled").
+		SetPaymentType(payment.TypeAlipay).
+		SetPaymentTradeNo("").
+		SetOrderType(payment.OrderTypeBalance).
+		SetStatus(OrderStatusPending).
+		SetExpiresAt(time.Now().Add(time.Hour)).
+		SetClientIP("127.0.0.1").
+		SetSrcHost("api.example.com").
+		Save(ctx)
+	require.NoError(t, err)
+
+	stale := *order
+	stale.PaymentType = ""
+	_, err = client.PaymentOrder.UpdateOneID(order.ID).SetStatus(OrderStatusCancelled).Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentService{entClient: client}
+	result, err := svc.cancelCore(ctx, &stale, OrderStatusCancelled, "user:1", "user cancelled order")
+	require.NoError(t, err)
+	require.Equal(t, checkPaidResultCancelled, result)
+	authoritative, err := client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, err)
+	require.Equal(t, OrderStatusCancelled, authoritative.Status)
+}
+
 func TestExecuteSubscriptionFulfillmentWalletPlanAssignsWalletSubscription(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentOrderLifecycleTestClient(t)
+	createPlanFulfillmentSnapshotTestTable(t, ctx, client)
 
 	user, err := client.User.Create().
 		SetEmail("wallet-order@example.com").
@@ -580,6 +687,7 @@ func TestExecuteSubscriptionFulfillmentWalletPlanAssignsWalletSubscription(t *te
 		SetWalletQuotaUsd(walletQuota).
 		SetValidityDays(30).
 		SetValidityUnit("day").
+		SetPlanType(PlanTypeCredits).
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -598,15 +706,30 @@ func TestExecuteSubscriptionFulfillmentWalletPlanAssignsWalletSubscription(t *te
 		SetPlanID(plan.ID).
 		SetSubscriptionDays(30).
 		SetStatus(OrderStatusPaid).
+		SetPaidAt(time.Now()).
 		SetExpiresAt(time.Now().Add(time.Hour)).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
 		Save(ctx)
 	require.NoError(t, err)
 	require.Nil(t, order.SubscriptionGroupID)
+	require.NoError(t, persistPlanFulfillmentSnapshot(ctx, client, order.ID, user.ID, &planFulfillmentSnapshot{
+		SchemaVersion:    planFulfillmentSnapshotSchemaVersion,
+		PlanID:           plan.ID,
+		PlanType:         PlanTypeCredits,
+		PlanName:         plan.Name,
+		PlanPrice:        plan.Price,
+		SubscriptionDays: 30,
+		WalletQuotaUSD:   &walletQuota,
+		CoveredGroupIDs:  []int64{},
+		CoveredGroups:    []planFulfillmentSnapshotGroup{},
+		LockedRates:      map[string]float64{},
+		CaptureSource:    "unit-test",
+	}))
 
 	subRepo := newSubscriptionUserSubRepoStub()
 	subscriptionSvc := NewSubscriptionService(groupRepoNoop{}, subRepo, nil, nil, nil)
+	subscriptionSvc.SetWalletTopupService(&walletTopupServiceStub{})
 	svc := &PaymentService{
 		entClient:       client,
 		subscriptionSvc: subscriptionSvc,
@@ -625,6 +748,25 @@ func TestExecuteSubscriptionFulfillmentWalletPlanAssignsWalletSubscription(t *te
 	reloaded, err := client.PaymentOrder.Get(ctx, order.ID)
 	require.NoError(t, err)
 	require.Equal(t, OrderStatusCompleted, reloaded.Status)
+}
+
+func createPlanFulfillmentSnapshotTestTable(t *testing.T, ctx context.Context, client *dbent.Client) {
+	t.Helper()
+	_, err := client.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS subscription_plan_fulfillment_snapshots (
+			payment_order_id INTEGER PRIMARY KEY,
+			user_id INTEGER NOT NULL,
+			source_plan_id INTEGER NOT NULL,
+			user_subscription_id INTEGER,
+			snapshot TEXT NOT NULL,
+			grant_starts_at DATETIME,
+			grant_expires_at DATETIME,
+			attached_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	require.NoError(t, err)
 }
 
 func newPaymentOrderLifecycleTestClient(t *testing.T) *dbent.Client {

@@ -72,14 +72,16 @@ func (ChannelMonitor) Fields() []ent.Field {
 			Optional().
 			Nillable(),
 		// extra_headers: 自定义 HTTP 头快照（来自模板 or 用户手填）。
-		// 运行时 merge 进 adapter 默认 headers。
+		// 数据库只保存 marker-only 的 domain-bound 加密 envelope；service 解密后
+		// 才会在运行时 merge 进 adapter 默认 headers。
 		field.JSON("extra_headers", map[string]string{}).
 			Default(map[string]string{}),
 		// body_override_mode: 同 ChannelMonitorRequestTemplate.body_override_mode
 		field.String("body_override_mode").
 			Default("off").
 			MaxLen(10),
-		// body_override: 同 ChannelMonitorRequestTemplate.body_override
+		// body_override: 同 ChannelMonitorRequestTemplate.body_override；非 NULL 值
+		// 在数据库中同样只保存 marker-only 的加密 envelope。
 		field.JSON("body_override", map[string]any{}).
 			Optional(),
 	}

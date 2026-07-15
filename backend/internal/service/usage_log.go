@@ -97,7 +97,11 @@ type UsageLog struct {
 	APIKeyID  int64
 	AccountID int64
 	RequestID string
-	Model     string
+	// UsageBillingAttemptID is an in-memory fencing fact for durable admission
+	// settlement. It is carried inside the outbox envelope, not persisted as a
+	// usage_logs column.
+	UsageBillingAttemptID string `gorm:"-"`
+	Model                 string
 	// RequestedModel is the client-requested model name before channel/account mapping.
 	// Empty should be treated as Model for backward compatibility with historical rows.
 	RequestedModel string

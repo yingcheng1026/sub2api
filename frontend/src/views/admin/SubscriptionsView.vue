@@ -882,7 +882,16 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
+import {
+  clearPendingSubscriptionAssignment,
+  getOrCreatePendingSubscriptionAssignment,
+  isPendingSubscriptionAssignmentStale,
+  readPendingSubscriptionAssignments,
+  shouldRetainPendingSubscriptionAssignment,
+  type PendingSubscriptionAssignment
+} from '@/api/admin/subscriptions'
 import type {
   UserSubscription,
   Group,
@@ -895,6 +904,8 @@ import type { SubscriptionPlan } from '@/types/payment'
 import type { Column } from '@/components/common/types'
 import { formatDateOnly } from '@/utils/format'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
+import { extractApiErrorMessage } from '@/utils/apiError'
+import { getAssignSubscriptionErrorMessage } from './subscriptionErrors'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 import DataTable from '@/components/common/DataTable.vue'
@@ -916,6 +927,7 @@ import {
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const authStore = useAuthStore()
 
 interface GroupOption {
   value: number
@@ -1384,7 +1396,65 @@ const closeAssignModal = () => {
   showUserDropdown.value = false
 }
 
+function getAssignmentSessionStorage(): Storage | undefined {
+  if (typeof window === 'undefined') return undefined
+  try {
+    return window.sessionStorage
+  } catch {
+    return undefined
+  }
+}
+
+function getAssignmentActorID(): number | null {
+  const actorID = Number(authStore.user?.id)
+  return Number.isInteger(actorID) && actorID > 0 ? actorID : null
+}
+
+async function resumePendingSubscriptionAssignments(): Promise<void> {
+  if (submitting.value) return
+  const actorID = getAssignmentActorID()
+  if (!actorID) {
+    appStore.showError(t('admin.subscriptions.pendingAssignmentActorUnavailable'))
+    return
+  }
+  const storage = getAssignmentSessionStorage()
+  const pendingAttempts = readPendingSubscriptionAssignments(actorID, storage)
+  if (pendingAttempts.length === 0) return
+
+  submitting.value = true
+  try {
+    let completedCount = 0
+    for (const pending of pendingAttempts) {
+      if (isPendingSubscriptionAssignmentStale(pending)) {
+        appStore.showError(t('admin.subscriptions.pendingAssignmentReconciliationRequired'))
+        continue
+      }
+      try {
+        await adminAPI.subscriptions.assign(pending.request, {
+          idempotencyKey: pending.idempotencyKey
+        })
+        clearPendingSubscriptionAssignment(pending, actorID, storage)
+        completedCount += 1
+      } catch (error: unknown) {
+        if (!shouldRetainPendingSubscriptionAssignment(error)) {
+          clearPendingSubscriptionAssignment(pending, actorID, storage)
+        }
+        appStore.showError(getAssignSubscriptionErrorMessage(error, t))
+        console.error('Error resuming subscription assignment:', error)
+      }
+    }
+    if (completedCount > 0) {
+      appStore.showSuccess(t('admin.subscriptions.subscriptionAssigned'))
+      await loadSubscriptions()
+    }
+  } finally {
+    submitting.value = false
+  }
+}
+
 const handleAssignSubscription = async () => {
+  if (submitting.value) return
+
   if (!assignForm.user_id) {
     appStore.showError(t('admin.subscriptions.pleaseSelectUser'))
     return
@@ -1410,7 +1480,14 @@ const handleAssignSubscription = async () => {
     return
   }
 
+  const actorID = getAssignmentActorID()
+  if (!actorID) {
+    appStore.showError(t('admin.subscriptions.pendingAssignmentActorUnavailable'))
+    return
+  }
+
   submitting.value = true
+  let pending: PendingSubscriptionAssignment | null = null
   try {
     const payload: AssignSubscriptionRequest = {
       user_id: assignForm.user_id
@@ -1423,24 +1500,24 @@ const handleAssignSubscription = async () => {
       payload.group_id = assignForm.group_id ?? undefined
       payload.validity_days = assignForm.validity_days
     }
-    await adminAPI.subscriptions.assign(payload)
+    const storage = getAssignmentSessionStorage()
+    pending = getOrCreatePendingSubscriptionAssignment(payload, actorID, storage)
+    if (isPendingSubscriptionAssignmentStale(pending)) {
+      appStore.showError(t('admin.subscriptions.pendingAssignmentReconciliationRequired'))
+      return
+    }
+    await adminAPI.subscriptions.assign(payload, {
+      idempotencyKey: pending.idempotencyKey
+    })
+    clearPendingSubscriptionAssignment(pending, actorID, storage)
     appStore.showSuccess(t('admin.subscriptions.subscriptionAssigned'))
     closeAssignModal()
     loadSubscriptions()
-  } catch (error: any) {
-    const data = error.response?.data
-    const conflictReason = data?.metadata?.conflict_reason
-    let msg = t('admin.subscriptions.failedToAssign')
-    if (conflictReason === 'wallet_already_active') {
-      msg = t('admin.subscriptions.errorWalletAlreadyActive')
-    } else if (conflictReason === 'wallet_topup_unsupported') {
-      msg = t('admin.subscriptions.errorWalletTopupUnsupported')
-    } else if (conflictReason === 'validity_days_mismatch' || conflictReason === 'notes_mismatch') {
-      msg = t('admin.subscriptions.errorAssignConflict')
-    } else if (data?.detail || data?.message) {
-      msg = data.detail || data.message
+  } catch (error: unknown) {
+    if (pending && !shouldRetainPendingSubscriptionAssignment(error)) {
+      clearPendingSubscriptionAssignment(pending, actorID, getAssignmentSessionStorage())
     }
-    appStore.showError(msg)
+    appStore.showError(getAssignSubscriptionErrorMessage(error, t))
     console.error('Error assigning subscription:', error)
   } finally {
     submitting.value = false
@@ -1479,8 +1556,8 @@ const handleExtendSubscription = async () => {
     appStore.showSuccess(t('admin.subscriptions.subscriptionAdjusted'))
     closeExtendModal()
     loadSubscriptions()
-  } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.subscriptions.failedToAdjust'))
+  } catch (error: unknown) {
+    appStore.showError(extractApiErrorMessage(error, t('admin.subscriptions.failedToAdjust')))
     console.error('Error adjusting subscription:', error)
   } finally {
     submitting.value = false
@@ -1501,8 +1578,8 @@ const confirmRevoke = async () => {
     showRevokeDialog.value = false
     revokingSubscription.value = null
     loadSubscriptions()
-  } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.subscriptions.failedToRevoke'))
+  } catch (error: unknown) {
+    appStore.showError(extractApiErrorMessage(error, t('admin.subscriptions.failedToRevoke')))
     console.error('Error revoking subscription:', error)
   }
 }
@@ -1522,8 +1599,8 @@ const confirmResetQuota = async () => {
     showResetQuotaConfirm.value = false
     resettingSubscription.value = null
     await loadSubscriptions()
-  } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.subscriptions.failedToResetQuota'))
+  } catch (error: unknown) {
+    appStore.showError(extractApiErrorMessage(error, t('admin.subscriptions.failedToResetQuota')))
     console.error('Error resetting quota:', error)
   } finally {
     resettingQuota.value = false
@@ -1614,6 +1691,7 @@ onMounted(() => {
   loadSubscriptions()
   loadGroups()
   loadSubscriptionPlans()
+  void resumePendingSubscriptionAssignments()
   document.addEventListener('click', handleClickOutside)
 })
 

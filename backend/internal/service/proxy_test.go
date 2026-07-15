@@ -93,3 +93,19 @@ func TestProxyURL_SpecialCharactersRoundTrip(t *testing.T) {
 		t.Fatalf("password mismatch after parse: got=%q want=%q", pass, proxy.Password)
 	}
 }
+
+func TestProxyLogURLNeverContainsCredentials(t *testing.T) {
+	t.Parallel()
+
+	proxy := Proxy{
+		Protocol: "http",
+		Host:     "proxy.example.com",
+		Port:     3128,
+		Username: "log-user",
+		Password: "log-secret",
+	}
+
+	if got, want := proxy.LogURL(), "http://proxy.example.com:3128"; got != want {
+		t.Fatalf("Proxy.LogURL() mismatch: got=%q want=%q", got, want)
+	}
+}

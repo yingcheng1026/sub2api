@@ -24,7 +24,47 @@ const (
 	ContextKeySubscription ContextKey = "subscription"
 	// ContextKeyForcePlatform 强制平台（用于 /antigravity 路由）
 	ContextKeyForcePlatform ContextKey = "force_platform"
+	// ContextKeyWalletModelVisibility is set only for an authenticated, exact
+	// system universal-wallet key on GET /v1/models.
+	ContextKeyWalletModelVisibility ContextKey = "wallet_model_visibility"
 )
+
+// WalletModelVisibility is the authenticated multi-group model-discovery
+// boundary for one universal wallet key. Request routing and billing continue
+// to use the single effective group stored on the API key context.
+type WalletModelVisibility struct {
+	APIKeyID int64
+	Groups   []service.Group
+	Routes   []service.ModelRoute
+}
+
+func setWalletModelVisibility(c *gin.Context, visibility WalletModelVisibility) {
+	if c == nil || visibility.APIKeyID <= 0 || len(visibility.Groups) == 0 || len(visibility.Routes) == 0 {
+		return
+	}
+	visibility.Groups = append([]service.Group(nil), visibility.Groups...)
+	visibility.Routes = append([]service.ModelRoute(nil), visibility.Routes...)
+	c.Set(string(ContextKeyWalletModelVisibility), visibility)
+}
+
+// GetWalletModelVisibilityFromContext returns a defensive copy of the
+// universal-wallet model-list visibility assembled by API-key auth.
+func GetWalletModelVisibilityFromContext(c *gin.Context) (WalletModelVisibility, bool) {
+	if c == nil {
+		return WalletModelVisibility{}, false
+	}
+	value, exists := c.Get(string(ContextKeyWalletModelVisibility))
+	if !exists {
+		return WalletModelVisibility{}, false
+	}
+	visibility, ok := value.(WalletModelVisibility)
+	if !ok || visibility.APIKeyID <= 0 || len(visibility.Groups) == 0 || len(visibility.Routes) == 0 {
+		return WalletModelVisibility{}, false
+	}
+	visibility.Groups = append([]service.Group(nil), visibility.Groups...)
+	visibility.Routes = append([]service.ModelRoute(nil), visibility.Routes...)
+	return visibility, true
+}
 
 // ForcePlatform 返回设置强制平台的中间件
 // 同时设置 request.Context（供 Service 使用）和 gin.Context（供 Handler 快速检查）
@@ -108,6 +148,11 @@ func RequireGroupAssignment(settingService *service.SettingService, writeError G
 		apiKey, ok := GetAPIKeyFromContext(c)
 		if !ok || apiKey.GroupID != nil {
 			c.Next()
+			return
+		}
+		if apiKey.IsWalletUniversal() {
+			writeError(c, http.StatusForbidden, "Wallet universal API key routing was not resolved for this endpoint.")
+			c.Abort()
 			return
 		}
 		// 未分组 Key — 检查系统设置

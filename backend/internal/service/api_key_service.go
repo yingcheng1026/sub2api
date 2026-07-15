@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,13 +21,25 @@ import (
 )
 
 var (
-	ErrAPIKeyNotFound     = infraerrors.NotFound("API_KEY_NOT_FOUND", "api key not found")
-	ErrGroupNotAllowed    = infraerrors.Forbidden("GROUP_NOT_ALLOWED", "user is not allowed to bind this group")
-	ErrAPIKeyExists       = infraerrors.Conflict("API_KEY_EXISTS", "api key already exists")
-	ErrAPIKeyTooShort     = infraerrors.BadRequest("API_KEY_TOO_SHORT", "api key must be at least 16 characters")
-	ErrAPIKeyInvalidChars = infraerrors.BadRequest("API_KEY_INVALID_CHARS", "api key can only contain letters, numbers, underscores, and hyphens")
-	ErrAPIKeyRateLimited  = infraerrors.TooManyRequests("API_KEY_RATE_LIMITED", "too many failed attempts, please try again later")
-	ErrInvalidIPPattern   = infraerrors.BadRequest("INVALID_IP_PATTERN", "invalid IP or CIDR pattern")
+	ErrAPIKeyNotFound              = infraerrors.NotFound("API_KEY_NOT_FOUND", "api key not found")
+	ErrGroupNotAllowed             = infraerrors.Forbidden("GROUP_NOT_ALLOWED", "user is not allowed to bind this group")
+	ErrAPIKeyGroupRequired         = infraerrors.BadRequest("API_KEY_GROUP_REQUIRED", "user-created api keys must select a group")
+	ErrWalletUniversalKeyImmutable = infraerrors.BadRequest("WALLET_KEY_IMMUTABLE", "the system wallet key name and group cannot be changed")
+	ErrWalletUniversalKeyReserved  = infraerrors.BadRequest("WALLET_KEY_NAME_RESERVED", "the system wallet key name is reserved")
+	ErrWalletUniversalKeyDelete    = infraerrors.BadRequest("WALLET_KEY_DELETE_FORBIDDEN", "the system wallet key cannot be deleted; disable or rotate it instead")
+	ErrActiveCreditsWalletRequired = infraerrors.Forbidden("ACTIVE_CREDITS_WALLET_REQUIRED", "an active permanent credits wallet is required")
+	ErrAPIKeyExists                = infraerrors.Conflict("API_KEY_EXISTS", "api key already exists")
+	ErrAPIKeyTooShort              = infraerrors.BadRequest("API_KEY_TOO_SHORT", "api key must be at least 16 characters")
+	ErrAPIKeyInvalidChars          = infraerrors.BadRequest("API_KEY_INVALID_CHARS", "api key can only contain letters, numbers, underscores, and hyphens")
+	ErrAPIKeyCustomKeyDisabled     = infraerrors.BadRequest("API_KEY_CUSTOM_KEY_DISABLED", "custom API keys are disabled; use a generated key")
+	ErrAPIKeyRateLimited           = infraerrors.TooManyRequests("API_KEY_RATE_LIMITED", "too many failed attempts, please try again later")
+	ErrAPIKeyCreateUnavailable     = infraerrors.ServiceUnavailable("API_KEY_CREATE_UNAVAILABLE", "API key creation is temporarily unavailable")
+	ErrAPIKeyLimitReached          = infraerrors.Conflict("API_KEY_LIMIT_REACHED", "active API key limit reached; delete an unused key before creating another")
+	ErrAPIKeyRevealVerification    = infraerrors.Forbidden("API_KEY_REVEAL_VERIFICATION_FAILED", "API key reveal verification failed")
+	ErrAPIKeyRevealUnavailable     = infraerrors.ServiceUnavailable("API_KEY_REVEAL_UNAVAILABLE", "API key reveal verification is temporarily unavailable")
+	ErrAPIKeyUpdateVerification    = infraerrors.Forbidden("API_KEY_UPDATE_VERIFICATION_FAILED", "API key update verification failed")
+	ErrAPIKeyReactivationForbidden = infraerrors.Forbidden("API_KEY_REACTIVATION_FORBIDDEN", "disabled API keys require administrator reactivation")
+	ErrInvalidIPPattern            = infraerrors.BadRequest("INVALID_IP_PATTERN", "invalid IP or CIDR pattern")
 	// ErrAPIKeyExpired        = infraerrors.Forbidden("API_KEY_EXPIRED", "api key has expired")
 	ErrAPIKeyExpired = infraerrors.Forbidden("API_KEY_EXPIRED", "api key 已过期")
 	// ErrAPIKeyQuotaExhausted = infraerrors.TooManyRequests("API_KEY_QUOTA_EXHAUSTED", "api key quota exhausted")
@@ -39,8 +52,13 @@ var (
 )
 
 const (
-	apiKeyMaxErrorsPerHour = 20
-	apiKeyLastUsedMinTouch = 30 * time.Second
+	apiKeyMaxErrorsPerHour    = 20
+	apiKeyMaxCreatesPerHour   = 20
+	apiKeyMaxActivePerUser    = 50
+	APIKeyStepUpPurposeReveal = "reveal"
+	APIKeyStepUpPurposeCreate = "create"
+	APIKeyStepUpPurposeUpdate = "update"
+	apiKeyLastUsedMinTouch    = 30 * time.Second
 	// DB 写失败后的短退避，避免请求路径持续同步重试造成写风暴与高延迟。
 	apiKeyLastUsedFailBackoff = 5 * time.Second
 )
@@ -92,8 +110,8 @@ type APIKeyRepository interface {
 	// UpdateGroupIDByUserAndGroup 将用户下绑定 oldGroupID 的所有 Key 迁移到 newGroupID
 	UpdateGroupIDByUserAndGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (int64, error)
 	CountByGroupID(ctx context.Context, groupID int64) (int64, error)
-	ListKeysByUserID(ctx context.Context, userID int64) ([]string, error)
-	ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error)
+	ListAuthCacheLocatorsByUserID(ctx context.Context, userID int64) ([]string, error)
+	ListAuthCacheLocatorsByGroupID(ctx context.Context, groupID int64) ([]string, error)
 
 	// Quota methods
 	IncrementQuotaUsed(ctx context.Context, id int64, amount float64) (float64, error)
@@ -103,6 +121,43 @@ type APIKeyRepository interface {
 	IncrementRateLimitUsage(ctx context.Context, id int64, cost float64) error
 	ResetRateLimitWindows(ctx context.Context, id int64) error
 	GetRateLimitData(ctx context.Context, id int64) (*APIKeyRateLimitData, error)
+}
+
+// APIKeyProtector provides domain-separated encryption and keyed lookup for
+// customer API keys. It is deliberately separate from TOTP/payment secrets so
+// a compromise or rotation in one domain does not expose another.
+type APIKeyProtector interface {
+	EncryptAPIKey(plaintext, associatedData string) (string, error)
+	DecryptAPIKey(ciphertext, associatedData string) (string, error)
+	LookupLocator(plaintext string) string
+}
+
+// APIKeyPlaintextMigrator is implemented by the production repository. The
+// server invokes it before opening the HTTP listener.
+type APIKeyPlaintextMigrator interface {
+	MigratePlaintextAPIKeysToEncrypted(ctx context.Context) (int, error)
+}
+
+type APIKeyAuthCacheLocatorProvider interface {
+	APIKeyAuthCacheLocator(plaintext string) string
+}
+
+// APIKeyPurposeRepository is the production point lookup used for the unique
+// live wallet-universal key. It intentionally includes disabled keys so an
+// emergency user disable is preserved across wallet top-ups.
+type APIKeyPurposeRepository interface {
+	GetByUserIDAndPurpose(ctx context.Context, userID int64, purpose string) (*APIKey, error)
+}
+
+// APIKeyAuthCacheSecurityValidator verifies the small, permission-sensitive
+// portion of an auth snapshot against the database. Positive cache entries are
+// never trusted when this validator is unavailable or returns an error.
+//
+// This is intentionally separate from APIKeyRepository so test/dedicated
+// repositories that do not support auth caching are not forced to implement a
+// production-only fast path.
+type APIKeyAuthCacheSecurityValidator interface {
+	ValidateAuthCacheSnapshot(ctx context.Context, cacheLocator string, snapshot *APIKeyAuthSnapshot) (bool, error)
 }
 
 // APIKeyRateLimitData holds rate limit usage and window state for an API key.
@@ -142,10 +197,10 @@ func (d *APIKeyRateLimitData) EffectiveUsage7d() float64 {
 // APIKeyQuotaUsageState captures the latest quota fields after an atomic quota update.
 // It is intentionally small so repositories can return it from a single SQL statement.
 type APIKeyQuotaUsageState struct {
-	QuotaUsed float64
-	Quota     float64
-	Key       string
-	Status    string
+	QuotaUsed        float64
+	Quota            float64
+	AuthCacheLocator string
+	Status           string
 }
 
 type WalletModelRouteInfo struct {
@@ -176,6 +231,17 @@ type APIKeyCache interface {
 	SubscribeAuthCacheInvalidation(ctx context.Context, handler func(cacheKey string)) error
 }
 
+// APIKeyStepUpAttemptCache is deliberately separate from the legacy custom-key
+// limiter and scoped per protected action. Redis failure must fail closed.
+type APIKeyStepUpAttemptCache interface {
+	IncrementAPIKeyStepUpAttempt(ctx context.Context, purpose string, userID int64) (int, error)
+	DeleteAPIKeyStepUpAttempts(ctx context.Context, purpose string, userID int64) error
+}
+
+type APIKeyCreateReservationCache interface {
+	ReserveAPIKeyCreate(ctx context.Context, userID int64) (int, error)
+}
+
 // APIKeyAuthCacheInvalidator 提供认证缓存失效能力
 type APIKeyAuthCacheInvalidator interface {
 	InvalidateAuthCacheByKey(ctx context.Context, key string)
@@ -203,11 +269,11 @@ type CreateAPIKeyRequest struct {
 
 // UpdateAPIKeyRequest 更新API Key请求
 type UpdateAPIKeyRequest struct {
-	Name        *string  `json:"name"`
-	GroupID     *int64   `json:"group_id"`
-	Status      *string  `json:"status"`
-	IPWhitelist []string `json:"ip_whitelist"` // IP 白名单（空数组清空）
-	IPBlacklist []string `json:"ip_blacklist"` // IP 黑名单（空数组清空）
+	Name        *string   `json:"name"`
+	GroupID     *int64    `json:"group_id"`
+	Status      *string   `json:"status"`
+	IPWhitelist *[]string `json:"ip_whitelist"` // 省略=不修改，显式 []=清空
+	IPBlacklist *[]string `json:"ip_blacklist"` // 省略=不修改，显式 []=清空
 
 	// Quota fields
 	Quota           *float64   `json:"quota"`       // Quota limit in USD (nil = no change, 0 = unlimited)
@@ -220,6 +286,25 @@ type UpdateAPIKeyRequest struct {
 	RateLimit1d         *float64 `json:"rate_limit_1d"`
 	RateLimit7d         *float64 `json:"rate_limit_7d"`
 	ResetRateLimitUsage *bool    `json:"reset_rate_limit_usage"` // Reset all usage counters to 0
+	StepUpVerified      bool     `json:"-"`                      // Set only after fresh password/TOTP proof
+}
+
+// APIKeyUpdateRequiresStepUp identifies owner mutations that can expand the
+// authority or usable lifetime of an existing key. Name changes and explicit
+// deactivation remain available as containment actions without fresh proof.
+func APIKeyUpdateRequiresStepUp(req UpdateAPIKeyRequest) bool {
+	if req.GroupID != nil || req.IPWhitelist != nil || req.IPBlacklist != nil ||
+		req.Quota != nil || req.ExpiresAt != nil || req.ClearExpiration ||
+		req.RateLimit5h != nil || req.RateLimit1d != nil || req.RateLimit7d != nil {
+		return true
+	}
+	if req.ResetQuota != nil && *req.ResetQuota {
+		return true
+	}
+	if req.ResetRateLimitUsage != nil && *req.ResetRateLimitUsage {
+		return true
+	}
+	return req.Status != nil && *req.Status == StatusAPIKeyActive
 }
 
 // APIKeyService API Key服务
@@ -229,19 +314,21 @@ type RateLimitCacheInvalidator interface {
 }
 
 type APIKeyService struct {
-	apiKeyRepo            APIKeyRepository
-	userRepo              UserRepository
-	groupRepo             GroupRepository
-	userSubRepo           UserSubscriptionRepository
-	userGroupRateRepo     UserGroupRateRepository
-	cache                 APIKeyCache
-	rateLimitCacheInvalid RateLimitCacheInvalidator // optional: invalidate Redis rate limit cache
-	cfg                   *config.Config
-	authCacheL1           *ristretto.Cache
-	authCfg               apiKeyAuthCacheConfig
-	authGroup             singleflight.Group
-	lastUsedTouchL1       sync.Map // keyID -> nextAllowedAt(time.Time)
-	lastUsedTouchSF       singleflight.Group
+	apiKeyRepo                 APIKeyRepository
+	authCacheSecurityValidator APIKeyAuthCacheSecurityValidator
+	authCacheLocatorProvider   APIKeyAuthCacheLocatorProvider
+	userRepo                   UserRepository
+	groupRepo                  GroupRepository
+	userSubRepo                UserSubscriptionRepository
+	userGroupRateRepo          UserGroupRateRepository
+	cache                      APIKeyCache
+	rateLimitCacheInvalid      RateLimitCacheInvalidator // optional: invalidate Redis rate limit cache
+	cfg                        *config.Config
+	authCacheL1                *ristretto.Cache
+	authCfg                    apiKeyAuthCacheConfig
+	authGroup                  singleflight.Group
+	lastUsedTouchL1            sync.Map // keyID -> nextAllowedAt(time.Time)
+	lastUsedTouchSF            singleflight.Group
 }
 
 // NewAPIKeyService 创建API Key服务实例
@@ -254,17 +341,33 @@ func NewAPIKeyService(
 	cache APIKeyCache,
 	cfg *config.Config,
 ) *APIKeyService {
+	authCacheSecurityValidator, _ := apiKeyRepo.(APIKeyAuthCacheSecurityValidator)
+	authCacheLocatorProvider, _ := apiKeyRepo.(APIKeyAuthCacheLocatorProvider)
 	svc := &APIKeyService{
-		apiKeyRepo:        apiKeyRepo,
-		userRepo:          userRepo,
-		groupRepo:         groupRepo,
-		userSubRepo:       userSubRepo,
-		userGroupRateRepo: userGroupRateRepo,
-		cache:             cache,
-		cfg:               cfg,
+		apiKeyRepo:                 apiKeyRepo,
+		authCacheSecurityValidator: authCacheSecurityValidator,
+		authCacheLocatorProvider:   authCacheLocatorProvider,
+		userRepo:                   userRepo,
+		groupRepo:                  groupRepo,
+		userSubRepo:                userSubRepo,
+		userGroupRateRepo:          userGroupRateRepo,
+		cache:                      cache,
+		cfg:                        cfg,
 	}
 	svc.initAuthCache(cfg)
 	return svc
+}
+
+// MigratePlaintextAPIKeysToEncrypted secures historical rows before startup.
+func (s *APIKeyService) MigratePlaintextAPIKeysToEncrypted(ctx context.Context) (int, error) {
+	if s == nil || s.apiKeyRepo == nil {
+		return 0, fmt.Errorf("API key repository is unavailable")
+	}
+	migrator, ok := s.apiKeyRepo.(APIKeyPlaintextMigrator)
+	if !ok {
+		return 0, fmt.Errorf("API key plaintext migration is not configured")
+	}
+	return migrator.MigratePlaintextAPIKeysToEncrypted(ctx)
 }
 
 // SetRateLimitCacheInvalidator sets the optional rate limit cache invalidator.
@@ -361,12 +464,60 @@ func (s *APIKeyService) canUserBindGroup(ctx context.Context, user *User, group 
 	return user.CanBindGroup(group.ID, group.IsExclusive)
 }
 
+func validateWalletUniversalKeyMutation(apiKey *APIKey, req UpdateAPIKeyRequest) error {
+	if apiKey == nil {
+		return nil
+	}
+	if apiKey.IsWalletUniversal() {
+		if !apiKey.HasValidWalletUniversalShape() {
+			return ErrWalletUniversalKeyImmutable
+		}
+		if req.GroupID != nil || (req.Name != nil && *req.Name != WalletUniversalAPIKeyName) {
+			return ErrWalletUniversalKeyImmutable
+		}
+		return nil
+	}
+	if req.Name != nil && IsWalletUniversalKeyName(*req.Name) {
+		return ErrWalletUniversalKeyReserved
+	}
+	return nil
+}
+
 // Create 创建API Key
 func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIKeyRequest) (*APIKey, error) {
+	return s.create(ctx, userID, req, APIKeyPurposeStandard)
+}
+
+func (s *APIKeyService) create(ctx context.Context, userID int64, req CreateAPIKeyRequest, purpose string) (*APIKey, error) {
+	if req.CustomKey != nil && strings.TrimSpace(*req.CustomKey) != "" {
+		return nil, ErrAPIKeyCustomKeyDisabled
+	}
 	// 验证用户存在
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user: %w", err)
+	}
+	if purpose == APIKeyPurposeWalletUniversal {
+		if req.GroupID != nil || !IsWalletUniversalKeyName(req.Name) {
+			return nil, ErrWalletUniversalKeyImmutable
+		}
+	} else {
+		purpose = APIKeyPurposeStandard
+		if IsWalletUniversalKeyName(req.Name) {
+			return nil, ErrWalletUniversalKeyReserved
+		}
+	}
+	if req.GroupID == nil && purpose != APIKeyPurposeWalletUniversal {
+		return nil, ErrAPIKeyGroupRequired
+	}
+	if purpose == APIKeyPurposeStandard {
+		activeCount, err := s.apiKeyRepo.CountByUserID(ctx, userID)
+		if err != nil {
+			return nil, fmt.Errorf("count active api keys: %w", err)
+		}
+		if activeCount >= apiKeyMaxActivePerUser {
+			return nil, ErrAPIKeyLimitReached
+		}
 	}
 
 	// 验证 IP 白名单格式
@@ -395,40 +546,25 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 			return nil, ErrGroupNotAllowed
 		}
 	}
-
-	var key string
-
-	// 判断是否使用自定义Key
-	if req.CustomKey != nil && *req.CustomKey != "" {
-		// 检查限流（仅对自定义key进行限流）
-		if err := s.checkAPIKeyRateLimit(ctx, userID); err != nil {
-			return nil, err
+	if purpose == APIKeyPurposeStandard && s.cache != nil {
+		reservations, ok := s.cache.(APIKeyCreateReservationCache)
+		if !ok {
+			return nil, ErrAPIKeyCreateUnavailable
 		}
-
-		// 验证自定义Key格式
-		if err := s.ValidateCustomKey(*req.CustomKey); err != nil {
-			return nil, err
-		}
-
-		// 检查Key是否已存在
-		exists, err := s.apiKeyRepo.ExistsByKey(ctx, *req.CustomKey)
+		count, err := reservations.ReserveAPIKeyCreate(ctx, userID)
 		if err != nil {
-			return nil, fmt.Errorf("check key exists: %w", err)
+			return nil, ErrAPIKeyCreateUnavailable
 		}
-		if exists {
-			// Key已存在，增加错误计数
-			s.incrementAPIKeyErrorCount(ctx, userID)
-			return nil, ErrAPIKeyExists
+		if count > apiKeyMaxCreatesPerHour {
+			return nil, ErrAPIKeyRateLimited
 		}
+	}
 
-		key = *req.CustomKey
-	} else {
-		// 生成随机API Key
-		var err error
-		key, err = s.GenerateKey()
-		if err != nil {
-			return nil, fmt.Errorf("generate key: %w", err)
-		}
+	// New credentials are always generated with CSPRNG entropy. Existing custom
+	// keys remain valid, but the API no longer accepts user-chosen secrets.
+	key, err := s.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
 	}
 
 	// 创建API Key记录
@@ -438,6 +574,7 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 		KeyHash:     HashAPIKey(key),
 		KeyPrefix:   APIKeyPrefixForStorage(key),
 		Name:        req.Name,
+		Purpose:     purpose,
 		GroupID:     req.GroupID,
 		Status:      StatusActive,
 		IPWhitelist: req.IPWhitelist,
@@ -480,38 +617,53 @@ func (s *APIKeyService) List(ctx context.Context, userID int64, params paginatio
 // 5/14 反转决策（参见 docs/plans/2026-05-14-wallet-single-key-reversal.md）：
 // 钱包激活/topup 走单 key 路径，废弃 B2.2 多 key 改造。
 //
-// 幂等：扫用户名下 active 且 group_id=NULL 且 name == WalletUniversalAPIKeyName
-// 的 key → 复用；否则新建一把。
+// 幂等：按不可变 purpose 查找唯一 live key。disabled key 也会复用，避免
+// wallet top-up 绕过用户的紧急撤权并偷偷创建一把新 key。
 // 返回 (key, created, err)。
 func (s *APIKeyService) EnsureWalletUniversalKey(ctx context.Context, userID int64) (*APIKey, bool, error) {
-	keys, _, err := s.List(ctx, userID, pagination.PaginationParams{
-		Page:      1,
-		PageSize:  500,
-		SortBy:    "created_at",
-		SortOrder: "desc",
-	}, APIKeyListFilters{Status: StatusAPIKeyActive})
-	if err != nil {
+	if err := s.requireActiveCreditsWallet(ctx, userID); err != nil {
 		return nil, false, err
 	}
-	for i := range keys {
-		key := &keys[i]
-		if key.GroupID != nil || !IsWalletUniversalKeyName(key.Name) {
-			continue
-		}
-		if !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() {
-			continue
+	purposeRepo, ok := s.apiKeyRepo.(APIKeyPurposeRepository)
+	if !ok {
+		return nil, false, infraerrors.InternalServer("API_KEY_PURPOSE_REPOSITORY_UNAVAILABLE", "wallet key purpose lookup is not configured")
+	}
+	key, err := purposeRepo.GetByUserIDAndPurpose(ctx, userID, APIKeyPurposeWalletUniversal)
+	if err == nil {
+		if !key.HasValidWalletUniversalShape() {
+			return nil, false, ErrWalletUniversalKeyImmutable
 		}
 		return key, false, nil
 	}
+	if !errors.Is(err, ErrAPIKeyNotFound) {
+		return nil, false, err
+	}
 
-	newKey, err := s.Create(ctx, userID, CreateAPIKeyRequest{
+	newKey, err := s.create(ctx, userID, CreateAPIKeyRequest{
 		Name:    WalletUniversalAPIKeyName,
 		GroupID: nil,
-	})
+	}, APIKeyPurposeWalletUniversal)
 	if err != nil {
 		return nil, false, fmt.Errorf("create wallet universal key: %w", err)
 	}
 	return newKey, true, nil
+}
+
+func (s *APIKeyService) requireActiveCreditsWallet(ctx context.Context, userID int64) error {
+	if s.userSubRepo == nil {
+		return infraerrors.InternalServer("SUBSCRIPTION_REPOSITORY_UNAVAILABLE", "subscription repository is not configured")
+	}
+	wallet, err := s.userSubRepo.GetActiveCreditsWalletByUserID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrSubscriptionNotFound) {
+			return ErrActiveCreditsWalletRequired
+		}
+		return fmt.Errorf("get active credits wallet: %w", err)
+	}
+	if wallet == nil || !wallet.IsActive() || !wallet.IsUniversalWalletMode() {
+		return ErrActiveCreditsWalletRequired
+	}
+	return nil
 }
 
 // EnsureWalletGroupKeys 钱包激活 / 充值时为用户按 groupIDs 建/复用 N 把分组 key。
@@ -582,6 +734,16 @@ func (s *APIKeyService) GetWalletModelRoutes(ctx context.Context, userID int64, 
 	if len(modelRoutes) == 0 {
 		modelRoutes = DefaultModelRoutes()
 	}
+	if s.userRepo == nil {
+		return nil, fmt.Errorf("wallet route user repository is unavailable")
+	}
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get wallet route user: %w", err)
+	}
+	if user == nil {
+		return nil, ErrUserNotFound
+	}
 
 	groups, err := s.groupRepo.ListActive(ctx)
 	if err != nil {
@@ -602,7 +764,7 @@ func (s *APIKeyService) GetWalletModelRoutes(ctx context.Context, userID int64, 
 	out := make([]WalletModelRouteInfo, 0, len(modelRoutes))
 	for _, route := range modelRoutes {
 		group, ok := groupsByName[route.GroupName]
-		if !ok {
+		if !ok || !CanUseWalletGroup(user, &group) {
 			continue
 		}
 		effectiveRate := group.RateMultiplier
@@ -620,30 +782,6 @@ func (s *APIKeyService) GetWalletModelRoutes(ctx context.Context, userID int64, 
 		})
 	}
 	return out, nil
-}
-
-// DefaultChatAPIKey returns the newest usable active key for a user.
-func (s *APIKeyService) DefaultChatAPIKey(ctx context.Context, userID int64) (string, error) {
-	keys, _, err := s.List(ctx, userID, pagination.PaginationParams{
-		Page:      1,
-		PageSize:  10,
-		SortBy:    "created_at",
-		SortOrder: "desc",
-	}, APIKeyListFilters{Status: StatusAPIKeyActive})
-	if err != nil {
-		return "", err
-	}
-	for i := range keys {
-		key := &keys[i]
-		if key.IsExpired() || key.IsQuotaExhausted() {
-			continue
-		}
-		if strings.TrimSpace(key.Key) == "" {
-			continue
-		}
-		return key.Key, nil
-	}
-	return "", ErrAPIKeyNotFound
 }
 
 func (s *APIKeyService) VerifyOwnership(ctx context.Context, userID int64, apiKeyIDs []int64) ([]int64, error) {
@@ -668,6 +806,77 @@ func (s *APIKeyService) GetByID(ctx context.Context, id int64) (*APIKey, error) 
 	return apiKey, nil
 }
 
+// RevealVerificationMode tells the handler which fresh proof is required.
+// TOTP is preferred whenever the user enabled it; otherwise the current
+// password is required.
+func (s *APIKeyService) RevealVerificationMode(ctx context.Context, userID int64) (string, error) {
+	if s == nil || s.userRepo == nil {
+		return "", fmt.Errorf("user repository is unavailable")
+	}
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("get API key owner: %w", err)
+	}
+	if user.TotpEnabled {
+		return "totp", nil
+	}
+	return "password", nil
+}
+
+func (s *APIKeyService) VerifyRevealPassword(ctx context.Context, userID int64, password string) error {
+	return s.VerifyStepUpPassword(ctx, userID, password, APIKeyStepUpPurposeReveal)
+}
+
+func (s *APIKeyService) VerifyStepUpPassword(ctx context.Context, userID int64, password, purpose string) error {
+	if purpose != APIKeyStepUpPurposeReveal && purpose != APIKeyStepUpPurposeCreate && purpose != APIKeyStepUpPurposeUpdate {
+		return ErrAPIKeyRevealUnavailable
+	}
+	if s == nil || s.cache == nil {
+		return ErrAPIKeyRevealUnavailable
+	}
+	stepUpCache, ok := s.cache.(APIKeyStepUpAttemptCache)
+	if !ok {
+		return ErrAPIKeyRevealUnavailable
+	}
+	count, err := stepUpCache.IncrementAPIKeyStepUpAttempt(ctx, purpose, userID)
+	if err != nil {
+		return ErrAPIKeyRevealUnavailable
+	}
+	if count > apiKeyMaxErrorsPerHour {
+		return ErrAPIKeyRateLimited
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.userRepo == nil || strings.TrimSpace(password) == "" {
+		return ErrAPIKeyRevealVerification
+	}
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil || user == nil || !user.CheckPassword(password) {
+		return ErrAPIKeyRevealVerification
+	}
+	if err := stepUpCache.DeleteAPIKeyStepUpAttempts(ctx, purpose, userID); err != nil {
+		return ErrAPIKeyRevealUnavailable
+	}
+	return nil
+}
+
+// Reveal returns one owned API key after the handler has completed fresh
+// password/TOTP verification. Callers must never persist the returned value.
+func (s *APIKeyService) Reveal(ctx context.Context, id, userID int64) (string, error) {
+	apiKey, err := s.apiKeyRepo.GetByID(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("get API key: %w", err)
+	}
+	if apiKey.UserID != userID {
+		return "", ErrInsufficientPerms
+	}
+	if strings.TrimSpace(apiKey.Key) == "" {
+		return "", ErrAPIKeyNotFound
+	}
+	return apiKey.Key, nil
+}
+
 // GetByKey 根据Key字符串获取API Key（用于认证）
 func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, error) {
 	cacheKey := s.authCacheKey(key)
@@ -677,8 +886,19 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
 			if err != nil {
 				return nil, fmt.Errorf("get api key: %w", err)
 			}
-			s.compileAPIKeyIPRules(apiKey)
-			return apiKey, nil
+			valid, validationErr := s.validateCachedAuthSnapshot(ctx, cacheKey, entry.Snapshot)
+			if validationErr != nil {
+				return nil, fmt.Errorf("get api key: %w", validationErr)
+			}
+			if valid {
+				s.compileAPIKeyIPRules(apiKey)
+				return apiKey, nil
+			}
+			// The cached authorization state changed (or this repository cannot
+			// safely validate it). Clear what we can, then reload from the DB.
+			// Redis failures are deliberately ignored here: every future cache hit
+			// is independently validated before it can authorize a request.
+			s.deleteAuthCache(ctx, cacheKey)
 		}
 	}
 
@@ -731,17 +951,26 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 	if apiKey.UserID != userID {
 		return nil, ErrInsufficientPerms
 	}
+	if err := validateWalletUniversalKeyMutation(apiKey, req); err != nil {
+		return nil, err
+	}
+	if req.Status != nil && apiKey.Status == StatusAPIKeyDisabled && *req.Status == StatusAPIKeyActive {
+		return nil, ErrAPIKeyReactivationForbidden
+	}
+	if APIKeyUpdateRequiresStepUp(req) && !req.StepUpVerified {
+		return nil, ErrAPIKeyUpdateVerification
+	}
 
 	// 验证 IP 白名单格式
-	if len(req.IPWhitelist) > 0 {
-		if invalid := ip.ValidateIPPatterns(req.IPWhitelist); len(invalid) > 0 {
+	if req.IPWhitelist != nil && len(*req.IPWhitelist) > 0 {
+		if invalid := ip.ValidateIPPatterns(*req.IPWhitelist); len(invalid) > 0 {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidIPPattern, invalid)
 		}
 	}
 
 	// 验证 IP 黑名单格式
-	if len(req.IPBlacklist) > 0 {
-		if invalid := ip.ValidateIPPatterns(req.IPBlacklist); len(invalid) > 0 {
+	if req.IPBlacklist != nil && len(*req.IPBlacklist) > 0 {
+		if invalid := ip.ValidateIPPatterns(*req.IPBlacklist); len(invalid) > 0 {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidIPPattern, invalid)
 		}
 	}
@@ -807,9 +1036,14 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 		}
 	}
 
-	// 更新 IP 限制（空数组会清空设置）
-	apiKey.IPWhitelist = req.IPWhitelist
-	apiKey.IPBlacklist = req.IPBlacklist
+	// Omitted policies retain their current security boundary. Only an explicit
+	// JSON array updates the field; an explicit empty array clears it.
+	if req.IPWhitelist != nil {
+		apiKey.IPWhitelist = append([]string(nil), (*req.IPWhitelist)...)
+	}
+	if req.IPBlacklist != nil {
+		apiKey.IPBlacklist = append([]string(nil), (*req.IPBlacklist)...)
+	}
 
 	// Update rate limit configuration
 	if req.RateLimit5h != nil {
@@ -848,21 +1082,24 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 
 // Delete 删除API Key
 func (s *APIKeyService) Delete(ctx context.Context, id int64, userID int64) error {
-	key, ownerID, err := s.apiKeyRepo.GetKeyAndOwnerID(ctx, id)
+	apiKey, err := s.apiKeyRepo.GetByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("get api key: %w", err)
 	}
 
 	// 验证当前用户是否为该 API Key 的所有者
-	if ownerID != userID {
+	if apiKey.UserID != userID {
 		return ErrInsufficientPerms
+	}
+	if apiKey.IsWalletUniversal() {
+		return ErrWalletUniversalKeyDelete
 	}
 
 	// 清除Redis缓存（使用 userID 而非 apiKey.UserID）
 	if s.cache != nil {
 		_ = s.cache.DeleteCreateAttemptCount(ctx, userID)
 	}
-	s.InvalidateAuthCacheByKey(ctx, key)
+	s.InvalidateAuthCacheByKey(ctx, apiKey.Key)
 
 	if err := s.apiKeyRepo.Delete(ctx, id); err != nil {
 		return fmt.Errorf("delete api key: %w", err)
@@ -1050,8 +1287,10 @@ func (s *APIKeyService) UpdateQuotaUsed(ctx context.Context, apiKeyID int64, cos
 		if err != nil {
 			return fmt.Errorf("increment quota used: %w", err)
 		}
-		if state != nil && state.Status == StatusAPIKeyQuotaExhausted && strings.TrimSpace(state.Key) != "" {
-			s.InvalidateAuthCacheByKey(ctx, state.Key)
+		if state != nil && state.Status == StatusAPIKeyQuotaExhausted && strings.TrimSpace(state.AuthCacheLocator) != "" {
+			if err := s.InvalidateAuthCacheByLocatorReliable(ctx, state.AuthCacheLocator); err != nil {
+				return fmt.Errorf("invalidate exhausted API key authorization: %w", err)
+			}
 		}
 		return nil
 	}

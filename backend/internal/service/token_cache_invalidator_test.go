@@ -29,11 +29,11 @@ func (s *geminiTokenCacheStub) DeleteAccessToken(ctx context.Context, cacheKey s
 	return s.deleteErr
 }
 
-func (s *geminiTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, error) {
-	return true, nil
+func (s *geminiTokenCacheStub) AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, string, error) {
+	return true, "invalidator-owner", nil
 }
 
-func (s *geminiTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string) error {
+func (s *geminiTokenCacheStub) ReleaseRefreshLock(ctx context.Context, cacheKey string, ownershipToken string) error {
 	return nil
 }
 
@@ -70,8 +70,8 @@ func TestCompositeTokenCacheInvalidator_GeminiWithoutProjectID(t *testing.T) {
 
 	err := invalidator.InvalidateToken(context.Background(), account)
 	require.NoError(t, err)
-	// 没有 project_id 时，两个 key 相同，去重后只删除一个
-	require.Equal(t, []string{"gemini:account:10"}, cache.deletedKeys)
+	// 删除当前凭据代际键，并兼容清理升级前的无代际键。
+	require.Equal(t, []string{GeminiTokenCacheKey(account), "gemini:account:10"}, cache.deletedKeys)
 }
 
 func TestCompositeTokenCacheInvalidator_Antigravity(t *testing.T) {
@@ -106,8 +106,8 @@ func TestCompositeTokenCacheInvalidator_AntigravityWithoutProjectID(t *testing.T
 
 	err := invalidator.InvalidateToken(context.Background(), account)
 	require.NoError(t, err)
-	// 没有 project_id 时，两个 key 相同，去重后只删除一个
-	require.Equal(t, []string{"ag:account:99"}, cache.deletedKeys)
+	// 删除当前凭据代际键，并兼容清理升级前的无代际键。
+	require.Equal(t, []string{AntigravityTokenCacheKey(account), "ag:account:99"}, cache.deletedKeys)
 }
 
 func TestCompositeTokenCacheInvalidator_OpenAI(t *testing.T) {
@@ -124,7 +124,7 @@ func TestCompositeTokenCacheInvalidator_OpenAI(t *testing.T) {
 
 	err := invalidator.InvalidateToken(context.Background(), account)
 	require.NoError(t, err)
-	require.Equal(t, []string{"openai:account:500"}, cache.deletedKeys)
+	require.Equal(t, []string{OpenAITokenCacheKey(account), "openai:account:500"}, cache.deletedKeys)
 }
 
 func TestCompositeTokenCacheInvalidator_Claude(t *testing.T) {
@@ -141,7 +141,7 @@ func TestCompositeTokenCacheInvalidator_Claude(t *testing.T) {
 
 	err := invalidator.InvalidateToken(context.Background(), account)
 	require.NoError(t, err)
-	require.Equal(t, []string{"claude:account:600"}, cache.deletedKeys)
+	require.Equal(t, []string{ClaudeTokenCacheKey(account), "claude:account:600"}, cache.deletedKeys)
 }
 
 func TestCompositeTokenCacheInvalidator_SkipNonOAuth(t *testing.T) {
@@ -272,10 +272,72 @@ func TestCompositeTokenCacheInvalidator_DeleteError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 新行为：删除失败只记录日志，不返回错误
-			// 这是因为缓存失效失败不应影响主业务流程
 			err := invalidator.InvalidateToken(context.Background(), tt.account)
-			require.NoError(t, err)
+			require.ErrorIs(t, err, expectedErr)
+		})
+	}
+}
+
+func TestCompositeTokenCacheInvalidator_AttemptsEveryKeyWhenDeleteFails(t *testing.T) {
+	expectedErr := errors.New("redis connection failed")
+	tests := []struct {
+		name     string
+		account  *Account
+		expected func(*Account) []string
+	}{
+		{
+			name: "gemini",
+			account: &Account{
+				ID:       42,
+				Platform: PlatformGemini,
+				Type:     AccountTypeOAuth,
+				Credentials: map[string]any{
+					"project_id":    "project-42",
+					"access_token":  "new-access-token",
+					"refresh_token": "new-refresh-token",
+				},
+			},
+			expected: func(account *Account) []string {
+				return []string{
+					GeminiTokenCacheKey(account),
+					credentialBoundOAuthTokenCacheKey("gemini:account:42", account),
+					"gemini:project-42",
+					"gemini:account:42",
+				}
+			},
+		},
+		{
+			name: "antigravity",
+			account: &Account{
+				ID:       43,
+				Platform: PlatformAntigravity,
+				Type:     AccountTypeOAuth,
+				Credentials: map[string]any{
+					"project_id":    "project-43",
+					"access_token":  "new-ag-access-token",
+					"refresh_token": "new-ag-refresh-token",
+				},
+			},
+			expected: func(account *Account) []string {
+				return []string{
+					AntigravityTokenCacheKey(account),
+					credentialBoundOAuthTokenCacheKey("ag:account:43", account),
+					"ag:project-43",
+					"ag:account:43",
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &geminiTokenCacheStub{deleteErr: expectedErr}
+			invalidator := NewCompositeTokenCacheInvalidator(cache)
+
+			err := invalidator.InvalidateToken(context.Background(), tt.account)
+
+			require.ErrorIs(t, err, expectedErr)
+			require.Equal(t, tt.expected(tt.account), cache.deletedKeys)
 		})
 	}
 }
@@ -398,6 +460,16 @@ func TestAccount_GetCredentialAsInt64_NilAccount(t *testing.T) {
 
 // ========== CheckTokenVersion 测试 ==========
 
+type tokenVersionAccountRepoStub struct {
+	mockAccountRepoForGemini
+	latest *Account
+	err    error
+}
+
+func (r *tokenVersionAccountRepoStub) GetByID(context.Context, int64) (*Account, error) {
+	return r.latest, r.err
+}
+
 func TestCheckTokenVersion(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -405,12 +477,14 @@ func TestCheckTokenVersion(t *testing.T) {
 		latestAccount *Account
 		repoErr       error
 		expectedStale bool
+		wantErr       bool
 	}{
 		{
 			name:          "nil_account",
 			account:       nil,
 			latestAccount: nil,
 			expectedStale: false,
+			wantErr:       true,
 		},
 		{
 			name: "no_version_in_account_but_db_has_version",
@@ -449,6 +523,36 @@ func TestCheckTokenVersion(t *testing.T) {
 			expectedStale: false,
 		},
 		{
+			name: "same_version_but_token_material_changed",
+			account: &Account{
+				ID: 1,
+				Credentials: map[string]any{
+					"_token_version": int64(100),
+					"access_token":   "old-token",
+				},
+			},
+			latestAccount: &Account{
+				ID: 1,
+				Credentials: map[string]any{
+					"_token_version": int64(100),
+					"access_token":   "new-token",
+				},
+			},
+			expectedStale: true,
+		},
+		{
+			name: "legacy_zero_versions_but_token_material_changed",
+			account: &Account{
+				ID:          1,
+				Credentials: map[string]any{"access_token": "legacy-old-token"},
+			},
+			latestAccount: &Account{
+				ID:          1,
+				Credentials: map[string]any{"access_token": "legacy-new-token"},
+			},
+			expectedStale: true,
+		},
+		{
 			name: "current_version_newer",
 			account: &Account{
 				ID:          1,
@@ -480,7 +584,8 @@ func TestCheckTokenVersion(t *testing.T) {
 			},
 			latestAccount: nil,
 			repoErr:       errors.New("db error"),
-			expectedStale: false, // 查询失败，默认允许缓存
+			expectedStale: false,
+			wantErr:       true,
 		},
 		{
 			name: "repo_returns_nil",
@@ -490,49 +595,23 @@ func TestCheckTokenVersion(t *testing.T) {
 			},
 			latestAccount: nil,
 			repoErr:       nil,
-			expectedStale: false, // 查询返回 nil，默认允许缓存
+			expectedStale: false,
+			wantErr:       true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 由于 CheckTokenVersion 接受 AccountRepository 接口，而创建完整的 mock 很繁琐
-			// 这里我们直接测试函数的核心逻辑来验证行为
-
-			if tt.name == "nil_account" {
-				_, isStale := CheckTokenVersion(context.Background(), nil, nil)
-				require.Equal(t, tt.expectedStale, isStale)
-				return
-			}
-
-			// 模拟 CheckTokenVersion 的核心逻辑
-			account := tt.account
-			currentVersion := account.GetCredentialAsInt64("_token_version")
-
-			// 模拟 repo 查询
-			latestAccount := tt.latestAccount
-			if tt.repoErr != nil || latestAccount == nil {
-				require.Equal(t, tt.expectedStale, false)
-				return
-			}
-
-			latestVersion := latestAccount.GetCredentialAsInt64("_token_version")
-
-			// 情况1: 当前 account 没有版本号，但 DB 中已有版本号
-			if currentVersion == 0 && latestVersion > 0 {
-				require.Equal(t, tt.expectedStale, true)
-				return
-			}
-
-			// 情况2: 两边都没有版本号
-			if currentVersion == 0 && latestVersion == 0 {
-				require.Equal(t, tt.expectedStale, false)
-				return
-			}
-
-			// 情况3: 比较版本号
-			isStale := latestVersion > currentVersion
+			repo := &tokenVersionAccountRepoStub{latest: tt.latestAccount, err: tt.repoErr}
+			latest, isStale, err := CheckTokenVersion(context.Background(), tt.account, repo)
 			require.Equal(t, tt.expectedStale, isStale)
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Nil(t, latest)
+				return
+			}
+			require.NoError(t, err)
+			require.Same(t, tt.latestAccount, latest)
 		})
 	}
 }
@@ -542,6 +621,8 @@ func TestCheckTokenVersion_NilRepo(t *testing.T) {
 		ID:          1,
 		Credentials: map[string]any{"_token_version": int64(100)},
 	}
-	_, isStale := CheckTokenVersion(context.Background(), account, nil)
-	require.False(t, isStale) // nil repo，默认允许缓存
+	latest, isStale, err := CheckTokenVersion(context.Background(), account, nil)
+	require.Error(t, err)
+	require.Nil(t, latest)
+	require.False(t, isStale)
 }

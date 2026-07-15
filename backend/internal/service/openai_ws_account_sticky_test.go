@@ -9,6 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type scopedPreviousResponseAccountRepo struct {
+	stubOpenAIAccountRepo
+	accountsByGroup map[int64][]Account
+}
+
+func (r scopedPreviousResponseAccountRepo) ListSchedulableByGroupIDAndPlatform(_ context.Context, groupID int64, platform string) ([]Account, error) {
+	var result []Account
+	for _, account := range r.accountsByGroup[groupID] {
+		if account.Platform == platform && account.IsSchedulable() {
+			result = append(result, account)
+		}
+	}
+	return result, nil
+}
+
 func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_Hit(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(23)
@@ -46,6 +61,49 @@ func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_Hit(t *testing.T
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
+}
+
+func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_RejectsAccountOutsideGroup(t *testing.T) {
+	ctx := context.Background()
+	victimGroupID := int64(23)
+	attackerGroupID := int64(24)
+	account := Account{
+		ID:          29,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Extra: map[string]any{
+			"openai_apikey_responses_websockets_v2_enabled": true,
+		},
+	}
+	cache := &stubGatewayCache{}
+	store := NewOpenAIWSStateStore(cache)
+	repo := scopedPreviousResponseAccountRepo{
+		stubOpenAIAccountRepo: stubOpenAIAccountRepo{accounts: []Account{account}},
+		accountsByGroup: map[int64][]Account{
+			victimGroupID:   {account},
+			attackerGroupID: {},
+		},
+	}
+	svc := &OpenAIGatewayService{
+		accountRepo:        repo,
+		cache:              cache,
+		cfg:                newOpenAIWSV2TestConfig(),
+		concurrencyService: NewConcurrencyService(stubConcurrencyCache{}),
+		openaiWSStateStore: store,
+	}
+
+	// Simulate a corrupted or stale scoped binding pointing at another group's account.
+	require.NoError(t, store.BindResponseAccount(ctx, attackerGroupID, "resp_cross_group", account.ID, time.Hour))
+	selection, err := svc.SelectAccountByPreviousResponseID(ctx, &attackerGroupID, "resp_cross_group", "gpt-5.1", nil, false)
+	require.NoError(t, err)
+	require.Nil(t, selection)
+
+	boundAccountID, err := store.GetResponseAccount(ctx, attackerGroupID, "resp_cross_group")
+	require.NoError(t, err)
+	require.Zero(t, boundAccountID, "rejected cross-group binding must be evicted")
 }
 
 func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_RateLimitedMiss(t *testing.T) {

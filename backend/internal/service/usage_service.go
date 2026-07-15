@@ -155,6 +155,32 @@ func (s *UsageService) GetByID(ctx context.Context, id int64) (*UsageLog, error)
 	return log, nil
 }
 
+type usageLogOwnerScopedReader interface {
+	GetByIDForUser(ctx context.Context, id, userID int64) (*UsageLog, error)
+}
+
+// GetByIDForUser returns the same not-found result for absent and foreign rows.
+// Production repositories bind the authenticated owner in the SQL predicate;
+// the fallback preserves the response invariant for alternate implementations.
+func (s *UsageService) GetByIDForUser(ctx context.Context, id, userID int64) (*UsageLog, error) {
+	if scoped, ok := s.usageRepo.(usageLogOwnerScopedReader); ok {
+		log, err := scoped.GetByIDForUser(ctx, id, userID)
+		if err != nil {
+			return nil, fmt.Errorf("get usage log: %w", err)
+		}
+		return log, nil
+	}
+
+	log, err := s.usageRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get usage log: %w", err)
+	}
+	if log == nil || log.UserID != userID {
+		return nil, ErrUsageLogNotFound
+	}
+	return log, nil
+}
+
 // ListByUser 获取用户的使用日志列表
 func (s *UsageService) ListByUser(ctx context.Context, userID int64, params pagination.PaginationParams) ([]UsageLog, *pagination.PaginationResult, error) {
 	logs, pagination, err := s.usageRepo.ListByUser(ctx, userID, params)

@@ -510,12 +510,11 @@ export async function getRealtimeTrafficSummary(
 /**
  * Subscribe to realtime QPS updates via WebSocket.
  *
- * Note: browsers cannot set Authorization headers for WebSockets.
- * We authenticate via Sec-WebSocket-Protocol using a prefixed token item:
- *   ["sub2api-admin", "jwt.<token>"]
+ * Browsers cannot set Authorization headers for WebSockets. Each connection
+ * first obtains a short-lived, purpose-bound ticket over the authenticated API,
+ * then carries only that ticket in Sec-WebSocket-Protocol.
  */
 export interface SubscribeQPSOptions {
-  token?: string | null
   onOpen?: () => void
   onClose?: (event: CloseEvent) => void
   onError?: (event: Event) => void
@@ -559,6 +558,19 @@ export const OPS_WS_CLOSE_CODES = {
 } as const
 
 const OPS_WS_BASE_PROTOCOL = 'sub2api-admin'
+
+interface AdminOpsWSTicketResponse {
+  ticket: string
+  expires_at: string
+  expires_in: number
+}
+
+async function issueAdminOpsWSTicket(): Promise<string> {
+  const { data } = await apiClient.post<AdminOpsWSTicketResponse>('/admin/ops/ws/ticket', {})
+  const ticket = String(data?.ticket || '').trim()
+  if (!ticket) throw new Error('Invalid admin WebSocket ticket response')
+  return ticket
+}
 
 export function subscribeQPS(onMessage: (data: any) => void, options: SubscribeQPSOptions = {}): () => void {
   let ws: WebSocket | null = null
@@ -626,7 +638,7 @@ export function subscribeQPS(onMessage: (data: any) => void, options: SubscribeQ
     clearReconnectTimer()
     reconnectTimer = setTimeout(() => {
       reconnectAttempts++
-      connect()
+      void connect()
     }, delay + jitter)
     options.onReconnectScheduled?.({ attempt: reconnectAttempts + 1, delayMs: delay + jitter })
   }
@@ -634,14 +646,14 @@ export function subscribeQPS(onMessage: (data: any) => void, options: SubscribeQ
   const handleOnline = () => {
     if (!shouldReconnect) return
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
-    connect()
+    void connect()
   }
 
   const handleOffline = () => {
     setStatus('offline')
   }
 
-  const connect = () => {
+  const connect = async () => {
     if (!shouldReconnect) return
     if (isConnecting) return
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
@@ -653,14 +665,22 @@ export function subscribeQPS(onMessage: (data: any) => void, options: SubscribeQ
     const wsBaseUrl = options.wsBaseUrl || import.meta.env.VITE_WS_BASE_URL || window.location.host
     const wsURL = new URL(`${protocol}//${wsBaseUrl}/api/v1/admin/ops/ws/qps`)
 
-    // Do NOT put admin JWT in the URL query string (it can leak via access logs, proxies, etc).
-    // Browsers cannot set Authorization headers for WebSockets, so we pass the token via
-    // Sec-WebSocket-Protocol (subprotocol list): ["sub2api-admin", "jwt.<token>"].
-    const rawToken = String(options.token ?? localStorage.getItem('auth_token') ?? '').trim()
-    const protocols: string[] = [OPS_WS_BASE_PROTOCOL]
-    if (rawToken) protocols.push(`jwt.${rawToken}`)
+    let ticket: string
+    try {
+      ticket = await issueAdminOpsWSTicket()
+    } catch {
+      isConnecting = false
+      if (!shouldReconnect) return
+      console.error('[OpsWS] Failed to issue connection ticket')
+      scheduleReconnect()
+      return
+    }
+    if (!shouldReconnect) {
+      isConnecting = false
+      return
+    }
 
-    ws = new WebSocket(wsURL.toString(), protocols)
+    ws = new WebSocket(wsURL.toString(), [OPS_WS_BASE_PROTOCOL, `ticket.${ticket}`])
 
     ws.onopen = () => {
       reconnectAttempts = 0
@@ -709,7 +729,7 @@ export function subscribeQPS(onMessage: (data: any) => void, options: SubscribeQ
 
   window.addEventListener('online', handleOnline)
   window.addEventListener('offline', handleOffline)
-  connect()
+  void connect()
 
   return () => {
     shouldReconnect = false

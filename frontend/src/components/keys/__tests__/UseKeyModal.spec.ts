@@ -64,6 +64,32 @@ const nativeModelAssignments = {
 }
 
 describe('UseKeyModal', () => {
+  it('treats a wallet universal key as openai-default and renders Codex config', () => {
+    const wrapper = mountModal('openai', {
+      platform: null,
+      groupName: null,
+      walletUniversal: true,
+    })
+
+    expect(wrapper.text()).not.toContain('keys.useKeyModal.noGroupTitle')
+    expect(wrapper.text()).not.toContain('keys.useKeyModal.openai.groupMismatchTitle')
+    expect(wrapper.find('pre code').text()).toContain('model = "gpt-5.6-terra"')
+    expect(wrapper.text()).not.toContain('keys.useKeyModal.cliTabs.claudeCodeVip')
+  })
+
+  it('offers the wallet Claude configuration only after reliable vip authorization', async () => {
+    const wrapper = mountModal('openai', {
+      platform: null,
+      groupName: null,
+      walletUniversal: true,
+      walletVipAccess: true,
+    })
+
+    await clickClientTab(wrapper, 'keys.useKeyModal.cliTabs.claudeCodeVip')
+
+    expect(wrapper.find('pre code').text()).toContain('ANTHROPIC_BASE_URL')
+  })
+
   it('does not advertise GPT-5.6 for a non-openai-default group', () => {
     const wrapper = mountModal('openai', { groupName: 'openai-legacy' })
 

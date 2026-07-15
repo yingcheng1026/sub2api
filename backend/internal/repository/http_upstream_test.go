@@ -79,6 +79,21 @@ func (s *HTTPUpstreamSuite) TestNormalizeProxyURL_Canonicalizes() {
 	require.Equal(s.T(), key1, key2, "expected normalized proxy keys to match")
 }
 
+func (s *HTTPUpstreamSuite) TestNormalizeProxyURL_CredentialKeyIsNonReversible() {
+	firstKey, firstURL, err := normalizeProxyURL("http://alice:first-secret@proxy.local:8080/path?token=ignored")
+	require.NoError(s.T(), err)
+	secondKey, _, err := normalizeProxyURL("http://alice:second-secret@proxy.local:8080")
+	require.NoError(s.T(), err)
+	require.NotEqual(s.T(), firstKey, secondKey)
+	require.NotContains(s.T(), firstKey, "alice")
+	require.NotContains(s.T(), firstKey, "first-secret")
+	require.NotContains(s.T(), firstKey, "token=ignored")
+	require.NotNil(s.T(), firstURL.User, "transport URL must retain proxy credentials")
+	password, ok := firstURL.User.Password()
+	require.True(s.T(), ok)
+	require.Equal(s.T(), "first-secret", password)
+}
+
 // TestAcquireClient_OverLimitReturnsError 测试连接池缓存上限保护
 // 验证超限且无可淘汰条目时返回错误
 func (s *HTTPUpstreamSuite) TestAcquireClient_OverLimitReturnsError() {
@@ -114,6 +129,35 @@ func (s *HTTPUpstreamSuite) TestDo_WithoutProxy_GoesDirect() {
 	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	require.Equal(s.T(), "direct", string(b), "unexpected body")
+}
+
+func (s *HTTPUpstreamSuite) TestDo_RejectsPrivateDestinationWithoutAllowlistMode() {
+	var calls atomic.Int32
+	upstream := newLocalTestServer(s.T(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, "must-not-run")
+	}))
+	s.T().Cleanup(upstream.Close)
+
+	s.cfg.Security.URLAllowlist.Enabled = false
+	s.cfg.Security.URLAllowlist.AllowPrivateHosts = false
+	up := NewHTTPUpstream(s.cfg)
+	req, err := http.NewRequest(http.MethodGet, upstream.URL+"/private", nil)
+	require.NoError(s.T(), err)
+
+	resp, err := up.Do(req, "", 1, 1)
+	require.Error(s.T(), err)
+	require.Nil(s.T(), resp)
+	require.Zero(s.T(), calls.Load(), "private upstream handler must not be reached")
+}
+
+func (s *HTTPUpstreamSuite) TestRedirectCheckerRejectsPrivateDestinationWhenAllowlistDisabled() {
+	s.cfg.Security.URLAllowlist.Enabled = false
+	s.cfg.Security.URLAllowlist.AllowPrivateHosts = false
+	svc := s.newService()
+	req, err := http.NewRequest(http.MethodGet, "https://127.0.0.1/internal", nil)
+	require.NoError(s.T(), err)
+	require.Error(s.T(), svc.redirectChecker(req, nil))
 }
 
 // TestDo_WithHTTPProxy_UsesProxy 测试 HTTP 代理功能

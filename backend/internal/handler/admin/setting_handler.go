@@ -728,7 +728,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	if req.TotpEnabled && !previousSettings.TotpEnabled {
 		// 尝试启用 TOTP，检查加密密钥是否已手动配置
 		if !h.settingService.IsTotpEncryptionKeyConfigured() {
-			response.BadRequest(c, "Cannot enable TOTP: TOTP_ENCRYPTION_KEY environment variable must be configured first. Generate a key with 'openssl rand -hex 32' and set it in your environment.")
+			response.BadRequest(c, "Cannot enable TOTP: SECRET_ENCRYPTION_TOTP_SECRET_KEY must be configured first. Generate a key with 'openssl rand -hex 32' and set it in your environment.")
 			return
 		}
 	}
@@ -1579,52 +1579,36 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		},
 		ForceEmailOnThirdPartySignup: boolValueOrDefault(req.ForceEmailOnThirdPartySignup, previousAuthSourceDefaults.ForceEmailOnThirdPartySignup),
 	}
-	if err := h.settingService.UpdateSettingsWithAuthSourceDefaults(c.Request.Context(), settings, authSourceDefaults); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	// Update OpenAI fast policy (stored under dedicated key, only when provided).
+	additionalUpdates := make(map[string]string)
 	if req.OpenAIFastPolicySettings != nil {
-		if err := h.settingService.SetOpenAIFastPolicySettings(c.Request.Context(), openaiFastPolicySettingsFromDTO(req.OpenAIFastPolicySettings)); err != nil {
+		updates, err := service.BuildOpenAIFastPolicySettingsUpdates(openaiFastPolicySettingsFromDTO(req.OpenAIFastPolicySettings))
+		if err != nil {
 			response.BadRequest(c, err.Error())
 			return
 		}
+		for key, value := range updates {
+			additionalUpdates[key] = value
+		}
 	}
 
-	// Update payment configuration (integrated into system settings).
-	// Skip if no payment fields were provided (prevents accidental wipe).
-	if h.paymentConfigService != nil && hasPaymentFields(req) {
-		paymentReq := service.UpdatePaymentConfigRequest{
-			Enabled:                   req.PaymentEnabled,
-			MinAmount:                 req.PaymentMinAmount,
-			MaxAmount:                 req.PaymentMaxAmount,
-			DailyLimit:                req.PaymentDailyLimit,
-			OrderTimeoutMin:           req.PaymentOrderTimeoutMin,
-			MaxPendingOrders:          req.PaymentMaxPendingOrders,
-			EnabledTypes:              req.PaymentEnabledTypes,
-			BalanceDisabled:           req.PaymentBalanceDisabled,
-			BalanceRechargeMultiplier: req.PaymentBalanceRechargeMultiplier,
-			RechargeFeeRate:           req.PaymentRechargeFeeRate,
-			LoadBalanceStrategy:       req.PaymentLoadBalanceStrat,
-			ProductNamePrefix:         req.PaymentProductNamePrefix,
-			ProductNameSuffix:         req.PaymentProductNameSuffix,
-			HelpImageURL:              req.PaymentHelpImageURL,
-			HelpText:                  req.PaymentHelpText,
-			CancelRateLimitEnabled:    req.PaymentCancelRateLimitEnabled,
-			CancelRateLimitMax:        req.PaymentCancelRateLimitMax,
-			CancelRateLimitWindow:     req.PaymentCancelRateLimitWindow,
-			CancelRateLimitUnit:       req.PaymentCancelRateLimitUnit,
-			CancelRateLimitMode:       req.PaymentCancelRateLimitMode,
-		}
-		if err := h.paymentConfigService.UpdatePaymentConfig(c.Request.Context(), paymentReq); err != nil {
+	paymentChanged := h.paymentConfigService != nil && hasPaymentFields(req)
+	if paymentChanged {
+		updates, err := h.paymentConfigService.BuildPaymentConfigUpdates(paymentConfigRequestFromSettingsRequest(req))
+		if err != nil {
 			response.ErrorFrom(c, err)
 			return
 		}
-		// Refresh in-memory provider registry so config changes take effect immediately
-		if h.paymentService != nil {
-			h.paymentService.RefreshProviders(c.Request.Context())
+		for key, value := range updates {
+			additionalUpdates[key] = value
 		}
+	}
+
+	if err := h.settingService.UpdateSettingsWithAuthSourceDefaultsAndAdditional(c.Request.Context(), settings, authSourceDefaults, additionalUpdates); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if paymentChanged && h.paymentService != nil {
+		h.paymentService.RefreshProviders(c.Request.Context())
 	}
 
 	h.auditSettingsUpdate(c, previousSettings, settings, previousAuthSourceDefaults, authSourceDefaults, req)
@@ -1834,6 +1818,31 @@ func hasPaymentFields(req UpdateSettingsRequest) bool {
 		req.PaymentHelpText != nil || req.PaymentCancelRateLimitEnabled != nil ||
 		req.PaymentCancelRateLimitMax != nil || req.PaymentCancelRateLimitWindow != nil ||
 		req.PaymentCancelRateLimitUnit != nil || req.PaymentCancelRateLimitMode != nil
+}
+
+func paymentConfigRequestFromSettingsRequest(req UpdateSettingsRequest) service.UpdatePaymentConfigRequest {
+	return service.UpdatePaymentConfigRequest{
+		Enabled:                   req.PaymentEnabled,
+		MinAmount:                 req.PaymentMinAmount,
+		MaxAmount:                 req.PaymentMaxAmount,
+		DailyLimit:                req.PaymentDailyLimit,
+		OrderTimeoutMin:           req.PaymentOrderTimeoutMin,
+		MaxPendingOrders:          req.PaymentMaxPendingOrders,
+		EnabledTypes:              req.PaymentEnabledTypes,
+		BalanceDisabled:           req.PaymentBalanceDisabled,
+		BalanceRechargeMultiplier: req.PaymentBalanceRechargeMultiplier,
+		RechargeFeeRate:           req.PaymentRechargeFeeRate,
+		LoadBalanceStrategy:       req.PaymentLoadBalanceStrat,
+		ProductNamePrefix:         req.PaymentProductNamePrefix,
+		ProductNameSuffix:         req.PaymentProductNameSuffix,
+		HelpImageURL:              req.PaymentHelpImageURL,
+		HelpText:                  req.PaymentHelpText,
+		CancelRateLimitEnabled:    req.PaymentCancelRateLimitEnabled,
+		CancelRateLimitMax:        req.PaymentCancelRateLimitMax,
+		CancelRateLimitWindow:     req.PaymentCancelRateLimitWindow,
+		CancelRateLimitUnit:       req.PaymentCancelRateLimitUnit,
+		CancelRateLimitMode:       req.PaymentCancelRateLimitMode,
+	}
 }
 
 func (h *SettingHandler) auditSettingsUpdate(c *gin.Context, before *service.SystemSettings, after *service.SystemSettings, beforeAuthSourceDefaults *service.AuthSourceDefaultSettings, afterAuthSourceDefaults *service.AuthSourceDefaultSettings, req UpdateSettingsRequest) {
@@ -2439,6 +2448,23 @@ type TestSMTPRequest struct {
 	SMTPUseTLS   bool   `json:"smtp_use_tls"`
 }
 
+func resolveSMTPTestPassword(input string, requested, saved *service.SMTPConfig) (string, error) {
+	if password := strings.TrimSpace(input); password != "" {
+		return password, nil
+	}
+	if saved == nil || strings.TrimSpace(saved.Password) == "" {
+		return "", nil
+	}
+	if requested == nil ||
+		!strings.EqualFold(strings.TrimSpace(requested.Host), strings.TrimSpace(saved.Host)) ||
+		requested.Port != saved.Port ||
+		requested.Username != saved.Username ||
+		requested.UseTLS != saved.UseTLS {
+		return "", fmt.Errorf("smtp_password must be provided when SMTP host, port, username, or TLS mode changes")
+	}
+	return strings.TrimSpace(saved.Password), nil
+}
+
 // TestSMTPConnection 测试SMTP连接
 // POST /api/v1/admin/settings/test-smtp
 func (h *SettingHandler) TestSMTPConnection(c *gin.Context) {
@@ -2469,10 +2495,6 @@ func (h *SettingHandler) TestSMTPConnection(c *gin.Context) {
 	if req.SMTPUsername == "" && savedConfig != nil {
 		req.SMTPUsername = savedConfig.Username
 	}
-	password := strings.TrimSpace(req.SMTPPassword)
-	if password == "" && savedConfig != nil {
-		password = savedConfig.Password
-	}
 	if req.SMTPHost == "" {
 		response.BadRequest(c, "SMTP host is required")
 		return
@@ -2482,11 +2504,16 @@ func (h *SettingHandler) TestSMTPConnection(c *gin.Context) {
 		Host:     req.SMTPHost,
 		Port:     req.SMTPPort,
 		Username: req.SMTPUsername,
-		Password: password,
 		UseTLS:   req.SMTPUseTLS,
 	}
+	password, err := resolveSMTPTestPassword(req.SMTPPassword, config, savedConfig)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	config.Password = password
 
-	err := h.emailService.TestSMTPConnectionWithConfig(config)
+	err = h.emailService.TestSMTPConnectionWithConfig(config)
 	if err != nil {
 		response.BadRequest(c, "SMTP connection test failed: "+err.Error())
 		return
@@ -2539,10 +2566,6 @@ func (h *SettingHandler) SendTestEmail(c *gin.Context) {
 	if req.SMTPUsername == "" && savedConfig != nil {
 		req.SMTPUsername = savedConfig.Username
 	}
-	password := strings.TrimSpace(req.SMTPPassword)
-	if password == "" && savedConfig != nil {
-		password = savedConfig.Password
-	}
 	if req.SMTPFrom == "" && savedConfig != nil {
 		req.SMTPFrom = savedConfig.From
 	}
@@ -2558,11 +2581,16 @@ func (h *SettingHandler) SendTestEmail(c *gin.Context) {
 		Host:     req.SMTPHost,
 		Port:     req.SMTPPort,
 		Username: req.SMTPUsername,
-		Password: password,
 		From:     req.SMTPFrom,
 		FromName: req.SMTPFromName,
 		UseTLS:   req.SMTPUseTLS,
 	}
+	password, err := resolveSMTPTestPassword(req.SMTPPassword, config, savedConfig)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	config.Password = password
 
 	siteName := h.settingService.GetSiteName(c.Request.Context())
 	subject := "[" + siteName + "] Test Email"

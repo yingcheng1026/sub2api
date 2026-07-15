@@ -38,23 +38,51 @@ interface CreateKeyGroupState {
 }
 
 interface KeyLike {
+  purpose?: string | null
+  name: string | null | undefined
   group_id: number | null
 }
 
+interface WalletSelectableGroupLike {
+  name: string
+  platform: string
+  is_exclusive: boolean
+  subscription_type: string
+}
+
 export function shouldRequireGroupForKeySubmit(state: GroupSubmitState): boolean {
-  if (!state.isEdit && state.hasActiveWallet && state.walletAnyKey) {
-    return false
-  }
   return state.groupId === null
 }
 
 export function getCreateKeyGroupId(state: CreateKeyGroupState): number | null {
-  if (state.hasActiveWallet && state.walletAnyKey) {
-    return null
-  }
   return state.groupId
 }
 
+export function isSystemManagedWalletKey(key: KeyLike): boolean {
+  return key.purpose === 'wallet_universal'
+    && key.group_id === null
+    && isWalletUniversalKeyName(key.name)
+}
+
 export function isWalletUniversalKey(key: KeyLike, hasActiveWallet: boolean): boolean {
-  return hasActiveWallet && key.group_id === null
+  return hasActiveWallet && isSystemManagedWalletKey(key)
+}
+
+/**
+ * `/groups/available` is already authorization-filtered by the backend. Wallet
+ * users get an additional product-policy filter: GPT is exact
+ * openai-default/openai, while Claude is exact vip/anthropic only when that
+ * authorized group is present in the response.
+ */
+export function filterGroupsForWalletKeySelection<T extends WalletSelectableGroupLike>(
+  groups: readonly T[],
+  hasActiveWallet: boolean,
+): T[] {
+  if (!hasActiveWallet) return [...groups]
+  return groups.filter((group) =>
+    group.subscription_type === 'standard' && (
+      (group.name === 'openai-default' && group.platform === 'openai' && !group.is_exclusive)
+      || (group.name === 'vip' && group.platform === 'anthropic' && group.is_exclusive)
+    )
+  )
 }

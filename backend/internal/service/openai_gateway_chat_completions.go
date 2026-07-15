@@ -226,6 +226,10 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletionsWithOptions(
 	if err != nil {
 		return nil, err
 	}
+	setOpenAIUsageBillingReservationBody(opts.UsageBilling, responsesBody)
+	if err := s.prepareOpenAIForwardUsageBilling(ctx, account, billingIdentity, opts); err != nil {
+		return nil, err
+	}
 
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
@@ -469,12 +473,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	var firstTokenMs *int
 	firstChunk := true
 	clientDisconnected := false
+	var compatibilityErr error
 
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	streamInterval := time.Duration(0)
@@ -527,6 +529,14 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		}
 
 		chunks := apicompat.ResponsesEventToChatChunks(&event, state)
+		if err := state.Err(); err != nil {
+			compatibilityErr = err
+			logger.L().Warn("openai chat_completions stream: compatibility resource limit exceeded",
+				zap.Error(err),
+				zap.String("request_id", requestID),
+			)
+			return true
+		}
 		if !clientDisconnected {
 			for _, chunk := range chunks {
 				sse, err := apicompat.ChatChunkToSSE(chunk)
@@ -553,6 +563,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	}
 
 	finalizeStream := func() (*OpenAIForwardResult, error) {
+		if compatibilityErr != nil {
+			return resultWithUsage(), compatibilityErr
+		}
 		if finalChunks := apicompat.FinalizeResponsesChatStream(state); len(finalChunks) > 0 && !clientDisconnected {
 			for _, chunk := range finalChunks {
 				sse, err := apicompat.ChatChunkToSSE(chunk)

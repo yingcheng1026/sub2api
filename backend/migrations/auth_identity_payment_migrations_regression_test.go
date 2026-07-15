@@ -16,6 +16,18 @@ func TestMigration112UsesIdempotentAddColumn(t *testing.T) {
 	require.NotContains(t, sql, "ADD COLUMN provider_key VARCHAR(30);")
 }
 
+func TestMigration181ClassifiesHistoricalFiniteWalletKeysWithoutPermanentWalletGate(t *testing.T) {
+	content, err := FS.ReadFile("181_api_key_purpose.sql")
+	require.NoError(t, err)
+
+	sql := string(content)
+	require.Contains(t, sql, "historical credits wallet evidence")
+	require.Contains(t, sql, "AND us.wallet_balance_usd IS NOT NULL")
+	require.Contains(t, sql, "AND us.deleted_at IS NULL")
+	require.NotContains(t, sql, "2099-12-30")
+	require.NotContains(t, sql, "us.status = 'active'")
+}
+
 func TestMigration118DoesNotForceOverwriteAuthSourceGrantDefaults(t *testing.T) {
 	content, err := FS.ReadFile("118_wechat_dual_mode_and_auth_source_defaults.sql")
 	require.NoError(t, err)
@@ -182,4 +194,16 @@ func TestMigration168CreatesManualOnlyHFCAbuseRiskEvents(t *testing.T) {
 	require.Contains(t, sql, "CHECK (status IN ('open', 'reviewing', 'resolved', 'false_positive'))")
 	require.NotContains(t, sql, "UPDATE users")
 	require.NotContains(t, sql, "UPDATE api_keys")
+}
+
+func TestMigration194AddsOnlineProviderCapacityLookupIndex(t *testing.T) {
+	content, err := FS.ReadFile("194_payment_provider_capacity_index_notx.sql")
+	require.NoError(t, err)
+
+	sql := string(content)
+	require.Contains(t, sql, "CREATE INDEX CONCURRENTLY IF NOT EXISTS paymentorder_provider_instance_id_created_at")
+	require.Contains(t, sql, "ON payment_orders (provider_instance_id, created_at)")
+	require.Contains(t, sql, "WHERE provider_instance_id IS NOT NULL")
+	require.NotContains(t, sql, "BEGIN")
+	require.NotContains(t, sql, "COMMIT")
 }

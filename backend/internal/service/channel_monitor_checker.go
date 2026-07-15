@@ -40,7 +40,7 @@ func newSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 // CheckOptions 承载一次检测的自定义入参。
 // 所有字段都是可选（零值即等价于"用默认行为"）。
 type CheckOptions struct {
-	// ExtraHeaders 用户自定义 HTTP 头（merge 到 adapter 默认 headers，用户优先）。
+	// ExtraHeaders 用户自定义 HTTP 头（仅允许覆盖非鉴权、非客户端自管 headers）。
 	ExtraHeaders map[string]string
 	// BodyOverrideMode: off | merge | replace
 	BodyOverrideMode string
@@ -249,7 +249,7 @@ func callProvider(ctx context.Context, provider, endpoint, apiKey, model, prompt
 }
 
 // mergeHeaders 把用户自定义 headers 合并到 adapter 默认 headers 上。
-// 用户值覆盖默认；命中黑名单（hop-by-hop / 由 http.Client 自管的）的 key 静默丢弃。
+// 用户值仅覆盖非敏感默认值；鉴权、hop-by-hop、客户端自管 key 会被静默丢弃。
 func mergeHeaders(base map[string]string, opts *CheckOptions) map[string]string {
 	if opts == nil || len(opts.ExtraHeaders) == 0 {
 		return base

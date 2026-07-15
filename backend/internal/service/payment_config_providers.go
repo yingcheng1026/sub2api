@@ -2,12 +2,11 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 
+	"entgo.io/ent/dialect"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
 	"github.com/Wei-Shaw/sub2api/ent/paymentproviderinstance"
@@ -102,6 +101,19 @@ var pendingOrderStatuses = []string{
 	payment.OrderStatusRecharging,
 }
 
+// providerSettlementProtectedOrderStatuses includes every state that can still
+// accept trusted provider payment evidence. Rotating or deleting the pinned
+// provider while one of these orders exists can make a real late payment
+// unverifiable or unfulfillable.
+var providerSettlementProtectedOrderStatuses = []string{
+	payment.OrderStatusPending,
+	payment.OrderStatusPaid,
+	payment.OrderStatusRecharging,
+	payment.OrderStatusFailed,
+	payment.OrderStatusCancelled,
+	payment.OrderStatusExpired,
+}
+
 // providerSensitiveConfigFields is the authoritative list of config keys that
 // are treated as secrets per provider. Must stay in sync with the frontend
 // definition at frontend/src/components/payment/providerConfig.ts
@@ -158,12 +170,56 @@ func providerConfigFieldValue(config map[string]string, fieldName string) string
 	return ""
 }
 
-func (s *PaymentConfigService) countPendingOrders(ctx context.Context, providerInstanceID int64) (int, error) {
-	return s.entClient.PaymentOrder.Query().
+// validateEasyPayEndpointSecretBinding prevents an endpoint-only patch from
+// silently reusing the stored merchant key against a newly selected server.
+// The admin must explicitly submit the canonical pkey field whenever apiBase
+// changes; masked or blank values retain the old key and do not qualify.
+func validateEasyPayEndpointSecretBinding(providerKey string, currentConfig, patchConfig, nextConfig map[string]string) error {
+	if providerKey != payment.TypeEasyPay {
+		return nil
+	}
+	currentBase := strings.TrimRight(strings.TrimSpace(providerConfigFieldValue(currentConfig, "apiBase")), "/")
+	nextBase := strings.TrimRight(strings.TrimSpace(providerConfigFieldValue(nextConfig, "apiBase")), "/")
+	if currentBase == nextBase {
+		return nil
+	}
+	if strings.TrimSpace(patchConfig["pkey"]) == "" {
+		return infraerrors.BadRequest(
+			"EASYPAY_PKEY_REENTRY_REQUIRED",
+			"easypay pkey must be re-entered when apiBase changes",
+		)
+	}
+	return nil
+}
+
+func countProviderSettlementProtectedOrders(ctx context.Context, client *dbent.Client, providerInstanceID int64) (int, error) {
+	if client == nil {
+		return 0, fmt.Errorf("provider order protection requires a database client")
+	}
+	return client.PaymentOrder.Query().
 		Where(
 			paymentorder.ProviderInstanceIDEQ(strconv.FormatInt(providerInstanceID, 10)),
-			paymentorder.StatusIn(pendingOrderStatuses...),
+			paymentorder.StatusIn(providerSettlementProtectedOrderStatuses...),
 		).Count(ctx)
+}
+
+// lockPaymentProviderMutation serializes admin mutation with order admission.
+// CreateOrder locks the same provider row before inserting its reservation, so
+// the protected-order count and the following mutation form one atomic gate.
+func lockPaymentProviderMutation(ctx context.Context, client *dbent.Client, providerInstanceID int64) error {
+	if client == nil || providerInstanceID <= 0 {
+		return fmt.Errorf("provider mutation requires a valid instance")
+	}
+	query := client.PaymentProviderInstance.Query().Where(
+		paymentproviderinstance.IDEQ(providerInstanceID),
+	)
+	if client.Driver().Dialect() == dialect.Postgres {
+		query = query.ForUpdate()
+	}
+	if _, err := query.OnlyID(ctx); err != nil {
+		return fmt.Errorf("lock payment provider mutation: %w", err)
+	}
+	return nil
 }
 
 func (s *PaymentConfigService) countPendingOrdersByPlan(ctx context.Context, planID int64) (int, error) {
@@ -181,6 +237,9 @@ var validProviderKeys = map[string]bool{
 func (s *PaymentConfigService) CreateProviderInstance(ctx context.Context, req CreateProviderInstanceRequest) (*dbent.PaymentProviderInstance, error) {
 	typesStr := joinTypes(req.SupportedTypes)
 	if err := validateProviderRequest(req.ProviderKey, req.Name, typesStr); err != nil {
+		return nil, err
+	}
+	if err := validateProviderLimits(req.ProviderKey, typesStr, req.Limits); err != nil {
 		return nil, err
 	}
 	if err := s.validateVisibleMethodEnablementConflicts(ctx, 0, req.ProviderKey, typesStr, req.Enabled); err != nil {
@@ -215,11 +274,27 @@ func validateProviderRequest(providerKey, name, supportedTypes string) error {
 	return nil
 }
 
+func validateProviderLimits(providerKey, supportedTypes, limits string) error {
+	if err := payment.ValidateInstanceLimits(limits, providerKey, supportedTypes); err != nil {
+		return infraerrors.BadRequest("INVALID_PAYMENT_LIMITS", err.Error())
+	}
+	return nil
+}
+
 // UpdateProviderInstance updates a provider instance by ID (patch semantics).
 // NOTE: This function exceeds 30 lines due to per-field nil-check patch update
-// boilerplate and pending-order safety checks.
+// boilerplate and settlement-protected order safety checks.
 func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id int64, req UpdateProviderInstanceRequest) (*dbent.PaymentProviderInstance, error) {
-	current, err := s.entClient.PaymentProviderInstance.Get(ctx, id)
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin provider update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	client := tx.Client()
+	if err := lockPaymentProviderMutation(ctx, client, id); err != nil {
+		return nil, err
+	}
+	current, err := client.PaymentProviderInstance.Get(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("load provider instance: %w", err)
 	}
@@ -228,7 +303,7 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 		if pendingOrderCount != nil {
 			return *pendingOrderCount, nil
 		}
-		count, err := s.countPendingOrders(ctx, id)
+		count, err := countProviderSettlementProtectedOrders(ctx, client, id)
 		if err != nil {
 			return 0, fmt.Errorf("check pending orders: %w", err)
 		}
@@ -243,6 +318,13 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 	if req.SupportedTypes != nil {
 		nextSupportedTypes = joinTypes(req.SupportedTypes)
 	}
+	nextLimits := current.Limits
+	if req.Limits != nil {
+		nextLimits = *req.Limits
+	}
+	if err := validateProviderLimits(current.ProviderKey, nextSupportedTypes, nextLimits); err != nil {
+		return nil, err
+	}
 	if err := s.validateVisibleMethodEnablementConflicts(ctx, id, current.ProviderKey, nextSupportedTypes, nextEnabled); err != nil {
 		return nil, err
 	}
@@ -252,8 +334,8 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 		if err != nil {
 			return nil, fmt.Errorf("decrypt existing config: %w", err)
 		}
-		mergedConfig, err = s.mergeConfig(ctx, id, req.Config)
-		if err != nil {
+		mergedConfig = mergeProviderConfig(current.ProviderKey, currentConfig, req.Config)
+		if err := validateEasyPayEndpointSecretBinding(current.ProviderKey, currentConfig, req.Config, mergedConfig); err != nil {
 			return nil, err
 		}
 		if hasPendingOrderProtectedConfigChange(current.ProviderKey, currentConfig, mergedConfig) {
@@ -262,7 +344,7 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 				return nil, err
 			}
 			if count > 0 {
-				return nil, infraerrors.Conflict("PENDING_ORDERS", "instance has pending orders").
+				return nil, infraerrors.Conflict("PENDING_ORDERS", "instance has settlement-protected orders").
 					WithMetadata(map[string]string{"count": strconv.Itoa(count)})
 			}
 		}
@@ -273,7 +355,7 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 			return nil, err
 		}
 		if count > 0 {
-			return nil, infraerrors.Conflict("PENDING_ORDERS", "instance has pending orders").
+			return nil, infraerrors.Conflict("PENDING_ORDERS", "instance has settlement-protected orders").
 				WithMetadata(map[string]string{"count": strconv.Itoa(count)})
 		}
 	}
@@ -296,7 +378,7 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 			return nil, err
 		}
 	}
-	u := s.entClient.PaymentProviderInstance.UpdateOneID(id)
+	u := client.PaymentProviderInstance.UpdateOneID(id)
 	if req.Name != nil {
 		u.SetName(*req.Name)
 	}
@@ -308,7 +390,7 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 		u.SetConfig(enc)
 	}
 	if req.SupportedTypes != nil {
-		// Check pending orders before removing payment types
+		// Check settlement-protected orders before removing payment types.
 		count, err := getPendingOrderCount()
 		if err != nil {
 			return nil, err
@@ -330,7 +412,7 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 					}
 				}
 				if !found {
-					return nil, infraerrors.Conflict("PENDING_ORDERS", "cannot remove payment types while instance has pending orders").
+					return nil, infraerrors.Conflict("PENDING_ORDERS", "cannot remove payment types while instance has settlement-protected orders").
 						WithMetadata(map[string]string{"count": strconv.Itoa(count)})
 				}
 			}
@@ -372,7 +454,14 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 	if req.PaymentMode != nil {
 		u.SetPaymentMode(*req.PaymentMode)
 	}
-	return u.Save(ctx)
+	updated, err := u.Save(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit provider update: %w", err)
+	}
+	return updated.Unwrap(), nil
 }
 
 // GetUserRefundEligibleInstanceIDs returns provider instance IDs that allow user refund.
@@ -392,79 +481,128 @@ func (s *PaymentConfigService) GetUserRefundEligibleInstanceIDs(ctx context.Cont
 	return ids, nil
 }
 
-func (s *PaymentConfigService) mergeConfig(ctx context.Context, id int64, newConfig map[string]string) (map[string]string, error) {
-	inst, err := s.entClient.PaymentProviderInstance.Get(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("load existing provider: %w", err)
-	}
-	existing, err := s.decryptConfig(inst.Config)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt existing config for instance %d: %w", id, err)
-	}
-	if existing == nil {
-		existing = map[string]string{}
+func mergeProviderConfig(providerKey string, existing, newConfig map[string]string) map[string]string {
+	merged := make(map[string]string, len(existing)+len(newConfig))
+	for key, value := range existing {
+		merged[key] = value
 	}
 	for k, v := range newConfig {
 		// Preserve existing secrets when the client submits an empty value
 		// (admin UI omits the value to indicate "leave unchanged").
-		if v == "" && isSensitiveProviderConfigField(inst.ProviderKey, k) {
+		if v == "" && isSensitiveProviderConfigField(providerKey, k) {
 			continue
 		}
-		existing[k] = v
+		merged[k] = v
 	}
-	return existing, nil
+	return merged
 }
 
-// decryptConfig parses a stored provider config.
-// New records are plaintext JSON; legacy records are AES-256-GCM ciphertext
-// ("iv:authTag:ciphertext"). Values that cannot be parsed as either — including
-// legacy ciphertext with no/invalid TOTP_ENCRYPTION_KEY — are treated as empty,
-// letting the admin re-enter the config via the UI to complete the migration.
-//
-// TODO(deprecated-legacy-ciphertext): The AES fallback branch is a transitional
-// shim for pre-plaintext records. Remove it (and the encryptionKey field) after
-// a few releases once all live deployments have re-saved their provider configs.
 func (s *PaymentConfigService) decryptConfig(stored string) (map[string]string, error) {
-	if stored == "" {
-		return nil, nil
+	cfg, _, err := payment.DecryptProviderConfig(stored, s.encryptionKey)
+	return cfg, err
+}
+
+// MigrateProviderConfigsToEncrypted rewrites legacy plaintext or shared-root
+// provider configs before the HTTP server starts. The compare-and-swap prevents
+// overwriting a concurrent admin change; any unreadable row fails startup.
+func (s *PaymentConfigService) MigrateProviderConfigsToEncrypted(ctx context.Context, legacyKeys ...[]byte) (int, error) {
+	if s == nil || s.entClient == nil {
+		return 0, fmt.Errorf("payment provider config migration requires a database client")
 	}
-	var cfg map[string]string
-	if err := json.Unmarshal([]byte(stored), &cfg); err == nil {
-		return cfg, nil
+	instances, err := s.entClient.PaymentProviderInstance.Query().All(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list payment provider configs: %w", err)
 	}
-	// Deprecated: legacy AES-256-GCM ciphertext fallback — scheduled for removal.
-	if len(s.encryptionKey) == payment.AES256KeySize {
-		//nolint:staticcheck // SA1019: intentional legacy fallback, scheduled for removal
-		if plaintext, err := payment.Decrypt(stored, s.encryptionKey); err == nil {
-			if err := json.Unmarshal([]byte(plaintext), &cfg); err == nil {
-				return cfg, nil
+	migrated := 0
+	for _, instance := range instances {
+		if instance.Config == "" {
+			continue
+		}
+		cfg, needsRewrite, err := decryptProviderConfigForMigration(
+			instance.Config,
+			s.encryptionKey,
+			legacyKeys,
+		)
+		if err != nil {
+			return migrated, fmt.Errorf("provider instance %d config is unreadable: %w", instance.ID, err)
+		}
+		if !needsRewrite {
+			continue
+		}
+		encrypted, err := payment.EncryptProviderConfig(cfg, s.encryptionKey)
+		if err != nil {
+			return migrated, fmt.Errorf("encrypt provider instance %d config: %w", instance.ID, err)
+		}
+		updated, err := s.entClient.PaymentProviderInstance.Update().
+			Where(
+				paymentproviderinstance.IDEQ(instance.ID),
+				paymentproviderinstance.ConfigEQ(instance.Config),
+			).
+			SetConfig(encrypted).
+			Save(ctx)
+		if err != nil {
+			return migrated, fmt.Errorf("persist encrypted provider instance %d config: %w", instance.ID, err)
+		}
+		if updated != 1 {
+			latest, getErr := s.entClient.PaymentProviderInstance.Get(ctx, instance.ID)
+			if getErr != nil {
+				return migrated, fmt.Errorf("reload concurrently migrated provider instance %d: %w", instance.ID, getErr)
 			}
+			_, stillPlaintext, decryptErr := payment.DecryptProviderConfig(latest.Config, s.encryptionKey)
+			if decryptErr != nil || stillPlaintext {
+				return migrated, fmt.Errorf("provider instance %d changed concurrently but is not valid encrypted config", instance.ID)
+			}
+			continue
+		}
+		migrated++
+	}
+	return migrated, nil
+}
+
+func decryptProviderConfigForMigration(stored string, currentKey []byte, legacyKeys [][]byte) (map[string]string, bool, error) {
+	cfg, legacyPlaintext, currentErr := payment.DecryptProviderConfig(stored, currentKey)
+	if currentErr == nil {
+		return cfg, legacyPlaintext, nil
+	}
+	for _, legacyKey := range legacyKeys {
+		if len(legacyKey) != payment.AES256KeySize {
+			continue
+		}
+		cfg, _, legacyErr := payment.DecryptProviderConfig(stored, legacyKey)
+		if legacyErr == nil {
+			return cfg, true, nil
 		}
 	}
-	slog.Warn("payment provider config unreadable, treating as empty for re-entry",
-		"stored_len", len(stored))
-	return nil, nil
+	return nil, false, currentErr
 }
 
 func (s *PaymentConfigService) DeleteProviderInstance(ctx context.Context, id int64) error {
-	count, err := s.countPendingOrders(ctx, id)
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin provider delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	client := tx.Client()
+	if err := lockPaymentProviderMutation(ctx, client, id); err != nil {
+		return err
+	}
+	count, err := countProviderSettlementProtectedOrders(ctx, client, id)
 	if err != nil {
 		return fmt.Errorf("check pending orders: %w", err)
 	}
 	if count > 0 {
 		return infraerrors.Conflict("PENDING_ORDERS",
-			fmt.Sprintf("this instance has %d in-progress orders and cannot be deleted — wait for orders to complete or disable the instance first", count))
+			fmt.Sprintf("this instance has %d settlement-protected orders and cannot be deleted", count))
 	}
-	return s.entClient.PaymentProviderInstance.DeleteOneID(id).Exec(ctx)
+	if err := client.PaymentProviderInstance.DeleteOneID(id).Exec(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit provider delete: %w", err)
+	}
+	return nil
 }
 
-// encryptConfig serialises a provider config for storage.
-// New records are written as plaintext JSON; the historical AES-GCM wrapping
-// has been dropped but decryptConfig still accepts old ciphertext during migration.
 func (s *PaymentConfigService) encryptConfig(cfg map[string]string) (string, error) {
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return "", fmt.Errorf("marshal config: %w", err)
-	}
-	return string(data), nil
+	return payment.EncryptProviderConfig(cfg, s.encryptionKey)
 }

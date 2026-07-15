@@ -38,11 +38,12 @@ export interface ChannelMonitor {
   availability_7d: number
   /** Latest status per extra model (used for hover tooltip) */
   extra_models_status: ExtraModelStatus[]
-  /** 请求自定义快照字段（高级设置） */
+  /** 请求自定义配置是 write-only；响应仅返回存在性元数据。 */
   template_id: number | null
-  extra_headers: Record<string, string>
+  extra_headers_configured: boolean
+  extra_header_count: number
   body_override_mode: BodyOverrideMode
-  body_override: Record<string, unknown> | null
+  body_override_configured: boolean
 }
 
 export interface ExtraModelStatus {
@@ -71,7 +72,8 @@ export interface CreateParams {
   name: string
   provider: Provider
   endpoint: string
-  api_key: string
+  api_key?: string
+  api_key_id?: number
   primary_model: string
   extra_models?: string[]
   group_name?: string
@@ -86,6 +88,7 @@ export interface CreateParams {
 // Update request: api_key 空串 = 不修改；clear_template=true 时把 template_id 置空
 export type UpdateParams = Partial<CreateParams> & {
   clear_template?: boolean
+  replace_request_customization?: boolean
 }
 
 export interface CheckResult {

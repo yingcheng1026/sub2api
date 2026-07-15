@@ -277,11 +277,6 @@ func (_u *ProxyUpdate) check() error {
 			return &ValidationError{Name: "username", err: fmt.Errorf(`ent: validator failed for field "Proxy.username": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.Password(); ok {
-		if err := proxy.PasswordValidator(v); err != nil {
-			return &ValidationError{Name: "password", err: fmt.Errorf(`ent: validator failed for field "Proxy.password": %w`, err)}
-		}
-	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := proxy.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Proxy.status": %w`, err)}
@@ -665,11 +660,6 @@ func (_u *ProxyUpdateOne) check() error {
 	if v, ok := _u.mutation.Username(); ok {
 		if err := proxy.UsernameValidator(v); err != nil {
 			return &ValidationError{Name: "username", err: fmt.Errorf(`ent: validator failed for field "Proxy.username": %w`, err)}
-		}
-	}
-	if v, ok := _u.mutation.Password(); ok {
-		if err := proxy.PasswordValidator(v); err != nil {
-			return &ValidationError{Name: "password", err: fmt.Errorf(`ent: validator failed for field "Proxy.password": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.Status(); ok {

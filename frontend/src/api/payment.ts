@@ -59,17 +59,12 @@ export const paymentAPI = {
 
   /** Cancel a pending order */
   cancelOrder(id: number) {
-    return apiClient.post(`/payment/orders/${id}/cancel`)
+    return apiClient.post<{ message: 'cancelled' | 'already_paid' }>(`/payment/orders/${id}/cancel`)
   },
 
   /** Verify order payment status with upstream provider */
   verifyOrder(outTradeNo: string) {
     return apiClient.post<PaymentOrder>('/payment/orders/verify', { out_trade_no: outTradeNo })
-  },
-
-  /** Legacy-compatible public order lookup by out_trade_no */
-  verifyOrderPublic(outTradeNo: string) {
-    return apiClient.post<PaymentOrder>('/payment/public/orders/verify', { out_trade_no: outTradeNo })
   },
 
   /** Resolve an order from a signed resume token without auth */

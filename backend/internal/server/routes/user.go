@@ -1,11 +1,15 @@
 package routes
 
 import (
+	"time"
+
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	appmiddleware "github.com/Wei-Shaw/sub2api/internal/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 // RegisterUserRoutes 注册用户相关路由（需要认证）
@@ -14,6 +18,7 @@ func RegisterUserRoutes(
 	h *handler.Handlers,
 	jwtAuth middleware.JWTAuthMiddleware,
 	settingService *service.SettingService,
+	redisClient *redis.Client,
 ) {
 	authenticated := v1.Group("")
 	authenticated.Use(gin.HandlerFunc(jwtAuth))
@@ -59,6 +64,7 @@ func RegisterUserRoutes(
 			keys.GET("", h.APIKey.List)
 			keys.GET("/:id", h.APIKey.GetByID)
 			keys.POST("", h.APIKey.Create)
+			keys.POST("/:id/reveal", h.APIKey.Reveal)
 			keys.PUT("/:id", h.APIKey.Update)
 			keys.DELETE("/:id", h.APIKey.Delete)
 		}
@@ -79,6 +85,15 @@ func RegisterUserRoutes(
 
 		// 使用记录
 		usage := authenticated.Group("/usage")
+		usage.Use(appmiddleware.NewRateLimiter(redisClient).LimitWithOptions(
+			"user-usage-query",
+			userUsageQueryRequestsPerMinute,
+			time.Minute,
+			appmiddleware.RateLimitOptions{
+				FailureMode: appmiddleware.RateLimitFailClose,
+				KeyFunc:     authenticatedUsageRateLimitKey,
+			},
+		))
 		{
 			usage.GET("", h.Usage.List)
 			usage.GET("/:id", h.Usage.GetByID)

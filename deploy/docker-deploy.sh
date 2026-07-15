@@ -3,15 +3,16 @@
 # Sub2API Docker Deployment Preparation Script
 # =============================================================================
 # This script prepares deployment files for Sub2API:
-#   - Downloads docker-compose.local.yml and .env.example
-#   - Generates secure secrets (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD)
+#   - Copies the reviewed deployment files shipped beside this script
+#   - Generates all required application and database secrets
 #   - Creates necessary data directories
 #
 # After running this script, you can start services with:
 #   docker-compose up -d
 # =============================================================================
 
-set -e
+set -euo pipefail
+umask 077
 
 # Colors for output
 RED='\033[0;31m'
@@ -20,8 +21,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# GitHub raw content base URL
-GITHUB_RAW_URL="https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # Print colored message
 print_info() {
@@ -75,26 +75,16 @@ main() {
         fi
     fi
 
-    # Download docker-compose.local.yml and save as docker-compose.yml
-    print_info "Downloading docker-compose.yml..."
-    if command_exists curl; then
-        curl -sSL "${GITHUB_RAW_URL}/docker-compose.local.yml" -o docker-compose.yml
-    elif command_exists wget; then
-        wget -q "${GITHUB_RAW_URL}/docker-compose.local.yml" -O docker-compose.yml
-    else
-        print_error "Neither curl nor wget is installed. Please install one of them."
+    # Use only files from the same reviewed checkout. Fetching mutable GitHub
+    # main at deploy time would allow an unreviewed compose file to execute.
+    if [ ! -f "${SCRIPT_DIR}/docker-compose.local.yml" ] || [ ! -f "${SCRIPT_DIR}/.env.example" ]; then
+        print_error "Reviewed docker-compose.local.yml and .env.example must be beside this script."
+        print_error "Clone or extract a reviewed release, then run deploy/docker-deploy.sh locally."
         exit 1
     fi
-    print_success "Downloaded docker-compose.yml"
-
-    # Download .env.example
-    print_info "Downloading .env.example..."
-    if command_exists curl; then
-        curl -sSL "${GITHUB_RAW_URL}/.env.example" -o .env.example
-    else
-        wget -q "${GITHUB_RAW_URL}/.env.example" -O .env.example
-    fi
-    print_success "Downloaded .env.example"
+    print_info "Copying reviewed docker-compose.yml..."
+    cp "${SCRIPT_DIR}/docker-compose.local.yml" docker-compose.yml
+    print_success "Copied docker-compose.yml"
 
     # Generate .env file with auto-generated secrets
     print_info "Generating secure secrets..."
@@ -102,23 +92,68 @@ main() {
 
     # Generate secrets
     JWT_SECRET=$(generate_secret)
-    TOTP_ENCRYPTION_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_TOTP_SECRET_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_TOTP_CACHE_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_BACKUP_S3_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_JWT_HMAC_KEY=$(generate_secret)
+    SECRET_ENCRYPTION_SETTING_SECRET_KEY=$(generate_secret)
+    API_KEY_ENCRYPTION_KEY=$(generate_secret)
+    PAYMENT_RESUME_SIGNING_KEY=$(generate_secret)
     POSTGRES_PASSWORD=$(generate_secret)
+    REDIS_PASSWORD=$(generate_secret)
+    ADMIN_PASSWORD=$(generate_secret)
 
     # Create .env from .env.example
-    cp .env.example .env
+    cp "${SCRIPT_DIR}/.env.example" .env
 
     # Update .env with generated secrets (cross-platform compatible)
     if sed --version >/dev/null 2>&1; then
         # GNU sed (Linux)
         sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
-        sed -i "s/^TOTP_ENCRYPTION_KEY=.*/TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_TOTP_SECRET_KEY=.*/SECRET_ENCRYPTION_TOTP_SECRET_KEY=${SECRET_ENCRYPTION_TOTP_SECRET_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_TOTP_CACHE_KEY=.*/SECRET_ENCRYPTION_TOTP_CACHE_KEY=${SECRET_ENCRYPTION_TOTP_CACHE_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=.*/SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=${SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_BACKUP_S3_KEY=.*/SECRET_ENCRYPTION_BACKUP_S3_KEY=${SECRET_ENCRYPTION_BACKUP_S3_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=.*/SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=${SECRET_ENCRYPTION_CONTENT_MODERATION_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=.*/SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=${SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=.*/SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=${SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=.*/SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=${SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=.*/SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=${SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=.*/SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=${SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_JWT_HMAC_KEY=.*/SECRET_ENCRYPTION_JWT_HMAC_KEY=${SECRET_ENCRYPTION_JWT_HMAC_KEY}/" .env
+        sed -i "s/^SECRET_ENCRYPTION_SETTING_SECRET_KEY=.*/SECRET_ENCRYPTION_SETTING_SECRET_KEY=${SECRET_ENCRYPTION_SETTING_SECRET_KEY}/" .env
+        sed -i "s/^API_KEY_ENCRYPTION_KEY=.*/API_KEY_ENCRYPTION_KEY=${API_KEY_ENCRYPTION_KEY}/" .env
+        sed -i "s/^PAYMENT_RESUME_SIGNING_KEY=.*/PAYMENT_RESUME_SIGNING_KEY=${PAYMENT_RESUME_SIGNING_KEY}/" .env
         sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${POSTGRES_PASSWORD}/" .env
+        sed -i "s/^REDIS_PASSWORD=.*/REDIS_PASSWORD=${REDIS_PASSWORD}/" .env
+        sed -i "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=${ADMIN_PASSWORD}/" .env
     else
         # BSD sed (macOS)
         sed -i '' "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
-        sed -i '' "s/^TOTP_ENCRYPTION_KEY=.*/TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_TOTP_SECRET_KEY=.*/SECRET_ENCRYPTION_TOTP_SECRET_KEY=${SECRET_ENCRYPTION_TOTP_SECRET_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_TOTP_CACHE_KEY=.*/SECRET_ENCRYPTION_TOTP_CACHE_KEY=${SECRET_ENCRYPTION_TOTP_CACHE_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=.*/SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY=${SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_BACKUP_S3_KEY=.*/SECRET_ENCRYPTION_BACKUP_S3_KEY=${SECRET_ENCRYPTION_BACKUP_S3_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=.*/SECRET_ENCRYPTION_CONTENT_MODERATION_KEY=${SECRET_ENCRYPTION_CONTENT_MODERATION_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=.*/SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY=${SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=.*/SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY=${SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=.*/SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY=${SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=.*/SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY=${SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=.*/SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY=${SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_JWT_HMAC_KEY=.*/SECRET_ENCRYPTION_JWT_HMAC_KEY=${SECRET_ENCRYPTION_JWT_HMAC_KEY}/" .env
+        sed -i '' "s/^SECRET_ENCRYPTION_SETTING_SECRET_KEY=.*/SECRET_ENCRYPTION_SETTING_SECRET_KEY=${SECRET_ENCRYPTION_SETTING_SECRET_KEY}/" .env
+        sed -i '' "s/^API_KEY_ENCRYPTION_KEY=.*/API_KEY_ENCRYPTION_KEY=${API_KEY_ENCRYPTION_KEY}/" .env
+        sed -i '' "s/^PAYMENT_RESUME_SIGNING_KEY=.*/PAYMENT_RESUME_SIGNING_KEY=${PAYMENT_RESUME_SIGNING_KEY}/" .env
         sed -i '' "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${POSTGRES_PASSWORD}/" .env
+        sed -i '' "s/^REDIS_PASSWORD=.*/REDIS_PASSWORD=${REDIS_PASSWORD}/" .env
+        sed -i '' "s/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=${ADMIN_PASSWORD}/" .env
     fi
 
     # Create data directories
@@ -135,13 +170,8 @@ main() {
     echo "  Preparation Complete!"
     echo "=========================================="
     echo ""
-    echo "Generated secure credentials:"
-    echo "  POSTGRES_PASSWORD:     ${POSTGRES_PASSWORD}"
-    echo "  JWT_SECRET:            ${JWT_SECRET}"
-    echo "  TOTP_ENCRYPTION_KEY:   ${TOTP_ENCRYPTION_KEY}"
-    echo ""
-    print_warning "These credentials have been saved to .env file."
-    print_warning "Please keep them secure and do not share publicly!"
+    print_success "Generated credentials were written to the owner-only .env file (mode 600)."
+    print_warning "Do not print, share, or commit .env. Back it up in an approved secret store."
     echo ""
     echo "Directory structure:"
     echo "  docker-compose.yml        - Docker Compose configuration"
@@ -162,8 +192,7 @@ main() {
     echo "  4. Access Web UI:"
     echo "     http://localhost:8080"
     echo ""
-    print_info "If admin password is not set in .env, it will be auto-generated."
-    print_info "Check logs for the generated admin password on first startup."
+    print_info "The generated admin password is stored only in .env; it is not written to logs."
     echo ""
 }
 

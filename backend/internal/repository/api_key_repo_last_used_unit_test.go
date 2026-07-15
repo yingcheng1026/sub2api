@@ -29,8 +29,19 @@ func newAPIKeyRepoSQLite(t *testing.T) (*apiKeyRepository, *dbent.Client) {
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := enttest.NewClient(t, enttest.WithOptions(dbent.Driver(drv)))
 	t.Cleanup(func() { _ = client.Close() })
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS user_group_rate_multipliers (
+			user_id INTEGER NOT NULL,
+			group_id INTEGER NOT NULL,
+			rate_multiplier REAL NULL,
+			rpm_override INTEGER NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, group_id)
+		)`)
+	require.NoError(t, err)
 
-	return &apiKeyRepository{client: client}, client
+	return &apiKeyRepository{client: client, sql: db, keyProtector: strictAPIKeyTestProtector{}}, client
 }
 
 func mustCreateAPIKeyRepoUser(t *testing.T, ctx context.Context, client *dbent.Client, email string) *service.User {

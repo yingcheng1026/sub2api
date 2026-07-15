@@ -716,24 +716,26 @@ func TestErrorPassthroughRule_Validate(t *testing.T) {
 		errorField  string
 	}{
 		{
-			name: "有效规则 - 透传模式（含错误码）",
+			name: "有效规则 - 安全消息模式（含错误码）",
 			rule: &model.ErrorPassthroughRule{
 				Name:            "Valid Rule",
 				MatchMode:       model.MatchModeAny,
 				ErrorCodes:      []int{422},
 				PassthroughCode: true,
-				PassthroughBody: true,
+				PassthroughBody: false,
+				CustomMessage:   testStrPtr("Upstream request failed"),
 			},
 			expectError: false,
 		},
 		{
-			name: "有效规则 - 透传模式（含关键词）",
+			name: "有效规则 - 安全消息模式（含关键词）",
 			rule: &model.ErrorPassthroughRule{
 				Name:            "Valid Rule",
 				MatchMode:       model.MatchModeAny,
 				Keywords:        []string{"context limit"},
 				PassthroughCode: true,
-				PassthroughBody: true,
+				PassthroughBody: false,
+				CustomMessage:   testStrPtr("Upstream request failed"),
 			},
 			expectError: false,
 		},
@@ -815,6 +817,18 @@ func TestErrorPassthroughRule_Validate(t *testing.T) {
 			errorField:  "response_code",
 		},
 		{
+			name: "拒绝原始上游正文透传",
+			rule: &model.ErrorPassthroughRule{
+				Name:            "Unsafe Body",
+				MatchMode:       model.MatchModeAny,
+				ErrorCodes:      []int{500},
+				PassthroughCode: true,
+				PassthroughBody: true,
+			},
+			expectError: true,
+			errorField:  "passthrough_body",
+		},
+		{
 			name: "自定义消息但未提供值",
 			rule: &model.ErrorPassthroughRule{
 				Name:            "Missing Message",
@@ -836,6 +850,19 @@ func TestErrorPassthroughRule_Validate(t *testing.T) {
 				PassthroughCode: true,
 				PassthroughBody: false,
 				CustomMessage:   testStrPtr(""),
+			},
+			expectError: true,
+			errorField:  "custom_message",
+		},
+		{
+			name: "自定义消息超过安全上限",
+			rule: &model.ErrorPassthroughRule{
+				Name:            "Long Message",
+				MatchMode:       model.MatchModeAny,
+				ErrorCodes:      []int{422},
+				PassthroughCode: true,
+				PassthroughBody: false,
+				CustomMessage:   testStrPtr(strings.Repeat("界", 513)),
 			},
 			expectError: true,
 			errorField:  "custom_message",

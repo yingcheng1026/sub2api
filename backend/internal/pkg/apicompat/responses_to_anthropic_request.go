@@ -353,19 +353,27 @@ func mergeConsecutiveMessages(messages []AnthropicMessage) []AnthropicMessage {
 		return messages
 	}
 
-	var merged []AnthropicMessage
-	for _, msg := range messages {
-		if len(merged) == 0 || merged[len(merged)-1].Role != msg.Role {
-			merged = append(merged, msg)
+	merged := make([]AnthropicMessage, 0, len(messages))
+	for start := 0; start < len(messages); {
+		end := start + 1
+		for end < len(messages) && messages[end].Role == messages[start].Role {
+			end++
+		}
+
+		if end == start+1 {
+			merged = append(merged, messages[start])
+			start = end
 			continue
 		}
 
-		// Same role — merge content arrays
-		last := &merged[len(merged)-1]
-		lastBlocks := parseContentBlocks(last.Content)
-		newBlocks := parseContentBlocks(msg.Content)
-		combined := append(lastBlocks, newBlocks...)
-		last.Content, _ = json.Marshal(combined)
+		combined := make([]AnthropicContentBlock, 0, end-start)
+		for i := start; i < end; i++ {
+			combined = append(combined, parseContentBlocks(messages[i].Content)...)
+		}
+		msg := messages[start]
+		msg.Content, _ = json.Marshal(combined)
+		merged = append(merged, msg)
+		start = end
 	}
 	return merged
 }

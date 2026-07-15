@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -55,8 +56,8 @@ const (
 
 	defaultContentModerationWorkerCount          = 4
 	maxContentModerationWorkerCount              = 32
-	defaultContentModerationQueueSize            = 32768
-	maxContentModerationQueueSize                = 100000
+	defaultContentModerationQueueSize            = 1024
+	maxContentModerationQueueSize                = 4096
 	defaultContentModerationBanThreshold         = 10
 	defaultContentModerationViolationWindowHours = 720
 	defaultContentModerationBlockHTTPStatus      = http.StatusForbidden
@@ -128,6 +129,7 @@ type ContentModerationConfig struct {
 	Model                string             `json:"model"`
 	APIKey               string             `json:"api_key,omitempty"`
 	APIKeys              []string           `json:"api_keys,omitempty"`
+	EncryptedAPIKeys     []string           `json:"api_keys_encrypted,omitempty"`
 	TimeoutMS            int                `json:"timeout_ms"`
 	SampleRate           int                `json:"sample_rate"`
 	AllGroups            bool               `json:"all_groups"`
@@ -450,6 +452,7 @@ type ContentModerationService struct {
 	authCacheInvalidator     APIKeyAuthCacheInvalidator
 	abuseRiskRecorder        HFCAbuseRiskRecorder
 	emailService             *EmailService
+	secretEncryptor          SecretEncryptor
 	httpClient               *http.Client
 	asyncQueue               chan contentModerationTask
 	workerCount              int
@@ -495,6 +498,32 @@ func NewContentModerationService(
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	emailService *EmailService,
 ) *ContentModerationService {
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, nil)
+}
+
+func NewContentModerationServiceWithEncryptor(
+	settingRepo SettingRepository,
+	repo ContentModerationRepository,
+	hashCache ContentModerationHashCache,
+	groupRepo GroupRepository,
+	userRepo UserRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	emailService *EmailService,
+	secretEncryptor SecretEncryptor,
+) *ContentModerationService {
+	return newContentModerationService(settingRepo, repo, hashCache, groupRepo, userRepo, authCacheInvalidator, emailService, secretEncryptor)
+}
+
+func newContentModerationService(
+	settingRepo SettingRepository,
+	repo ContentModerationRepository,
+	hashCache ContentModerationHashCache,
+	groupRepo GroupRepository,
+	userRepo UserRepository,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	emailService *EmailService,
+	secretEncryptor SecretEncryptor,
+) *ContentModerationService {
 	svc := &ContentModerationService{
 		settingRepo:          settingRepo,
 		repo:                 repo,
@@ -503,7 +532,8 @@ func NewContentModerationService(
 		userRepo:             userRepo,
 		authCacheInvalidator: authCacheInvalidator,
 		emailService:         emailService,
-		httpClient:           &http.Client{},
+		secretEncryptor:      secretEncryptor,
+		httpClient:           contentModerationHTTPClient(nil),
 		workerCount:          maxContentModerationWorkerCount,
 		asyncQueue:           make(chan contentModerationTask, maxContentModerationQueueSize),
 		keyHealth:            make(map[string]*contentModerationKeyHealth),
@@ -515,6 +545,15 @@ func NewContentModerationService(
 		go svc.cleanupWorker()
 	}
 	return svc
+}
+
+// SetSecretEncryptor is retained for tests and manual construction. Production
+// wiring uses NewContentModerationServiceWithEncryptor so workers never observe
+// an uninitialized encryptor.
+func (s *ContentModerationService) SetSecretEncryptor(encryptor SecretEncryptor) {
+	if s != nil {
+		s.secretEncryptor = encryptor
+	}
 }
 
 func (s *ContentModerationService) SetHFCAbuseRiskRecorder(recorder HFCAbuseRiskRecorder) {
@@ -536,6 +575,15 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	cfg, err := s.loadConfig(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if input.BaseURL != nil &&
+		contentModerationBaseURLIdentity(*input.BaseURL) != contentModerationBaseURLIdentity(cfg.BaseURL) &&
+		len(cfg.apiKeys()) > 0 &&
+		!contentModerationConfigReplacesOrClearsAPIKeys(input) {
+		return nil, infraerrors.BadRequest(
+			"CONTENT_MODERATION_API_KEY_REENTRY_REQUIRED",
+			"replace or clear API keys when the moderation base URL changes",
+		)
 	}
 	if input.Enabled != nil {
 		cfg.Enabled = *input.Enabled
@@ -626,12 +674,8 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 		return nil, err
 	}
 	cfg.normalize()
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("marshal content moderation config: %w", err)
-	}
-	if err := s.settingRepo.Set(ctx, SettingKeyContentModerationConfig, string(raw)); err != nil {
-		return nil, fmt.Errorf("save content moderation config: %w", err)
+	if err := s.saveConfig(ctx, cfg); err != nil {
+		return nil, err
 	}
 	return s.configView(cfg), nil
 }
@@ -644,6 +688,14 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 	keys := normalizeModerationAPIKeys(input.APIKeys)
 	configured := false
 	if len(keys) == 0 {
+		if strings.TrimSpace(input.BaseURL) != "" &&
+			contentModerationBaseURLIdentity(input.BaseURL) != contentModerationBaseURLIdentity(cfg.BaseURL) &&
+			len(cfg.apiKeys()) > 0 {
+			return nil, infraerrors.BadRequest(
+				"CONTENT_MODERATION_API_KEY_REENTRY_REQUIRED",
+				"explicit API keys are required when testing a different moderation base URL",
+			)
+		}
 		keys = cfg.apiKeys()
 		configured = true
 	}
@@ -657,6 +709,9 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		cfg.TimeoutMS = input.TimeoutMS
 	}
 	cfg.normalize()
+	if err := s.validateConfig(ctx, cfg); err != nil {
+		return nil, err
+	}
 	testInput, imageCount, err := buildModerationTestInput(input.Prompt, input.Images)
 	if err != nil {
 		return nil, err
@@ -696,6 +751,17 @@ func (s *ContentModerationService) TestAPIKeys(ctx context.Context, input TestCo
 		items = append(items, status)
 	}
 	return &TestContentModerationAPIKeysResult{Items: items, AuditResult: auditResult, ImageCount: imageCount}, nil
+}
+
+func contentModerationBaseURLIdentity(value string) string {
+	return strings.TrimRight(strings.TrimSpace(value), "/")
+}
+
+func contentModerationConfigReplacesOrClearsAPIKeys(input UpdateContentModerationConfigInput) bool {
+	if input.ClearAPIKey {
+		return true
+	}
+	return input.APIKeys != nil && normalizeContentModerationAPIKeysMode(input.APIKeysMode) == contentModerationAPIKeysModeReplace
 }
 
 func (s *ContentModerationService) Check(ctx context.Context, input ContentModerationCheckInput) (*ContentModerationDecision, error) {
@@ -822,6 +888,18 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		}
 		return allow, nil
 	}
+	if len(content.Images) > maxContentModerationInputImages {
+		return s.recordFailClosedDecision(
+			ctx,
+			input,
+			cfg,
+			ContentModerationActionError,
+			"moderation_too_many_images",
+			http.StatusBadRequest,
+			fmt.Sprintf("Content moderation supports at most %d image per request", maxContentModerationInputImages),
+			"content moderation input exceeds the supported image count",
+		)
+	}
 	content.Normalize()
 	hashText := content.Hash()
 	input.InputHash = hashText
@@ -884,7 +962,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		}
 		return allow, nil
 	}
-	if !input.FailClosed && cfg.Mode == ContentModerationModeObserve {
+	if !input.FailClosed && cfg.Mode == ContentModerationModeObserve && len(content.Images) == 0 {
 		slog.Info("content_moderation.enqueue_observe",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
@@ -1069,6 +1147,9 @@ func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInpu
 		s.asyncDropped.Add(1)
 		return
 	}
+	// The worker uses the normalized content and immutable hash below; retaining
+	// the complete request body would duplicate attacker-controlled queue memory.
+	input.Body = nil
 	task := contentModerationTask{
 		input:      input,
 		content:    content,
@@ -1325,8 +1406,71 @@ func (s *ContentModerationService) loadConfig(ctx context.Context) (*ContentMode
 	if err := json.Unmarshal([]byte(raw), cfg); err != nil {
 		return nil, infraerrors.BadRequest("INVALID_CONTENT_MODERATION_CONFIG", "内容审计配置不是有效 JSON")
 	}
+	legacyKeys := normalizeModerationAPIKeys(append(append([]string{}, cfg.APIKeys...), cfg.APIKey))
+	if len(legacyKeys) > 0 {
+		return nil, fmt.Errorf("content moderation plaintext API keys remain after security migration")
+	}
+	if len(cfg.EncryptedAPIKeys) > 0 {
+		if s.secretEncryptor == nil {
+			return nil, fmt.Errorf("content moderation secret encryptor is not configured")
+		}
+		keys := make([]string, 0, len(cfg.EncryptedAPIKeys))
+		for _, ciphertext := range cfg.EncryptedAPIKeys {
+			plaintext, err := DecryptForSecretDomain(s.secretEncryptor, SecretDomainContentModeration, ciphertext)
+			if err != nil {
+				return nil, fmt.Errorf("decrypt content moderation api key: %w", err)
+			}
+			keys = append(keys, plaintext)
+		}
+		decryptedKeys := normalizeModerationAPIKeys(keys)
+		cfg.APIKey = ""
+		cfg.APIKeys = decryptedKeys
+		cfg.EncryptedAPIKeys = nil
+	}
 	cfg.normalize()
 	return cfg, nil
+}
+
+func (s *ContentModerationService) saveConfig(ctx context.Context, cfg *ContentModerationConfig) error {
+	stored := *cfg
+	stored.APIKey = ""
+	// Persist only ciphertext. loadConfig still accepts the legacy plaintext
+	// fields and immediately rewrites them, but mixed old/new binaries are not a
+	// safe deployment topology after this version starts saving configuration.
+	stored.APIKeys = nil
+	stored.EncryptedAPIKeys = nil
+	for _, key := range cfg.apiKeys() {
+		if s.secretEncryptor == nil {
+			return fmt.Errorf("content moderation secret encryptor is not configured")
+		}
+		ciphertext, err := EncryptForSecretDomain(s.secretEncryptor, SecretDomainContentModeration, key)
+		if err != nil {
+			return fmt.Errorf("encrypt content moderation api key: %w", err)
+		}
+		stored.EncryptedAPIKeys = append(stored.EncryptedAPIKeys, ciphertext)
+	}
+	raw, err := json.Marshal(&stored)
+	if err != nil {
+		return fmt.Errorf("marshal content moderation config: %w", err)
+	}
+	if err := s.settingRepo.Set(ctx, SettingKeyContentModerationConfig, string(raw)); err != nil {
+		return fmt.Errorf("save content moderation config: %w", err)
+	}
+	return nil
+}
+
+func equalModerationAPIKeys(left, right []string) bool {
+	left = normalizeModerationAPIKeys(left)
+	right = normalizeModerationAPIKeys(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *ContentModerationService) isRiskControlEnabled(ctx context.Context) bool {
@@ -1347,7 +1491,7 @@ func (s *ContentModerationService) validateConfig(ctx context.Context, cfg *Cont
 	default:
 		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_MODE", "内容审计模式无效")
 	}
-	if _, err := url.ParseRequestURI(cfg.BaseURL); err != nil {
+	if err := validateContentModerationBaseURL(cfg.BaseURL); err != nil {
 		return infraerrors.BadRequest("INVALID_CONTENT_MODERATION_BASE_URL", "OpenAI Base URL 无效")
 	}
 	if cfg.BlockStatus < 400 || cfg.BlockStatus > 599 {
@@ -1361,6 +1505,43 @@ func (s *ContentModerationService) validateConfig(ctx context.Context, cfg *Cont
 		}
 	}
 	return nil
+}
+
+func validateContentModerationBaseURL(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+		return fmt.Errorf("absolute moderation base URL is required")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("moderation base URL cannot contain credentials or a fragment")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme == "https" {
+		return nil
+	}
+	if scheme != "http" {
+		return fmt.Errorf("moderation base URL must use HTTPS")
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(hostname)
+	if ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("non-loopback moderation base URL must use HTTPS")
+}
+
+func contentModerationHTTPClient(base *http.Client) *http.Client {
+	client := *http.DefaultClient
+	if base != nil {
+		client = *base
+	}
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
 }
 
 func (s *ContentModerationService) callModeration(ctx context.Context, cfg *ContentModerationConfig, input any) (*moderationAPIResult, error) {
@@ -1405,6 +1586,12 @@ func (s *ContentModerationService) callModeration(ctx context.Context, cfg *Cont
 }
 
 func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Context, cfg *ContentModerationConfig, apiKey string, input any, httpStatus *int) (*moderationAPIResult, error) {
+	if cfg == nil {
+		return nil, errors.New("content moderation config is missing")
+	}
+	if err := validateContentModerationBaseURL(cfg.BaseURL); err != nil {
+		return nil, fmt.Errorf("invalid content moderation base URL: %w", err)
+	}
 	base := strings.TrimRight(cfg.BaseURL, "/")
 	endpoint, err := url.JoinPath(base, "/v1/moderations")
 	if err != nil {
@@ -1429,10 +1616,7 @@ func (s *ContentModerationService) callModerationOnceWithInput(ctx context.Conte
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := s.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := contentModerationHTTPClient(s.httpClient)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

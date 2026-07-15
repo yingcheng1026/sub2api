@@ -63,6 +63,22 @@ type User struct {
 	TotalRecharged float64 `json:"total_recharged,omitempty"`
 	// RpmLimit holds the value of the "rpm_limit" field.
 	RpmLimit int `json:"rpm_limit,omitempty"`
+	// SignupIP holds the value of the "signup_ip" field.
+	SignupIP string `json:"signup_ip,omitempty"`
+	// SignupIPPrefix holds the value of the "signup_ip_prefix" field.
+	SignupIPPrefix string `json:"signup_ip_prefix,omitempty"`
+	// SignupUserAgentHash holds the value of the "signup_user_agent_hash" field.
+	SignupUserAgentHash string `json:"signup_user_agent_hash,omitempty"`
+	// SignupDeviceFingerprintHash holds the value of the "signup_device_fingerprint_hash" field.
+	SignupDeviceFingerprintHash string `json:"signup_device_fingerprint_hash,omitempty"`
+	// TrialBonusEligible holds the value of the "trial_bonus_eligible" field.
+	TrialBonusEligible bool `json:"trial_bonus_eligible,omitempty"`
+	// TrialBonusHoldReason holds the value of the "trial_bonus_hold_reason" field.
+	TrialBonusHoldReason string `json:"trial_bonus_hold_reason,omitempty"`
+	// TrialBonusRiskScore holds the value of the "trial_bonus_risk_score" field.
+	TrialBonusRiskScore int `json:"trial_bonus_risk_score,omitempty"`
+	// TokenVersion holds the value of the "token_version" field.
+	TokenVersion int64 `json:"token_version,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserQuery when eager-loading is set.
 	Edges        UserEdges `json:"edges"`
@@ -235,13 +251,13 @@ func (*User) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case user.FieldTotpEnabled, user.FieldBalanceNotifyEnabled:
+		case user.FieldTotpEnabled, user.FieldBalanceNotifyEnabled, user.FieldTrialBonusEligible:
 			values[i] = new(sql.NullBool)
 		case user.FieldBalance, user.FieldBalanceNotifyThreshold, user.FieldTotalRecharged:
 			values[i] = new(sql.NullFloat64)
-		case user.FieldID, user.FieldConcurrency, user.FieldRpmLimit:
+		case user.FieldID, user.FieldConcurrency, user.FieldRpmLimit, user.FieldTrialBonusRiskScore, user.FieldTokenVersion:
 			values[i] = new(sql.NullInt64)
-		case user.FieldEmail, user.FieldPasswordHash, user.FieldRole, user.FieldStatus, user.FieldUsername, user.FieldNotes, user.FieldTotpSecretEncrypted, user.FieldSignupSource, user.FieldBalanceNotifyThresholdType, user.FieldBalanceNotifyExtraEmails:
+		case user.FieldEmail, user.FieldPasswordHash, user.FieldRole, user.FieldStatus, user.FieldUsername, user.FieldNotes, user.FieldTotpSecretEncrypted, user.FieldSignupSource, user.FieldBalanceNotifyThresholdType, user.FieldBalanceNotifyExtraEmails, user.FieldSignupIP, user.FieldSignupIPPrefix, user.FieldSignupUserAgentHash, user.FieldSignupDeviceFingerprintHash, user.FieldTrialBonusHoldReason:
 			values[i] = new(sql.NullString)
 		case user.FieldCreatedAt, user.FieldUpdatedAt, user.FieldDeletedAt, user.FieldTotpEnabledAt, user.FieldLastLoginAt, user.FieldLastActiveAt:
 			values[i] = new(sql.NullTime)
@@ -409,6 +425,54 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field rpm_limit", values[i])
 			} else if value.Valid {
 				_m.RpmLimit = int(value.Int64)
+			}
+		case user.FieldSignupIP:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field signup_ip", values[i])
+			} else if value.Valid {
+				_m.SignupIP = value.String
+			}
+		case user.FieldSignupIPPrefix:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field signup_ip_prefix", values[i])
+			} else if value.Valid {
+				_m.SignupIPPrefix = value.String
+			}
+		case user.FieldSignupUserAgentHash:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field signup_user_agent_hash", values[i])
+			} else if value.Valid {
+				_m.SignupUserAgentHash = value.String
+			}
+		case user.FieldSignupDeviceFingerprintHash:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field signup_device_fingerprint_hash", values[i])
+			} else if value.Valid {
+				_m.SignupDeviceFingerprintHash = value.String
+			}
+		case user.FieldTrialBonusEligible:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field trial_bonus_eligible", values[i])
+			} else if value.Valid {
+				_m.TrialBonusEligible = value.Bool
+			}
+		case user.FieldTrialBonusHoldReason:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field trial_bonus_hold_reason", values[i])
+			} else if value.Valid {
+				_m.TrialBonusHoldReason = value.String
+			}
+		case user.FieldTrialBonusRiskScore:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field trial_bonus_risk_score", values[i])
+			} else if value.Valid {
+				_m.TrialBonusRiskScore = int(value.Int64)
+			}
+		case user.FieldTokenVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field token_version", values[i])
+			} else if value.Valid {
+				_m.TokenVersion = value.Int64
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -596,6 +660,30 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("rpm_limit=")
 	builder.WriteString(fmt.Sprintf("%v", _m.RpmLimit))
+	builder.WriteString(", ")
+	builder.WriteString("signup_ip=")
+	builder.WriteString(_m.SignupIP)
+	builder.WriteString(", ")
+	builder.WriteString("signup_ip_prefix=")
+	builder.WriteString(_m.SignupIPPrefix)
+	builder.WriteString(", ")
+	builder.WriteString("signup_user_agent_hash=")
+	builder.WriteString(_m.SignupUserAgentHash)
+	builder.WriteString(", ")
+	builder.WriteString("signup_device_fingerprint_hash=")
+	builder.WriteString(_m.SignupDeviceFingerprintHash)
+	builder.WriteString(", ")
+	builder.WriteString("trial_bonus_eligible=")
+	builder.WriteString(fmt.Sprintf("%v", _m.TrialBonusEligible))
+	builder.WriteString(", ")
+	builder.WriteString("trial_bonus_hold_reason=")
+	builder.WriteString(_m.TrialBonusHoldReason)
+	builder.WriteString(", ")
+	builder.WriteString("trial_bonus_risk_score=")
+	builder.WriteString(fmt.Sprintf("%v", _m.TrialBonusRiskScore))
+	builder.WriteString(", ")
+	builder.WriteString("token_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.TokenVersion))
 	builder.WriteByte(')')
 	return builder.String()
 }

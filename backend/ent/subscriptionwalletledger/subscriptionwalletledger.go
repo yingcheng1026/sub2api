@@ -22,6 +22,8 @@ const (
 	FieldBalanceAfter = "balance_after"
 	// FieldReason holds the string denoting the reason field in the database.
 	FieldReason = "reason"
+	// FieldPaymentOrderID holds the string denoting the payment_order_id field in the database.
+	FieldPaymentOrderID = "payment_order_id"
 	// FieldUsageLogID holds the string denoting the usage_log_id field in the database.
 	FieldUsageLogID = "usage_log_id"
 	// FieldOperatorID holds the string denoting the operator_id field in the database.
@@ -68,6 +70,7 @@ var Columns = []string{
 	FieldDeltaUsd,
 	FieldBalanceAfter,
 	FieldReason,
+	FieldPaymentOrderID,
 	FieldUsageLogID,
 	FieldOperatorID,
 	FieldNotes,
@@ -117,6 +120,11 @@ func ByBalanceAfter(opts ...sql.OrderTermOption) OrderOption {
 // ByReason orders the results by the reason field.
 func ByReason(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldReason, opts...).ToFunc()
+}
+
+// ByPaymentOrderID orders the results by the payment_order_id field.
+func ByPaymentOrderID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPaymentOrderID, opts...).ToFunc()
 }
 
 // ByUsageLogID orders the results by the usage_log_id field.

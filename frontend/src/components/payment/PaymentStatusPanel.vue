@@ -69,6 +69,30 @@
 
     <!-- ═══ Active States: QR or Popup waiting ═══ -->
 
+    <!-- Provider payment captured; fulfillment must finish before success. -->
+    <template v-else-if="fulfillmentPending">
+      <div class="card p-6">
+        <div class="flex flex-col items-center space-y-4 py-4 text-center">
+          <div
+            v-if="fulfillmentFailed"
+            class="flex h-16 w-16 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30"
+          >
+            <Icon name="exclamationCircle" size="lg" class="text-amber-500" />
+          </div>
+          <div v-else class="h-10 w-10 animate-spin rounded-full border-4 border-primary-500 border-t-transparent"></div>
+          <p class="text-lg font-bold text-gray-900 dark:text-white">
+            {{ fulfillmentFailed ? t('payment.result.fulfillmentFailed') : t('payment.result.processing') }}
+          </p>
+          <p class="text-sm text-gray-500 dark:text-gray-400">
+            {{ fulfillmentFailed ? t('payment.result.fulfillmentFailedHint') : t('payment.result.processingHint') }}
+          </p>
+          <p class="text-xs text-gray-400 dark:text-gray-500">
+            {{ t('payment.orders.orderId') }} #{{ props.orderId }}
+          </p>
+        </div>
+      </div>
+    </template>
+
     <!-- QR Code Mode -->
     <template v-else-if="qrUrl">
       <div class="card p-6">
@@ -129,6 +153,13 @@ import { useAppStore } from '@/stores'
 import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { getPaymentPopupFeatures } from '@/components/payment/providerConfig'
+import {
+  isPaymentCompleted,
+  isPaymentFulfillmentFailed,
+  isPaymentFulfillmentPending,
+  isPaymentLateSettlementRecoverable,
+  isPaymentTerminalFailure,
+} from '@/components/payment/paymentFlow'
 import type { PaymentOrder } from '@/types/payment'
 import Icon from '@/components/icons/Icon.vue'
 import QRCode from 'qrcode'
@@ -157,15 +188,30 @@ const qrUrl = ref('')
 const remainingSeconds = ref(0)
 const cancelling = ref(false)
 const paidOrder = ref<PaymentOrder | null>(null)
+const latestOrderStatus = ref<string | null>(null)
+const latestOrderPaidAt = ref<string | null>(null)
 
 // Terminal outcome: null = still active, 'success' | 'cancelled' | 'expired'
 const outcome = ref<PaymentOutcome | null>(null)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let countdownTimer: ReturnType<typeof setInterval> | null = null
+let pollRequest: Promise<string | null> | null = null
 
 const isAlipay = computed(() => props.paymentType.includes('alipay'))
 const isWxpay = computed(() => props.paymentType.includes('wxpay'))
+const fulfillmentPending = computed(() => (
+  isPaymentFulfillmentPending(latestOrderStatus.value, latestOrderPaidAt.value)
+  || isPaymentLateSettlementRecoverable(
+    latestOrderStatus.value,
+    latestOrderPaidAt.value,
+    props.expiresAt,
+  )
+))
+const fulfillmentFailed = computed(() => isPaymentFulfillmentFailed(
+  latestOrderStatus.value,
+  latestOrderPaidAt.value
+))
 
 const qrBorderClass = computed(() => {
   if (isAlipay.value) return 'border-[#00AEEF] bg-blue-50 dark:border-[#00AEEF]/70 dark:bg-blue-950/20'
@@ -197,10 +243,6 @@ const countdownDisplay = computed(() => {
   return m.toString().padStart(2, '0') + ':' + s.toString().padStart(2, '0')
 })
 
-function isSuccessStatus(status: string | null | undefined): boolean {
-  return status === 'COMPLETED' || status === 'PAID' || status === 'RECHARGING'
-}
-
 function reopenPopup() {
   if (props.payUrl) {
     const win = window.open(props.payUrl, 'paymentPopup', getPaymentPopupFeatures())
@@ -225,30 +267,59 @@ async function renderQR() {
   })
 }
 
-async function pollStatus() {
-  if (!props.orderId || outcome.value) return
-  const order = await paymentStore.pollOrderStatus(props.orderId)
-  if (!order) return
-  if (isSuccessStatus(order.status)) {
-    cleanup()
-    paidOrder.value = order
-    setOutcome('success')
-    emit('success')
-  } else if (order.status === 'CANCELLED') {
-    cleanup()
-    setOutcome('cancelled')
-  } else if (order.status === 'EXPIRED' || order.status === 'FAILED') {
-    cleanup()
-    setOutcome('expired')
+async function pollStatus(): Promise<string | null> {
+  if (!props.orderId || outcome.value) return null
+  if (pollRequest) return pollRequest
+
+  pollRequest = (async () => {
+    try {
+      const order = await paymentStore.pollOrderStatus(props.orderId)
+      if (!order) return null
+      latestOrderStatus.value = order.status
+      latestOrderPaidAt.value = order.paid_at || null
+      if (isPaymentCompleted(order.status)) {
+        cleanup()
+        paidOrder.value = order
+        setOutcome('success')
+        emit('success')
+      } else if (
+        isPaymentTerminalFailure(order.status, order.paid_at)
+        && !isPaymentLateSettlementRecoverable(
+          order.status,
+          order.paid_at,
+          props.expiresAt,
+        )
+      ) {
+        cleanup()
+        setOutcome(order.status === 'CANCELLED' ? 'cancelled' : 'expired')
+      }
+      return order.status
+    } catch {
+      return null
+    }
+  })()
+
+  try {
+    return await pollRequest
+  } finally {
+    pollRequest = null
   }
+}
+
+async function handleCountdownDeadline() {
+  clearCountdownTimer()
+  // The client deadline is display-only. A provider can accept payment at the
+  // boundary while its webhook is still in flight, so only a backend status
+  // outside the late-settlement grace may terminate this flow.
+  await pollStatus()
 }
 
 function startCountdown(seconds: number) {
   remainingSeconds.value = Math.max(0, seconds)
-  if (remainingSeconds.value <= 0) { setOutcome('expired'); return }
+  if (remainingSeconds.value <= 0) { void handleCountdownDeadline(); return }
   countdownTimer = setInterval(() => {
-    remainingSeconds.value--
-    if (remainingSeconds.value <= 0) { setOutcome('expired'); cleanup() }
+    remainingSeconds.value = Math.max(0, remainingSeconds.value - 1)
+    if (remainingSeconds.value <= 0) void handleCountdownDeadline()
   }, 1000)
 }
 
@@ -256,7 +327,11 @@ async function handleCancel() {
   if (!props.orderId || cancelling.value) return
   cancelling.value = true
   try {
-    await paymentAPI.cancelOrder(props.orderId)
+    const response = await paymentAPI.cancelOrder(props.orderId)
+    if (response.data.message === 'already_paid') {
+      await pollStatus()
+      return
+    }
     cleanup()
     setOutcome('cancelled')
   } catch (err: unknown) {
@@ -270,6 +345,10 @@ function handleDone() { cleanup(); emit('done') }
 
 function cleanup() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  clearCountdownTimer()
+}
+
+function clearCountdownTimer() {
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
 }
 

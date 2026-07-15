@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -13,14 +14,21 @@ import (
 
 const (
 	schedulerBucketSetKey       = "sched:buckets"
-	schedulerOutboxWatermarkKey = "sched:outbox:watermark"
-	schedulerAccountPrefix      = "sched:acc:"
-	schedulerAccountMetaPrefix  = "sched:meta:"
-	schedulerActivePrefix       = "sched:active:"
-	schedulerReadyPrefix        = "sched:ready:"
-	schedulerVersionPrefix      = "sched:ver:"
-	schedulerSnapshotPrefix     = "sched:"
-	schedulerLockPrefix         = "sched:lock:"
+	schedulerOutboxWatermarkKey = "sched:v2:outbox:watermark"
+	schedulerAccountPrefix      = "sched:v2:acc:"
+	schedulerAccountMetaPrefix  = "sched:v2:meta:"
+	schedulerActivePrefix       = "sched:v2:active:"
+	schedulerReadyPrefix        = "sched:v2:ready:"
+	schedulerVersionPrefix      = "sched:v2:ver:"
+	schedulerSnapshotPrefix     = "sched:v2:"
+	schedulerLockPrefix         = "sched:v2:lock:"
+
+	schedulerCachePayloadVersion      = 1
+	schedulerCachePayloadKindAccount  = "account"
+	schedulerCachePayloadKindMetadata = "metadata"
+	schedulerLegacyAccountPattern     = "sched:acc:*"
+	schedulerLegacyMetadataPattern    = "sched:meta:*"
+	schedulerLegacyWatermarkKey       = "sched:outbox:watermark"
 
 	defaultSchedulerSnapshotMGetChunkSize  = 128
 	defaultSchedulerSnapshotWriteChunkSize = 256
@@ -71,15 +79,28 @@ return 1
 
 type schedulerCache struct {
 	rdb            *redis.Client
+	encryptor      service.SecretEncryptor
 	mgetChunkSize  int
 	writeChunkSize int
 }
 
-func NewSchedulerCache(rdb *redis.Client) service.SchedulerCache {
-	return newSchedulerCacheWithChunkSizes(rdb, defaultSchedulerSnapshotMGetChunkSize, defaultSchedulerSnapshotWriteChunkSize)
+type schedulerCachePayload struct {
+	Version int             `json:"version"`
+	Kind    string          `json:"kind"`
+	Account service.Account `json:"account"`
 }
 
-func newSchedulerCacheWithChunkSizes(rdb *redis.Client, mgetChunkSize, writeChunkSize int) service.SchedulerCache {
+func NewSchedulerCache(rdb *redis.Client, encryptor service.SecretEncryptor) (service.SchedulerCache, error) {
+	return newSchedulerCacheWithChunkSizes(rdb, encryptor, defaultSchedulerSnapshotMGetChunkSize, defaultSchedulerSnapshotWriteChunkSize)
+}
+
+func newSchedulerCacheWithChunkSizes(rdb *redis.Client, encryptor service.SecretEncryptor, mgetChunkSize, writeChunkSize int) (service.SchedulerCache, error) {
+	if rdb == nil {
+		return nil, fmt.Errorf("scheduler cache Redis client is required")
+	}
+	if _, ok := encryptor.(service.DomainSecretEncryptor); !ok || encryptor == nil {
+		return nil, fmt.Errorf("scheduler cache domain secret encryptor is required")
+	}
 	if mgetChunkSize <= 0 {
 		mgetChunkSize = defaultSchedulerSnapshotMGetChunkSize
 	}
@@ -88,9 +109,10 @@ func newSchedulerCacheWithChunkSizes(rdb *redis.Client, mgetChunkSize, writeChun
 	}
 	return &schedulerCache{
 		rdb:            rdb,
+		encryptor:      encryptor,
 		mgetChunkSize:  mgetChunkSize,
 		writeChunkSize: writeChunkSize,
-	}
+	}, nil
 }
 
 func (c *schedulerCache) GetSnapshot(ctx context.Context, bucket service.SchedulerBucket) ([]*service.Account, bool, error) {
@@ -140,7 +162,7 @@ func (c *schedulerCache) GetSnapshot(ctx context.Context, bucket service.Schedul
 		if val == nil {
 			return nil, false, nil
 		}
-		account, err := decodeCachedAccount(val)
+		account, err := decodeSchedulerCachedAccount(val, schedulerCachePayloadKindMetadata, c.encryptor)
 		if err != nil {
 			return nil, false, err
 		}
@@ -217,7 +239,7 @@ func (c *schedulerCache) GetAccount(ctx context.Context, accountID int64) (*serv
 	if err != nil {
 		return nil, err
 	}
-	return decodeCachedAccount(val)
+	return decodeSchedulerCachedAccount(val, schedulerCachePayloadKindAccount, c.encryptor)
 }
 
 func (c *schedulerCache) SetAccount(ctx context.Context, account *service.Account) error {
@@ -257,16 +279,16 @@ func (c *schedulerCache) UpdateLastUsed(ctx context.Context, updates map[int64]t
 		if val == nil {
 			continue
 		}
-		account, err := decodeCachedAccount(val)
+		account, err := decodeSchedulerCachedAccount(val, schedulerCachePayloadKindAccount, c.encryptor)
 		if err != nil {
 			return err
 		}
 		account.LastUsedAt = ptrTime(updates[ids[i]])
-		updated, err := json.Marshal(account)
+		updated, err := encodeSchedulerCachedAccount(*account, schedulerCachePayloadKindAccount, c.encryptor)
 		if err != nil {
 			return err
 		}
-		metaPayload, err := json.Marshal(buildSchedulerMetadataAccount(*account))
+		metaPayload, err := encodeSchedulerCachedAccount(buildSchedulerMetadataAccount(*account), schedulerCachePayloadKindMetadata, c.encryptor)
 		if err != nil {
 			return err
 		}
@@ -342,21 +364,50 @@ func ptrTime(t time.Time) *time.Time {
 	return &t
 }
 
-func decodeCachedAccount(val any) (*service.Account, error) {
-	var payload []byte
+func encodeSchedulerCachedAccount(account service.Account, kind string, encryptor service.SecretEncryptor) (string, error) {
+	if kind != schedulerCachePayloadKindAccount && kind != schedulerCachePayloadKindMetadata {
+		return "", fmt.Errorf("unsupported scheduler cache payload kind %q", kind)
+	}
+	payload, err := json.Marshal(schedulerCachePayload{
+		Version: schedulerCachePayloadVersion,
+		Kind:    kind,
+		Account: account,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal scheduler cache payload: %w", err)
+	}
+	ciphertext, err := service.EncryptForSecretDomain(encryptor, service.SecretDomainSchedulerCache, string(payload))
+	if err != nil {
+		return "", fmt.Errorf("encrypt scheduler cache payload: %w", err)
+	}
+	return ciphertext, nil
+}
+
+func decodeSchedulerCachedAccount(val any, expectedKind string, encryptor service.SecretEncryptor) (*service.Account, error) {
+	var ciphertext string
 	switch raw := val.(type) {
 	case string:
-		payload = []byte(raw)
+		ciphertext = raw
 	case []byte:
-		payload = raw
+		ciphertext = string(raw)
 	default:
 		return nil, fmt.Errorf("unexpected account cache type: %T", val)
 	}
-	var account service.Account
-	if err := json.Unmarshal(payload, &account); err != nil {
-		return nil, err
+	plaintext, err := service.DecryptForSecretDomain(encryptor, service.SecretDomainSchedulerCache, ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt scheduler cache payload: %w", err)
 	}
-	return &account, nil
+	var payload schedulerCachePayload
+	if err := json.Unmarshal([]byte(plaintext), &payload); err != nil {
+		return nil, fmt.Errorf("decode scheduler cache payload: %w", err)
+	}
+	if payload.Version != schedulerCachePayloadVersion {
+		return nil, fmt.Errorf("unsupported scheduler cache payload version %d", payload.Version)
+	}
+	if payload.Kind != expectedKind {
+		return nil, fmt.Errorf("scheduler cache payload kind %q does not match expected %q", payload.Kind, expectedKind)
+	}
+	return &payload.Account, nil
 }
 
 func (c *schedulerCache) writeAccounts(ctx context.Context, accounts []service.Account) error {
@@ -379,11 +430,11 @@ func (c *schedulerCache) writeAccounts(ctx context.Context, accounts []service.A
 	}
 
 	for _, account := range accounts {
-		fullPayload, err := json.Marshal(account)
+		fullPayload, err := encodeSchedulerCachedAccount(account, schedulerCachePayloadKindAccount, c.encryptor)
 		if err != nil {
 			return err
 		}
-		metaPayload, err := json.Marshal(buildSchedulerMetadataAccount(account))
+		metaPayload, err := encodeSchedulerCachedAccount(buildSchedulerMetadataAccount(account), schedulerCachePayloadKindMetadata, c.encryptor)
 		if err != nil {
 			return err
 		}
@@ -516,17 +567,106 @@ func filterSchedulerCredentials(credentials map[string]any) map[string]any {
 	if len(credentials) == 0 {
 		return nil
 	}
-	keys := []string{"model_mapping", "api_key", "project_id", "oauth_type"}
+	keys := []string{"model_mapping", "project_id", "oauth_type"}
 	filtered := make(map[string]any)
 	for _, key := range keys {
 		if value, ok := credentials[key]; ok && value != nil {
 			filtered[key] = value
 		}
 	}
+	if apiKey, ok := credentials["api_key"].(string); ok && strings.TrimSpace(apiKey) != "" {
+		filtered[service.SchedulerMetadataAPIKeyConfigured] = true
+	}
 	if len(filtered) == 0 {
 		return nil
 	}
 	return filtered
+}
+
+// PurgeLegacySchedulerCacheSecrets removes the pre-v2 plaintext account and
+// metadata namespaces. New encrypted entries use sched:v2:* and are never
+// touched, so the purge is idempotent across restarts.
+func PurgeLegacySchedulerCacheSecrets(ctx context.Context, rdb *redis.Client) (int64, error) {
+	if rdb == nil {
+		return 0, fmt.Errorf("scheduler cache Redis client is required")
+	}
+	var removed int64
+	for _, pattern := range []string{schedulerLegacyAccountPattern, schedulerLegacyMetadataPattern} {
+		count, err := purgeLegacySchedulerCachePattern(ctx, rdb, pattern)
+		removed += count
+		if err != nil {
+			return removed, err
+		}
+	}
+	return removed, nil
+}
+
+// SeedSchedulerCacheV2Watermark copies the non-secret legacy outbox position
+// exactly once. This avoids a full replay without allowing an old process to
+// advance the new namespace during a rolling cutover.
+func SeedSchedulerCacheV2Watermark(ctx context.Context, rdb *redis.Client) (bool, error) {
+	if rdb == nil {
+		return false, fmt.Errorf("scheduler cache Redis client is required")
+	}
+	current, err := rdb.Get(ctx, schedulerOutboxWatermarkKey).Result()
+	if err == nil {
+		watermark, parseErr := strconv.ParseInt(current, 10, 64)
+		if parseErr != nil || watermark < 0 {
+			return false, fmt.Errorf("invalid scheduler v2 outbox watermark")
+		}
+		return false, nil
+	}
+	if err != redis.Nil {
+		return false, fmt.Errorf("read scheduler v2 outbox watermark: %w", err)
+	}
+	legacy, err := rdb.Get(ctx, schedulerLegacyWatermarkKey).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read legacy scheduler outbox watermark: %w", err)
+	}
+	watermark, err := strconv.ParseInt(legacy, 10, 64)
+	if err != nil || watermark < 0 {
+		return false, fmt.Errorf("invalid legacy scheduler outbox watermark")
+	}
+	seeded, err := rdb.SetNX(ctx, schedulerOutboxWatermarkKey, strconv.FormatInt(watermark, 10), 0).Result()
+	if err != nil {
+		return false, fmt.Errorf("seed scheduler v2 outbox watermark: %w", err)
+	}
+	return seeded, nil
+}
+
+func purgeLegacySchedulerCachePattern(ctx context.Context, rdb *redis.Client, pattern string) (int64, error) {
+	var removed int64
+	for pass := 0; pass < 3; pass++ {
+		var cursor uint64
+		for {
+			keys, next, err := rdb.Scan(ctx, cursor, pattern, 256).Result()
+			if err != nil {
+				return removed, fmt.Errorf("scan legacy scheduler cache %q: %w", pattern, err)
+			}
+			if len(keys) > 0 {
+				count, err := rdb.Unlink(ctx, keys...).Result()
+				if err != nil {
+					return removed, fmt.Errorf("remove legacy scheduler cache %q: %w", pattern, err)
+				}
+				removed += count
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
+		}
+		remaining, _, err := rdb.Scan(ctx, 0, pattern, 1).Result()
+		if err != nil {
+			return removed, fmt.Errorf("verify legacy scheduler cache %q: %w", pattern, err)
+		}
+		if len(remaining) == 0 {
+			return removed, nil
+		}
+	}
+	return removed, fmt.Errorf("legacy scheduler cache keys remain for %q", pattern)
 }
 
 func filterSchedulerExtra(extra map[string]any) map[string]any {

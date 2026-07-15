@@ -534,6 +534,8 @@ func (s *GroupRepoSuite) TestListActive() {
 }
 
 func (s *GroupRepoSuite) TestListActiveByPlatform() {
+	baseGroups, err := s.repo.ListActiveByPlatform(s.ctx, service.PlatformAnthropic)
+	s.Require().NoError(err, "ListActiveByPlatform base")
 	s.Require().NoError(s.repo.Create(s.ctx, &service.Group{
 		Name:             "g1",
 		Platform:         service.PlatformAnthropic,
@@ -561,8 +563,7 @@ func (s *GroupRepoSuite) TestListActiveByPlatform() {
 
 	groups, err := s.repo.ListActiveByPlatform(s.ctx, service.PlatformAnthropic)
 	s.Require().NoError(err, "ListActiveByPlatform")
-	// 1 default anthropic group + 1 test active anthropic group = 2 total
-	s.Require().Len(groups, 2)
+	s.Require().Len(groups, len(baseGroups)+1)
 	// Verify our test group is in the results
 	var found bool
 	for _, g := range groups {

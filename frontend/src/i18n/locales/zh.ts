@@ -370,8 +370,8 @@ export default {
     expand: '展开',
     logout: '退出登录',
     github: 'GitHub',
-    mySubscriptions: '我的订阅',
-    buySubscription: '充值/订阅',
+    mySubscriptions: '历史权益',
+    buySubscription: '充值额度',
     docs: '文档',
     myOrders: '我的订单',
     orderManagement: '订单管理',
@@ -579,6 +579,7 @@ export default {
     title: '仪表盘',
     welcomeMessage: '欢迎回来！这是您账户的概览。',
     balance: '余额',
+    walletStatusUnavailable: '暂时无法核对额度钱包状态。为避免显示错误余额，已隐藏旧账户余额；请刷新后重试。',
     apiKeys: 'API 密钥',
     todayRequests: '今日请求',
     todayCost: '今日消费',
@@ -674,6 +675,13 @@ export default {
     created: '创建时间',
     copyToClipboard: '复制到剪贴板',
     copied: '已复制！',
+    revealTitle: '重新验证身份',
+    revealVerificationLabel: '当前密码或 2FA 验证码',
+    revealVerificationPrompt: '为保护密钥和敏感设置，请重新验证：未启用 2FA 请输入当前密码；已启用 2FA 请输入 6 位验证码。',
+    oauthPasswordGuidance: '仅使用第三方登录且不知道本地密码？请先通过“忘记密码”建立本地密码，或在个人资料中启用 2FA。',
+    revealSubmit: '验证并继续',
+    revealSubmitting: '验证中...',
+    revealFailed: '验证失败，未显示 API 密钥。',
     importToCcSwitch: '导入到 CCS',
     enable: '启用',
     disable: '禁用',
@@ -681,12 +689,15 @@ export default {
     namePlaceholder: '我的 API 密钥',
     groupLabel: '分组',
     selectGroup: '选择分组',
-    walletAnyKey: '通用 key（自动按模型路由分组）',
-    walletAnyKeyHint: '调 Claude、GPT 或 Gemini 时会自动选择对应分组，并从钱包扣费。',
-    walletAnyKeyBadge: '通用 · 钱包模式',
-    walletAnyKeySelectPlaceholder: '自动按模型路由',
+    walletAnyKey: '额度钱包自动路由 key',
+    walletAnyKeyHint: '系统自动创建。GPT 固定走 openai-default；Claude 需管理员授权专属 vip 分组。',
+    walletAnyKeyBadge: '额度钱包 · 自动路由',
+    walletAnyKeySelectPlaceholder: '系统自动路由',
     walletKeyBadge: '钱包',
-    walletKeyBadgeHint: '钱包模式自动建的 key，所有 key 共享同一个余额。',
+    walletKeyBadgeHint: '系统自动创建的额度钱包 key；GPT 走 openai-default，Claude 需专属 vip 权限。',
+    walletFixedGroupHint: '额度钱包普通 Key 仅可选 openai-default；管理员已授权 vip 时才会显示 Claude 分组。',
+    walletEntitlementsLoading: '正在核对钱包和分组权限……',
+    walletEntitlementsUnavailable: '暂时无法核对钱包分组权限，已停止保存，请刷新后重试。',
     statusLabel: '状态',
     selectStatus: '选择状态',
     saving: '保存中...',
@@ -732,6 +743,7 @@ export default {
       },
       cliTabs: {
         claudeCode: 'Claude Code',
+        claudeCodeVip: 'Claude Code（专属 vip）',
         geminiCli: 'Gemini CLI',
         codexCli: 'Codex CLI',
         codexCliWs: 'Codex CLI (WebSocket)',
@@ -1906,6 +1918,11 @@ export default {
       useDefaultRate: '使用默认',
       customRatePlaceholder: '留空使用默认',
       groupConfigUpdated: '分组配置更新成功',
+      groupConfigLoadFailed: '分组配置加载失败，已禁止保存。请重试，避免把上一位用户的配置写到当前用户。',
+      groupConfigStale: '该用户的分组权限已被其他操作更新，请关闭弹窗刷新后重新配置。',
+      walletRoutingBusinessRule: '额度钱包默认只使用 GPT，并固定走 openai-default；只有用户明确申请 Claude 后，才人工勾选专属 vip 分组。',
+      openAIDefaultGroupHint: 'GPT 钱包默认分组（公开可用，无需额外授权）',
+      vipGroupHint: 'Claude 专属分组（仅在用户明确申请后人工授权）',
       replaceGroup: '替换分组',
       clickToReplace: '点击替换分组',
       replaceGroupTitle: '替换专属分组',
@@ -2754,14 +2771,14 @@ export default {
       createFirstMonitor: '创建第一个监控来跟踪渠道可用性',
       advanced: {
         section: '高级（可选）',
-        sectionHint: '自定义请求头和请求体，用于突破上游的客户端识别限制（如仅允许 Claude Code 客户端）。',
+        sectionHint: '仅用于上游明确允许的自定义参数；不得伪装官方客户端，也不得放入鉴权凭据类 Header。',
         headers: '自定义请求头',
-        headersPlaceholder: 'User-Agent: claude-cli/1.0.83 (external, cli)\nx-app: cli\nanthropic-beta: claude-code-20250219',
+        headersPlaceholder: 'User-Agent: sub2api-monitor/1.0\nanthropic-beta: interleaved-thinking-2025-05-14\nX-Monitor-Trace: enabled',
         headerNamePlaceholder: 'Header 名',
         headerValuePlaceholder: 'Value',
         headerAddRow: '添加 Header',
         headerNameInvalid: 'Header 名不能包含空格或冒号：{name}',
-        headersHint: '与默认请求头合并，用户值优先。hop-by-hop 类 header（Host/Content-Length/...）会被忽略。',
+        headersHint: '与默认请求头合并。鉴权、凭据、官方客户端身份和 hop-by-hop Header 会被服务端拒绝。',
         headersParseError: '无法解析这一行：{line}',
         bodyMode: '请求体处理',
         bodyModeOff: '默认',
@@ -2774,13 +2791,16 @@ export default {
         bodyJsonFormat: '格式化',
         bodyJsonHint: '失焦时自动解析校验。留空等价于没有覆盖。',
         bodyJsonError: 'JSON 解析失败',
-        bodyJsonObjectError: '请求体必须是一个 JSON 对象（不能是数组或基本类型）'
+        bodyJsonObjectError: '请求体必须是一个 JSON 对象（不能是数组或基本类型）',
+        writeOnlyNotice: '现有请求头和请求体属于只写敏感配置，不会回显到浏览器。普通保存会原样保留。',
+        replaceExisting: '我要替换或清空现有高级配置',
+        templateAppliedServerSide: '模板内容由服务端安全应用，不会在浏览器中展开。'
       },
       templateField: {
         label: '请求模板',
         none: '不使用模板',
         placeholder: '选择一个模板（按当前平台过滤）',
-        applyHint: '选中模板后，会把模板的请求头和请求体拷贝到此监控（快照）。后续模板变动不自动同步。'
+        applyHint: '选中模板后，服务端会安全拷贝请求头和请求体快照；敏感内容不会回显到浏览器。后续模板变动不自动同步。'
       },
       template: {
         manageButton: '模板管理',
@@ -2863,7 +2883,7 @@ export default {
         modePlan: '套餐档位',
         modeGroup: '指定分组',
         modeWallet: '钱包充值',
-        modeHint: '套餐档位 = 按配置好的月卡套餐分配；指定分组 = 老 v3 订阅；钱包充值 = 手动给用户永久 credits 钱包加余额',
+        modeHint: '额度计划 = 按配置好的额度入账；指定分组 = 兼容历史权益；钱包充值 = 手动给用户通用余额加额度',
         plan: '套餐档位',
         days: '天',
         walletQuota: '钱包额度',
@@ -2873,7 +2893,7 @@ export default {
       selectUser: '选择用户',
       selectPlan: '选择套餐档位',
       selectGroup: '选择订阅分组',
-      planHint: '仅显示可售的月卡钱包套餐；有效期和钱包额度将从套餐配置读取',
+      planHint: '仅显示可售的额度计划；到账额度从计划配置读取',
       groupHint: '仅显示订阅计费类型的分组',
       validityHint: '订阅的有效天数',
       walletInitialRequired: '请填写钱包初始余额（必须大于 0）',
@@ -2894,6 +2914,8 @@ export default {
       noSubscriptionsYet: '暂无订阅',
       assignFirstSubscription: '分配一个订阅以开始使用。',
       subscriptionAssigned: '订阅分配成功',
+      pendingAssignmentReconciliationRequired: '这笔分配结果仍未确认且已超过安全重试时间，请先到订单和钱包流水人工对账，勿重复分配。',
+      pendingAssignmentActorUnavailable: '当前管理员身份尚未加载，已停止自动重试和分配，请刷新页面后重试。',
       subscriptionAdjusted: '订阅调整成功',
       subscriptionRevoked: '订阅撤销成功',
       failedToLoad: '加载订阅列表失败',
@@ -4252,6 +4274,7 @@ export default {
         balance: '余额',
         concurrency: '并发数',
         subscription: '订阅',
+        wallet: '额度钱包',
         invitation: '邀请码',
         // 管理员在用户管理页面调整余额/并发时产生的记录
         admin_balance: '余额（管理员）',
@@ -4261,6 +4284,7 @@ export default {
       balance: '余额',
       concurrency: '并发数',
       subscription: '订阅',
+      wallet: '额度钱包',
       invitation: '邀请码',
       invitationHint: '邀请码用于限制用户注册，使用后自动标记为已使用。',
       allTypes: '全部类型',
@@ -4295,6 +4319,9 @@ export default {
       selectGroupPlaceholder: '选择订阅分组',
       validityDays: '有效天数',
       groupRequired: '请选择订阅分组',
+      selectCreditsPlan: '选择额度档位',
+      selectCreditsPlanPlaceholder: '选择 credits 额度计划',
+      creditsPlanRequired: '请选择一个有效的额度档位',
       days: '天',
       status: {
         unused: '未使用',
@@ -5460,7 +5487,7 @@ export default {
         totp: '双因素认证 (2FA)',
         totpHint: '允许用户使用 Google Authenticator 等应用进行二次验证',
         totpKeyNotConfigured:
-          '请先在环境变量中配置 TOTP_ENCRYPTION_KEY。使用命令 openssl rand -hex 32 生成密钥。'
+          '请先在环境变量中配置 SECRET_ENCRYPTION_TOTP_SECRET_KEY。使用命令 openssl rand -hex 32 生成密钥。'
       },
       turnstile: {
         title: 'Cloudflare Turnstile',
@@ -5678,18 +5705,18 @@ export default {
         homeContentPlaceholder:
           '在此输入首页内容，支持 Markdown & HTML 代码。如果输入的是一个链接，则会使用该链接作为 iframe 的 src 属性。',
         homeContentHint:
-          '自定义首页内容，支持 Markdown/HTML。如果输入的是链接（以 http:// 或 https:// 开头），则会使用该链接作为 iframe 的 src 属性，这允许你设置任意网页作为首页。设置后首页的状态信息将不再显示。',
+          '自定义首页内容，支持 Markdown/HTML。为保护登录会话，脚本、事件处理器等可执行 HTML 会被移除。如果输入的是链接（以 http:// 或 https:// 开头），则会使用隔离 iframe 展示。设置后首页的状态信息将不再显示。',
         homeContentIframeWarning:
           '⚠️ iframe 模式提示：部分网站设置了 X-Frame-Options 或 CSP 安全策略，禁止被嵌入到 iframe 中。如果页面显示空白或报错，请确认目标网站允许被嵌入，或考虑使用 HTML 模式自行构建页面内容。',
         hideCcsImportButton: '隐藏 CCS 导入按钮',
         hideCcsImportButtonHint: '启用后将在 API Keys 页面隐藏"导入 CCS"按钮'
       },
       purchase: {
-        title: '充值/订阅页面',
-        description: '在侧边栏展示“充值/订阅”入口，并在页面内通过 iframe 打开指定链接',
-        enabled: '显示充值/订阅入口',
+        title: '充值额度页面',
+        description: '在侧边栏展示“充值额度”入口，并在页面内通过 iframe 打开指定链接',
+        enabled: '显示充值额度入口',
         enabledHint: '仅在标准模式（非简单模式）下展示',
-        url: '充值/订阅页面 URL',
+        url: '充值额度页面 URL',
         urlPlaceholder: 'https://example.com/purchase',
         urlHint: '必须是完整的 http(s) 链接',
         iframeWarning:
@@ -6249,7 +6276,7 @@ export default {
     // Error Passthrough Rules
     errorPassthrough: {
       title: '错误透传规则',
-      description: '配置上游错误如何返回给客户端',
+      description: '配置安全、可控的上游错误响应；原始上游正文不会返回给客户端',
       createRule: '创建规则',
       editRule: '编辑规则',
       deleteRule: '删除规则',
@@ -6302,9 +6329,10 @@ export default {
         responseBehavior: '响应行为',
         passthroughCode: '透传上游状态码',
         responseCode: '自定义状态码',
-        passthroughBody: '透传上游错误信息',
-        customMessage: '自定义错误信息',
+        passthroughBody: '透传上游错误信息（已禁用）',
+        customMessage: '安全客户端错误信息',
         customMessagePlaceholder: '返回给客户端的错误信息...',
+        customMessageHint: '最多 512 个字符；原始上游错误正文仅用于内部诊断，不会透传',
         skipMonitoring: '跳过运维监控记录',
         skipMonitoringHint: '开启后，匹配此规则的错误不会被记录到运维监控中',
         enabled: '启用此规则'
@@ -6382,7 +6410,7 @@ export default {
 
   // Subscription Progress (Header component)
   subscriptionProgress: {
-    title: '我的订阅',
+    title: '账户额度',
     viewDetails: '查看订阅详情',
     activeCount: '{count} 个有效订阅',
     daily: '每日',
@@ -6411,6 +6439,7 @@ export default {
     refresh: '刷新',
     sourceMode: '源码构建',
     sourceModeHint: '源码构建请使用 git pull 更新',
+    customUpdateDisabled: '二改版已禁用官方二进制覆盖；请先完成兼容审查，再走受控发布流程',
     updateNow: '立即更新',
     updating: '正在更新...',
     updateComplete: '更新完成',
@@ -6423,13 +6452,13 @@ export default {
 
   // Recharge / Subscription Page
   purchase: {
-    title: '充值/订阅',
-    description: '通过内嵌页面完成充值/订阅',
+    title: '充值额度',
+    description: '通过内嵌页面完成额度充值',
     openInNewTab: '新窗口打开',
     notEnabledTitle: '该功能未开启',
-    notEnabledDesc: '管理员暂未开启充值/订阅入口，请联系管理员。',
-    notConfiguredTitle: '充值/订阅链接未配置',
-    notConfiguredDesc: '管理员已开启入口，但尚未配置充值/订阅链接，请联系管理员。'
+    notEnabledDesc: '管理员暂未开启充值额度入口，请联系管理员。',
+    notConfiguredTitle: '充值额度链接未配置',
+    notConfiguredDesc: '管理员已开启入口，但尚未配置充值额度链接，请联系管理员。'
   },
 
   // Custom Page (iframe embed)
@@ -6468,7 +6497,7 @@ export default {
 
   // User Subscriptions Page
   userSubscriptions: {
-    title: '我的订阅',
+    title: '账户额度与历史权益',
     description: '查看您的订阅计划和用量',
     noActiveSubscriptions: '暂无有效订阅',
     noActiveSubscriptionsDesc: '您没有任何有效订阅。请联系管理员获取订阅。',
@@ -6493,11 +6522,13 @@ export default {
     usageOf: '已用 {used} / {limit}',
     wallet: {
       title: '钱包余额',
-      subtitle: '所有 group 共享一笔额度，按倍率扣费',
+      subtitle: 'GPT 固定走 openai-default；Claude 需管理员开通专属 vip',
       remaining: '剩余余额',
       usedPercent: '已用',
-      lowWarning: '余额仅剩 ${amount}，建议尽快续费',
-      exhausted: '余额已耗尽，请续费后继续使用',
+      lowWarning: '余额仅剩 ${amount}，建议尽快充值',
+      exhausted: '余额已耗尽，请充值后继续使用',
+      debtToCover: '待补足欠费',
+      debtWarning: '当前欠费 ${amount}，请先充值补足后再继续使用',
       rateListTitle: '各 group 倍率',
       rateListDesc: '不同 group 倍率不同，倍率越高扣费越快',
       rateListEmpty: '暂无可用 group',
@@ -6686,7 +6717,7 @@ export default {
 
   // Payment System
   payment: {
-    title: '充值/订阅',
+    title: '充值额度',
     amountLabel: '充值金额',
     paymentAmount: '支付金额',
     creditedBalance: '到账余额',
@@ -6737,6 +6768,8 @@ export default {
       cancelledDesc: '您已取消本次支付',
       waitingPayment: '等待支付...',
       cancelOrder: '取消订单',
+      invalidSession: '支付会话已失效',
+      invalidSessionDesc: '此页面未绑定到当前浏览器创建的支付订单，请返回结算页重新发起。',
     },
     orders: {
       title: '我的订单',
@@ -6763,17 +6796,20 @@ export default {
       subscriptionSuccess: '订阅成功',
       processing: '支付处理中',
       processingHint: '支付结果仍在确认中，页面会自动刷新。',
+      fulfillmentFailed: '已付款，额度入账异常',
+      fulfillmentFailedHint: '请勿重复支付。系统会继续检查处理结果；如长时间未到账，请联系客服并提供订单号。',
       failed: '支付失败',
       backToRecharge: '返回充值',
       viewOrders: '查看订单',
     },
     currentBalance: '当前余额',
+    walletDebt: '待补足欠费：${amount}',
     groupFallback: '分组 #{id}',
     rechargeAccount: '充值账户',
     activeSubscription: '当前订阅',
     noActiveSubscription: '暂无有效订阅',
     tabTopUp: '充值',
-    tabSubscribe: '订阅',
+    tabSubscribe: '历史权益',
     noPlans: '暂无可用订阅套餐',
     notAvailable: '充值功能暂未开放',
     confirmSubscription: '确认订阅',
@@ -6786,6 +6822,7 @@ export default {
     refundReasonPlaceholder: '请描述您的退款原因',
     stripeLoadFailed: '支付组件加载失败，请刷新页面重试',
     stripeMissingParams: '缺少订单ID或支付密钥',
+    stripeInvalidSession: '支付会话与订单不匹配，请返回结算页重新发起。',
     stripeNotConfigured: 'Stripe 未配置',
     errors: {
       tooManyPending: '待支付订单过多（最多 {max} 个），请先完成或取消现有订单',
@@ -6841,7 +6878,7 @@ export default {
       qrFailed: '未能获取微信支付二维码',
     },
     subscribeNow: '立即开通',
-    renewNow: '续费',
+    renewNow: '充值额度',
     selectPlan: '选择套餐',
     planFeatures: '功能特性',
     planCard: {
@@ -6935,7 +6972,7 @@ export default {
       planName: '套餐名称',
       planDescription: '套餐描述',
       planType: '套餐类型',
-      planTypeSubscription: '月卡（订阅）',
+      planTypeSubscription: '历史权益（停售）',
       planTypeCredits: '额度卡（永久）',
       planTypeSubscriptionHint: '按有效期付费，到期冻结剩余余额',
       planTypeCreditsHint: '一次性购买额度，永久有效；多张额度卡自动叠加到同一钱包',
@@ -6960,7 +6997,7 @@ export default {
       walletQuotaRequired: '钱包额度必须大于 0',
       coveredGroups: '覆盖分组',
       coveredGroupsHint: '钱包/多分组套餐购买后可使用的标准分组；专属分组请谨慎，只给手动高客单价用户使用。',
-      coveredGroupsRequired: '钱包月卡至少需要选择一个覆盖分组',
+      coveredGroupsRequired: '历史权益计划至少需要选择一个覆盖分组',
       coveredGroupsEmpty: '暂无可选择的标准分组',
       coveredGroupsEmptyShort: '未配置',
       exclusiveManualHint: '专属分组一般手动开',

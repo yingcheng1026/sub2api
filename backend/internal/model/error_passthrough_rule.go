@@ -1,7 +1,11 @@
 // Package model 定义服务层使用的数据模型。
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+	"unicode/utf8"
+)
 
 // ErrorPassthroughRule 全局错误透传规则
 // 用于控制上游错误如何返回给客户端
@@ -16,8 +20,8 @@ type ErrorPassthroughRule struct {
 	Platforms       []string  `json:"platforms"`        // 适用平台列表
 	PassthroughCode bool      `json:"passthrough_code"` // 是否透传原始状态码
 	ResponseCode    *int      `json:"response_code"`    // 自定义状态码（passthrough_code=false 时使用）
-	PassthroughBody bool      `json:"passthrough_body"` // 是否透传原始错误信息
-	CustomMessage   *string   `json:"custom_message"`   // 自定义错误信息（passthrough_body=false 时使用）
+	PassthroughBody bool      `json:"passthrough_body"` // 已弃用；原始上游错误信息不得返回给客户端
+	CustomMessage   *string   `json:"custom_message"`   // 返回给客户端的自定义错误信息
 	SkipMonitoring  bool      `json:"skip_monitoring"`  // 是否跳过运维监控记录
 	Description     *string   `json:"description"`      // 规则描述
 	CreatedAt       time.Time `json:"created_at"`
@@ -60,8 +64,14 @@ func (r *ErrorPassthroughRule) Validate() error {
 	if !r.PassthroughCode && (r.ResponseCode == nil || *r.ResponseCode <= 0) {
 		return &ValidationError{Field: "response_code", Message: "response_code is required when passthrough_code is false"}
 	}
-	if !r.PassthroughBody && (r.CustomMessage == nil || *r.CustomMessage == "") {
-		return &ValidationError{Field: "custom_message", Message: "custom_message is required when passthrough_body is false"}
+	if r.PassthroughBody {
+		return &ValidationError{Field: "passthrough_body", Message: "raw upstream error body passthrough is disabled"}
+	}
+	if r.CustomMessage == nil || strings.TrimSpace(*r.CustomMessage) == "" {
+		return &ValidationError{Field: "custom_message", Message: "custom_message is required"}
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(*r.CustomMessage)) > 512 {
+		return &ValidationError{Field: "custom_message", Message: "custom_message must not exceed 512 characters"}
 	}
 	return nil
 }

@@ -2,9 +2,12 @@ package repository
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
+	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
@@ -20,16 +23,19 @@ type sqlQuerier interface {
 }
 
 type proxyRepository struct {
-	client *dbent.Client
-	sql    sqlQuerier
+	client    *dbent.Client
+	sql       sqlQuerier
+	encryptor service.SecretEncryptor
 }
 
-func NewProxyRepository(client *dbent.Client, sqlDB *sql.DB) service.ProxyRepository {
-	return newProxyRepositoryWithSQL(client, sqlDB)
+const maxProxyPasswordRunes = 100
+
+func NewProxyRepository(client *dbent.Client, sqlDB *sql.DB, encryptor service.SecretEncryptor) service.ProxyRepository {
+	return newProxyRepositoryWithSQL(client, sqlDB, encryptor)
 }
 
-func newProxyRepositoryWithSQL(client *dbent.Client, sqlq sqlQuerier) *proxyRepository {
-	return &proxyRepository{client: client, sql: sqlq}
+func newProxyRepositoryWithSQL(client *dbent.Client, sqlq sqlQuerier, encryptor service.SecretEncryptor) *proxyRepository {
+	return &proxyRepository{client: client, sql: sqlq, encryptor: encryptor}
 }
 
 func (r *proxyRepository) Create(ctx context.Context, proxyIn *service.Proxy) error {
@@ -43,7 +49,11 @@ func (r *proxyRepository) Create(ctx context.Context, proxyIn *service.Proxy) er
 		builder.SetUsername(proxyIn.Username)
 	}
 	if proxyIn.Password != "" {
-		builder.SetPassword(proxyIn.Password)
+		encrypted, err := r.encryptPassword(proxyIn.Password)
+		if err != nil {
+			return err
+		}
+		builder.SetPassword(encrypted)
 	}
 
 	created, err := builder.Save(ctx)
@@ -61,7 +71,7 @@ func (r *proxyRepository) GetByID(ctx context.Context, id int64) (*service.Proxy
 		}
 		return nil, err
 	}
-	return proxyEntityToService(m), nil
+	return r.proxyEntityToService(m)
 }
 
 func (r *proxyRepository) ListByIDs(ctx context.Context, ids []int64) ([]service.Proxy, error) {
@@ -78,7 +88,11 @@ func (r *proxyRepository) ListByIDs(ctx context.Context, ids []int64) ([]service
 
 	out := make([]service.Proxy, 0, len(proxies))
 	for i := range proxies {
-		out = append(out, *proxyEntityToService(proxies[i]))
+		mapped, err := r.proxyEntityToService(proxies[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *mapped)
 	}
 	return out, nil
 }
@@ -96,7 +110,11 @@ func (r *proxyRepository) Update(ctx context.Context, proxyIn *service.Proxy) er
 		builder.ClearUsername()
 	}
 	if proxyIn.Password != "" {
-		builder.SetPassword(proxyIn.Password)
+		encrypted, err := r.encryptPassword(proxyIn.Password)
+		if err != nil {
+			return err
+		}
+		builder.SetPassword(encrypted)
 	} else {
 		builder.ClearPassword()
 	}
@@ -153,7 +171,11 @@ func (r *proxyRepository) ListWithFilters(ctx context.Context, params pagination
 
 	outProxies := make([]service.Proxy, 0, len(proxies))
 	for i := range proxies {
-		outProxies = append(outProxies, *proxyEntityToService(proxies[i]))
+		mapped, err := r.proxyEntityToService(proxies[i])
+		if err != nil {
+			return nil, nil, err
+		}
+		outProxies = append(outProxies, *mapped)
 	}
 
 	return outProxies, paginationResultFromTotal(int64(total), params), nil
@@ -231,7 +253,10 @@ func (r *proxyRepository) buildProxyWithAccountCountResult(ctx context.Context, 
 
 	result := make([]service.ProxyWithAccountCount, 0, len(proxies))
 	for i := range proxies {
-		proxyOut := proxyEntityToService(proxies[i])
+		proxyOut, err := r.proxyEntityToService(proxies[i])
+		if err != nil {
+			return nil, nil, err
+		}
 		if proxyOut == nil {
 			continue
 		}
@@ -277,7 +302,11 @@ func (r *proxyRepository) ListActive(ctx context.Context) ([]service.Proxy, erro
 	}
 	outProxies := make([]service.Proxy, 0, len(proxies))
 	for i := range proxies {
-		outProxies = append(outProxies, *proxyEntityToService(proxies[i]))
+		mapped, err := r.proxyEntityToService(proxies[i])
+		if err != nil {
+			return nil, err
+		}
+		outProxies = append(outProxies, *mapped)
 	}
 	return outProxies, nil
 }
@@ -292,14 +321,26 @@ func (r *proxyRepository) ExistsByHostPortAuth(ctx context.Context, host string,
 	} else {
 		q = q.Where(proxy.UsernameEQ(username))
 	}
-	if password == "" {
-		q = q.Where(proxy.Or(proxy.PasswordIsNil(), proxy.PasswordEQ("")))
-	} else {
-		q = q.Where(proxy.PasswordEQ(password))
+	rows, err := q.All(ctx)
+	if err != nil {
+		return false, err
 	}
-
-	count, err := q.Count(ctx)
-	return count > 0, err
+	for _, row := range rows {
+		if row.Password == nil || *row.Password == "" {
+			if password == "" {
+				return true, nil
+			}
+			continue
+		}
+		plaintext, err := r.decryptPassword(*row.Password)
+		if err != nil {
+			return false, err
+		}
+		if subtle.ConstantTimeCompare([]byte(plaintext), []byte(password)) == 1 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CountAccountsByProxyID returns the number of accounts using a specific proxy
@@ -399,7 +440,10 @@ func (r *proxyRepository) ListActiveWithAccountCount(ctx context.Context) ([]ser
 	// Build result with account counts
 	result := make([]service.ProxyWithAccountCount, 0, len(proxies))
 	for i := range proxies {
-		proxyOut := proxyEntityToService(proxies[i])
+		proxyOut, err := r.proxyEntityToService(proxies[i])
+		if err != nil {
+			return nil, err
+		}
 		if proxyOut == nil {
 			continue
 		}
@@ -412,9 +456,13 @@ func (r *proxyRepository) ListActiveWithAccountCount(ctx context.Context) ([]ser
 	return result, nil
 }
 
-func proxyEntityToService(m *dbent.Proxy) *service.Proxy {
+func (r *proxyRepository) proxyEntityToService(m *dbent.Proxy) (*service.Proxy, error) {
+	return proxyEntityToService(m, r.encryptor)
+}
+
+func proxyEntityToService(m *dbent.Proxy, encryptor service.SecretEncryptor) (*service.Proxy, error) {
 	if m == nil {
-		return nil
+		return nil, nil
 	}
 	out := &service.Proxy{
 		ID:        m.ID,
@@ -430,9 +478,34 @@ func proxyEntityToService(m *dbent.Proxy) *service.Proxy {
 		out.Username = *m.Username
 	}
 	if m.Password != nil {
-		out.Password = *m.Password
+		plaintext, err := service.DecryptForSecretDomain(encryptor, service.SecretDomainProxyCredential, *m.Password)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt proxy credential %d: %w", m.ID, err)
+		}
+		out.Password = plaintext
 	}
-	return out
+	return out, nil
+}
+
+func (r *proxyRepository) encryptPassword(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	if utf8.RuneCountInString(plaintext) > maxProxyPasswordRunes {
+		return "", fmt.Errorf("proxy password must be at most %d characters", maxProxyPasswordRunes)
+	}
+	ciphertext, err := service.EncryptForSecretDomain(r.encryptor, service.SecretDomainProxyCredential, plaintext)
+	if err != nil {
+		return "", fmt.Errorf("encrypt proxy credential: %w", err)
+	}
+	return ciphertext, nil
+}
+
+func (r *proxyRepository) decryptPassword(ciphertext string) (string, error) {
+	if ciphertext == "" {
+		return "", nil
+	}
+	return service.DecryptForSecretDomain(r.encryptor, service.SecretDomainProxyCredential, ciphertext)
 }
 
 func applyProxyEntityToService(dst *service.Proxy, src *dbent.Proxy) {

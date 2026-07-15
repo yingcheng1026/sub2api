@@ -11,6 +11,75 @@
         </p>
       </div>
 
+      <div v-else-if="needsBindLogin" class="card p-6">
+        <h1 class="text-lg font-semibold text-gray-900 dark:text-white">
+          {{ t('auth.oidc.callbackTitle', { providerName }) }}
+        </h1>
+        <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+          {{ t('auth.oauthFlow.bindLoginDescription', { providerName }) }}
+        </p>
+
+        <div class="mt-6 space-y-4">
+          <div>
+            <label class="input-label">{{ t('auth.emailLabel') }}</label>
+            <input class="input w-full" type="email" :value="registrationEmail" readonly disabled />
+          </div>
+          <div>
+            <label class="input-label">{{ t('auth.passwordLabel') }}</label>
+            <input
+              v-model="password"
+              type="password"
+              class="input w-full"
+              :disabled="isSubmitting"
+              autocomplete="current-password"
+              @keyup.enter="handleSubmitBindLogin"
+            />
+          </div>
+          <p v-if="registrationError" class="text-sm text-red-600 dark:text-red-400">
+            {{ registrationError }}
+          </p>
+          <button
+            class="btn btn-primary w-full"
+            type="button"
+            :disabled="isSubmitting || !password"
+            @click="handleSubmitBindLogin"
+          >
+            {{ isSubmitting ? t('common.processing') : t('auth.oauthFlow.bindLogin') }}
+          </button>
+        </div>
+      </div>
+
+      <div v-else-if="needsTotpChallenge" class="card p-6">
+        <h1 class="text-lg font-semibold text-gray-900 dark:text-white">
+          {{ t('profile.totp.loginTitle') }}
+        </h1>
+        <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+          {{ t('profile.totp.loginHint') }}
+        </p>
+        <div class="mt-6 space-y-4">
+          <input
+            v-model="totpCode"
+            class="input w-full"
+            inputmode="numeric"
+            maxlength="6"
+            autocomplete="one-time-code"
+            :disabled="isSubmitting"
+            @keyup.enter="handleSubmitTotpChallenge"
+          />
+          <p v-if="registrationError" class="text-sm text-red-600 dark:text-red-400">
+            {{ registrationError }}
+          </p>
+          <button
+            class="btn btn-primary w-full"
+            type="button"
+            :disabled="isSubmitting || totpCode.trim().length !== 6"
+            @click="handleSubmitTotpChallenge"
+          >
+            {{ isSubmitting ? t('common.processing') : t('common.verify') }}
+          </button>
+        </div>
+      </div>
+
       <div v-else-if="needsRegistrationCompletion" class="card p-6">
         <h1 class="text-lg font-semibold text-gray-900 dark:text-white">
           {{ t('auth.oidc.callbackTitle', { providerName }) }}
@@ -153,7 +222,9 @@ import { useClipboard } from '@/composables/useClipboard'
 import { useAppStore, useAuthStore } from '@/stores'
 import { apiClient } from '@/api/client'
 import {
+  bindPendingOAuthLogin,
   exchangePendingOAuthCompletion,
+  login2FA,
   persistOAuthTokenContext,
   type OAuthTokenResponse
 } from '@/api/auth'
@@ -172,12 +243,16 @@ const authStore = useAuthStore()
 const isProcessing = ref(false)
 const isSubmitting = ref(false)
 const needsRegistrationCompletion = ref(false)
+const needsBindLogin = ref(false)
+const needsTotpChallenge = ref(false)
 const invitationRequired = ref(false)
 const registrationEmail = ref('')
 const password = ref('')
 const confirmPassword = ref('')
 const invitationCode = ref('')
 const registrationError = ref('')
+const totpTempToken = ref('')
+const totpCode = ref('')
 const pendingProvider = ref<'github' | 'google'>('github')
 const redirectTo = ref('/dashboard')
 const invalidCallback = ref(false)
@@ -190,6 +265,8 @@ type EmailOAuthPendingCompletion = Partial<OAuthTokenResponse> & {
   email?: string
   resolved_email?: string
   invitation_required?: boolean
+  existing_account_bindable?: boolean
+  step?: string
 }
 
 const code = computed(() => (route.query.code as string) || '')
@@ -222,20 +299,6 @@ function parseFragmentParams(): URLSearchParams {
   const raw = typeof window !== 'undefined' ? window.location.hash : ''
   const hash = raw.startsWith('#') ? raw.slice(1) : raw
   return new URLSearchParams(hash)
-}
-
-function readTokenResponse(params: URLSearchParams): OAuthTokenResponse | null {
-  const accessToken = params.get('access_token')?.trim() || ''
-  if (!accessToken) return null
-
-  const response: OAuthTokenResponse = { access_token: accessToken }
-  const refreshToken = params.get('refresh_token')?.trim() || ''
-  if (refreshToken) response.refresh_token = refreshToken
-  const expiresIn = Number.parseInt(params.get('expires_in')?.trim() || '', 10)
-  if (Number.isFinite(expiresIn) && expiresIn > 0) response.expires_in = expiresIn
-  const tokenType = params.get('token_type')?.trim() || ''
-  if (tokenType) response.token_type = tokenType
-  return response
 }
 
 function sanitizeRedirectPath(path: string | null | undefined): string {
@@ -311,6 +374,13 @@ async function resumePendingEmailOAuth() {
       return
     }
 
+    if (completion.error === 'existing_account_binding_required' || completion.existing_account_bindable) {
+      registrationEmail.value = String(completion.resolved_email || completion.email || '').trim()
+      needsBindLogin.value = true
+      isProcessing.value = false
+      return
+    }
+
     appStore.showError(completion.error || t('auth.loginFailed'))
   } catch (e: unknown) {
     const err = e as { message?: string; response?: { data?: { message?: string } } }
@@ -321,6 +391,48 @@ async function resumePendingEmailOAuth() {
     if (!needsRegistrationCompletion.value) {
       isProcessing.value = false
     }
+  }
+}
+
+async function handleSubmitBindLogin() {
+  registrationError.value = ''
+  if (!registrationEmail.value.trim() || !password.value) return
+
+  isSubmitting.value = true
+  try {
+    const completion = await bindPendingOAuthLogin(registrationEmail.value.trim(), password.value)
+    if (completion.requires_2fa) {
+      totpTempToken.value = completion.temp_token || ''
+      needsBindLogin.value = false
+      needsTotpChallenge.value = true
+      return
+    }
+    if (!hasOAuthTokenResponse(completion)) {
+      throw new Error(t('auth.loginFailed'))
+    }
+    await finalizeTokenResponse(completion, redirectTo.value)
+  } catch (e: unknown) {
+    const err = e as { message?: string; response?: { data?: { message?: string } } }
+    registrationError.value = err.response?.data?.message || err.message || t('auth.loginFailed')
+  } finally {
+    isSubmitting.value = false
+  }
+}
+
+async function handleSubmitTotpChallenge() {
+  registrationError.value = ''
+  const code = totpCode.value.trim()
+  if (!totpTempToken.value || code.length !== 6) return
+
+  isSubmitting.value = true
+  try {
+    const completion = await login2FA({ temp_token: totpTempToken.value, totp_code: code })
+    await finalizeTokenResponse(completion, redirectTo.value)
+  } catch (e: unknown) {
+    const err = e as { message?: string; response?: { data?: { message?: string } } }
+    registrationError.value = err.response?.data?.message || err.message || t('auth.loginFailed')
+  } finally {
+    isSubmitting.value = false
   }
 }
 
@@ -366,7 +478,6 @@ async function handleSubmitRegistration() {
 
 onMounted(async () => {
   const params = parseFragmentParams()
-  const tokenResponse = readTokenResponse(params)
   const fragmentError = params.get('error') || ''
   const fragmentErrorDescription =
     params.get('error_description') || params.get('error_message') || ''
@@ -375,25 +486,13 @@ onMounted(async () => {
     appStore.showError(fragmentErrorDescription || fragmentError)
     return
   }
-  if (!tokenResponse) {
-    if (route.path === '/auth/oauth/callback') {
-      const pendingEmailOAuthProvider = readPendingEmailOAuthProvider()
-      if (pendingEmailOAuthProvider && code.value && state.value) {
-        redirectProviderCallbackToBackend(pendingEmailOAuthProvider)
-        return
-      }
-      await resumePendingEmailOAuth()
+  if (route.path === '/auth/oauth/callback') {
+    const pendingEmailOAuthProvider = readPendingEmailOAuthProvider()
+    if (pendingEmailOAuthProvider && code.value && state.value) {
+      redirectProviderCallbackToBackend(pendingEmailOAuthProvider)
+      return
     }
-    return
-  }
-
-  isProcessing.value = true
-  try {
-    await finalizeTokenResponse(tokenResponse, params.get('redirect') || '/dashboard')
-  } catch (error: unknown) {
-    const message = (error as { message?: string })?.message || t('auth.loginFailed')
-    appStore.showError(message)
-    isProcessing.value = false
+    await resumePendingEmailOAuth()
   }
 })
 

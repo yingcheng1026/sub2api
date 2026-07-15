@@ -12,6 +12,6 @@ type GeminiTokenCache interface {
 	SetAccessToken(ctx context.Context, cacheKey string, token string, ttl time.Duration) error
 	DeleteAccessToken(ctx context.Context, cacheKey string) error
 
-	AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (bool, error)
-	ReleaseRefreshLock(ctx context.Context, cacheKey string) error
+	AcquireRefreshLock(ctx context.Context, cacheKey string, ttl time.Duration) (acquired bool, ownershipToken string, err error)
+	ReleaseRefreshLock(ctx context.Context, cacheKey string, ownershipToken string) error
 }

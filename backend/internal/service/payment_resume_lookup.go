@@ -22,7 +22,7 @@ func (s *PaymentService) GetPublicOrderByResumeToken(ctx context.Context, token 
 		}
 		return nil, fmt.Errorf("get order by resume token: %w", err)
 	}
-	if claims.UserID > 0 && order.UserID != claims.UserID {
+	if order.UserID != claims.UserID {
 		return nil, invalidResumeTokenMatchError()
 	}
 	snapshot := psOrderProviderSnapshot(order)
@@ -45,17 +45,7 @@ func (s *PaymentService) GetPublicOrderByResumeToken(ctx context.Context, token 
 	if claims.PaymentType != "" && NormalizeVisibleMethod(order.PaymentType) != NormalizeVisibleMethod(claims.PaymentType) {
 		return nil, invalidResumeTokenMatchError()
 	}
-	if order.Status == OrderStatusPending || order.Status == OrderStatusExpired {
-		result := s.checkPaid(ctx, order)
-		if result == checkPaidResultAlreadyPaid {
-			order, err = s.entClient.PaymentOrder.Get(ctx, order.ID)
-			if err != nil {
-				return nil, fmt.Errorf("reload order by resume token: %w", err)
-			}
-		}
-	}
-
-	return order, nil
+	return s.reconcileVisiblePaymentOrder(ctx, order)
 }
 
 func invalidResumeTokenMatchError() error {

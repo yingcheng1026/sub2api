@@ -736,7 +736,10 @@ func sanitizeErrorBodyForStorage(raw string, maxBytes int) (sanitized string, tr
 		return out, trunc
 	}
 
-	// Non-JSON: best-effort truncate.
+	// Non-JSON: redact common credential shapes before truncating. Upstream
+	// services frequently embed Authorization, token, or password values in a
+	// plain-text diagnostic rather than a JSON field.
+	raw = sanitizeUpstreamErrorMessage(raw)
 	if maxBytes > 0 && len(raw) > maxBytes {
 		return truncateString(raw, maxBytes), true
 	}

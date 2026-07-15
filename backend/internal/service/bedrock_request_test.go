@@ -419,6 +419,29 @@ func TestBedrockCrossRegionPrefix(t *testing.T) {
 	}
 }
 
+func TestValidateBedrockAccountCredentials(t *testing.T) {
+	t.Run("normalizes a valid region", func(t *testing.T) {
+		credentials := map[string]any{"aws_region": " eu-west-1 "}
+		require.NoError(t, validateBedrockAccountCredentials(AccountTypeBedrock, credentials))
+		assert.Equal(t, "eu-west-1", credentials["aws_region"])
+	})
+
+	t.Run("rejects authority characters", func(t *testing.T) {
+		credentials := map[string]any{"aws_region": "x@attacker.example/"}
+		require.Error(t, validateBedrockAccountCredentials(AccountTypeBedrock, credentials))
+	})
+
+	t.Run("rejects non-string region", func(t *testing.T) {
+		credentials := map[string]any{"aws_region": 123}
+		require.Error(t, validateBedrockAccountCredentials(AccountTypeBedrock, credentials))
+	})
+
+	t.Run("ignores unrelated account types", func(t *testing.T) {
+		credentials := map[string]any{"aws_region": "not-a-region"}
+		require.NoError(t, validateBedrockAccountCredentials(AccountTypeAPIKey, credentials))
+	})
+}
+
 func TestResolveBedrockModelID(t *testing.T) {
 	t.Run("default alias resolves and adjusts region", func(t *testing.T) {
 		account := &Account{

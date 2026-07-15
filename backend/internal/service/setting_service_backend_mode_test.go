@@ -143,7 +143,7 @@ func TestIsBackendModeEnabled_ReturnsFalseOnNotFound(t *testing.T) {
 	require.Equal(t, 1, repo.calls)
 }
 
-func TestIsBackendModeEnabled_ReturnsFalseOnDBError(t *testing.T) {
+func TestIsBackendModeEnabled_FailsClosedOnDBError(t *testing.T) {
 	resetBackendModeTestCache(t)
 
 	repo := &bmRepoStub{
@@ -154,7 +154,7 @@ func TestIsBackendModeEnabled_ReturnsFalseOnDBError(t *testing.T) {
 	}
 	svc := NewSettingService(repo, &config.Config{})
 
-	require.False(t, svc.IsBackendModeEnabled(context.Background()))
+	require.True(t, svc.IsBackendModeEnabled(context.Background()))
 	require.Equal(t, 1, repo.calls)
 }
 

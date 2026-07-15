@@ -111,6 +111,9 @@ func (s *GroupService) Create(ctx context.Context, req CreateGroupRequest) (*Gro
 		ImageRateIndependent: req.ImageRateIndependent,
 		ImageRateMultiplier:  imageRateMultiplier,
 	}
+	if err := validateReservedBusinessGroupCreate(group); err != nil {
+		return nil, err
+	}
 
 	if err := s.groupRepo.Create(ctx, group); err != nil {
 		return nil, fmt.Errorf("create group: %w", err)
@@ -151,6 +154,19 @@ func (s *GroupService) Update(ctx context.Context, id int64, req UpdateGroupRequ
 	group, err := s.groupRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("get group: %w", err)
+	}
+	candidate := *group
+	if req.Name != nil {
+		candidate.Name = *req.Name
+	}
+	if req.IsExclusive != nil {
+		candidate.IsExclusive = *req.IsExclusive
+	}
+	if req.Status != nil {
+		candidate.Status = *req.Status
+	}
+	if err := validateReservedBusinessGroupUpdate(group, &candidate); err != nil {
+		return nil, err
 	}
 
 	// 更新字段
@@ -207,9 +223,12 @@ func (s *GroupService) Update(ctx context.Context, id int64, req UpdateGroupRequ
 // Delete 删除分组
 func (s *GroupService) Delete(ctx context.Context, id int64) error {
 	// 检查分组是否存在
-	_, err := s.groupRepo.GetByID(ctx, id)
+	group, err := s.groupRepo.GetByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("get group: %w", err)
+	}
+	if err := rejectReservedBusinessGroupDelete(group); err != nil {
+		return err
 	}
 
 	if s.authCacheInvalidator != nil {

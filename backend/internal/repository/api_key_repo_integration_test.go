@@ -26,7 +26,7 @@ func (s *APIKeyRepoSuite) SetupTest() {
 	s.ctx = context.Background()
 	tx := testEntTx(s.T())
 	s.client = tx.Client()
-	s.repo = newAPIKeyRepositoryWithSQL(s.client, tx)
+	s.repo = newAPIKeyRepositoryWithSQL(s.client, tx, strictAPIKeyTestProtector{})
 }
 
 func TestAPIKeyRepoSuite(t *testing.T) {
@@ -81,9 +81,47 @@ func (s *APIKeyRepoSuite) TestGetByKey() {
 	s.Require().Equal(group.ID, got.Group.ID)
 }
 
+func (s *APIKeyRepoSuite) TestGetByKeyForAuthLoadsUserTokenVersion() {
+	user := s.mustCreateUser("getbykey-token-version@test.com")
+	_, err := s.client.User.UpdateOneID(user.ID).SetTokenVersion(11).Save(s.ctx)
+	s.Require().NoError(err)
+
+	key := s.mustCreateApiKey(user.ID, "sk-getbykey-token-version", "Token Version", nil)
+	got, err := s.repo.GetByKeyForAuth(s.ctx, key.Key)
+	s.Require().NoError(err)
+	s.Require().NotNil(got.User)
+	s.Require().True(got.User.TokenVersionResolved)
+	s.Require().Equal(int64(11), got.User.TokenVersion)
+}
+
 func (s *APIKeyRepoSuite) TestGetByKey_NotFound() {
 	_, err := s.repo.GetByKey(s.ctx, "non-existent-key")
 	s.Require().Error(err, "expected error for non-existent key")
+}
+
+func (s *APIKeyRepoSuite) TestWalletUniversalPurposePersistsAcrossRepositoryReads() {
+	user := s.mustCreateUser("wallet-purpose@test.com")
+	key := &service.APIKey{
+		UserID:  user.ID,
+		Key:     "sk-wallet-purpose",
+		Name:    service.WalletUniversalAPIKeyName,
+		Purpose: service.APIKeyPurposeWalletUniversal,
+		Status:  service.StatusDisabled,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, key))
+
+	byID, err := s.repo.GetByID(s.ctx, key.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.APIKeyPurposeWalletUniversal, byID.Purpose)
+
+	byAuth, err := s.repo.GetByKeyForAuth(s.ctx, key.Key)
+	s.Require().NoError(err)
+	s.Require().Equal(service.APIKeyPurposeWalletUniversal, byAuth.Purpose)
+
+	byPurpose, err := s.repo.GetByUserIDAndPurpose(s.ctx, user.ID, service.APIKeyPurposeWalletUniversal)
+	s.Require().NoError(err)
+	s.Require().Equal(key.ID, byPurpose.ID)
+	s.Require().Equal(service.StatusDisabled, byPurpose.Status, "disabled system key must be reused, not replaced")
 }
 
 func (s *APIKeyRepoSuite) TestGetByKeyForAuth_PreservesMessagesDispatchModelConfig() {
@@ -494,7 +532,7 @@ func (s *APIKeyRepoSuite) TestIncrementQuotaUsedAndGetState() {
 	s.Require().Equal(3.5, state.QuotaUsed)
 	s.Require().Equal(3.0, state.Quota)
 	s.Require().Equal(service.StatusAPIKeyQuotaExhausted, state.Status)
-	s.Require().Equal(key.Key, state.Key)
+	s.Require().Equal(key.KeyHash, state.AuthCacheLocator)
 
 	got, err := s.repo.GetByID(s.ctx, key.ID)
 	s.Require().NoError(err, "GetByID")
@@ -506,7 +544,7 @@ func (s *APIKeyRepoSuite) TestIncrementQuotaUsedAndGetState() {
 // 注意：此测试使用 testEntClient（非事务隔离），数据会真正写入数据库。
 func TestIncrementQuotaUsed_Concurrent(t *testing.T) {
 	client := testEntClient(t)
-	repo := NewAPIKeyRepository(client, integrationDB).(*apiKeyRepository)
+	repo := NewAPIKeyRepository(client, integrationDB, strictAPIKeyTestProtector{}).(*apiKeyRepository)
 	ctx := context.Background()
 
 	// 创建测试用户和 API Key

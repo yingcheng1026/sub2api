@@ -65,7 +65,7 @@ func TestNormalizePaymentSource(t *testing.T) {
 func TestCanonicalizeReturnURL(t *testing.T) {
 	t.Parallel()
 
-	got, err := CanonicalizeReturnURL("https://example.com/payment/result?b=2#a", "example.com", "")
+	got, err := CanonicalizeReturnURL("https://example.com/payment/result?b=2#a", "https://example.com")
 	if err != nil {
 		t.Fatalf("CanonicalizeReturnURL returned error: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestCanonicalizeReturnURL(t *testing.T) {
 func TestCanonicalizeReturnURLRejectsRelativeURL(t *testing.T) {
 	t.Parallel()
 
-	if _, err := CanonicalizeReturnURL("/payment/result", "example.com", ""); err == nil {
+	if _, err := CanonicalizeReturnURL("/payment/result", "https://example.com"); err == nil {
 		t.Fatal("CanonicalizeReturnURL should reject relative URLs")
 	}
 }
@@ -85,8 +85,27 @@ func TestCanonicalizeReturnURLRejectsRelativeURL(t *testing.T) {
 func TestCanonicalizeReturnURLRejectsExternalHost(t *testing.T) {
 	t.Parallel()
 
-	if _, err := CanonicalizeReturnURL("https://evil.example/payment/result", "app.example.com", ""); err == nil {
+	if _, err := CanonicalizeReturnURL("https://evil.example/payment/result", "https://app.example.com"); err == nil {
 		t.Fatal("CanonicalizeReturnURL should reject external hosts")
+	}
+}
+
+func TestCanonicalizeReturnURLRejectsHTTPForNonLoopbackFrontend(t *testing.T) {
+	t.Parallel()
+
+	if _, err := CanonicalizeReturnURL("http://app.example.com/payment/result", "http://app.example.com"); err == nil {
+		t.Fatal("CanonicalizeReturnURL should reject a non-loopback HTTP return URL")
+	}
+}
+
+func TestCanonicalizeReturnURLDoesNotTrustAttackerReferer(t *testing.T) {
+	t.Parallel()
+
+	if _, err := CanonicalizeReturnURL(
+		"https://evil.example/payment/result",
+		"https://app.example.com",
+	); err == nil {
+		t.Fatal("CanonicalizeReturnURL should not authorize a return origin from Referer")
 	}
 }
 
@@ -95,8 +114,7 @@ func TestCanonicalizeReturnURLAllowsConfiguredFrontendHost(t *testing.T) {
 
 	got, err := CanonicalizeReturnURL(
 		"https://app.example.com/payment/result?from=checkout",
-		"api.example.com",
-		"https://app.example.com/purchase",
+		"https://app.example.com",
 	)
 	if err != nil {
 		t.Fatalf("CanonicalizeReturnURL returned error: %v", err)
@@ -109,7 +127,7 @@ func TestCanonicalizeReturnURLAllowsConfiguredFrontendHost(t *testing.T) {
 func TestCanonicalizeReturnURLRejectsNonCanonicalPath(t *testing.T) {
 	t.Parallel()
 
-	if _, err := CanonicalizeReturnURL("https://app.example.com/orders/42", "app.example.com", ""); err == nil {
+	if _, err := CanonicalizeReturnURL("https://app.example.com/orders/42", "https://app.example.com"); err == nil {
 		t.Fatal("CanonicalizeReturnURL should reject non-canonical result paths")
 	}
 }
@@ -117,7 +135,7 @@ func TestCanonicalizeReturnURLRejectsNonCanonicalPath(t *testing.T) {
 func TestBuildPaymentReturnURL(t *testing.T) {
 	t.Parallel()
 
-	got, err := buildPaymentReturnURL("https://example.com/payment/result?from=checkout#fragment", 42, "sub2_42", "resume-token")
+	got, err := buildPaymentReturnURL("https://example.com/payment/result?from=checkout#fragment", 42, "sub2_42")
 	if err != nil {
 		t.Fatalf("buildPaymentReturnURL returned error: %v", err)
 	}
@@ -139,8 +157,8 @@ func TestBuildPaymentReturnURL(t *testing.T) {
 	if query.Get("out_trade_no") != "sub2_42" {
 		t.Fatalf("out_trade_no = %q", query.Get("out_trade_no"))
 	}
-	if query.Get("resume_token") != "resume-token" {
-		t.Fatalf("resume_token = %q", query.Get("resume_token"))
+	if query.Get("resume_token") != "" {
+		t.Fatalf("resume_token = %q, want empty", query.Get("resume_token"))
 	}
 	if query.Get("status") != "success" {
 		t.Fatalf("status = %q", query.Get("status"))
@@ -150,7 +168,7 @@ func TestBuildPaymentReturnURL(t *testing.T) {
 func TestBuildPaymentReturnURLWithoutResumeTokenStillIncludesOutTradeNo(t *testing.T) {
 	t.Parallel()
 
-	got, err := buildPaymentReturnURL("https://example.com/payment/result", 42, "sub2_42", "")
+	got, err := buildPaymentReturnURL("https://example.com/payment/result", 42, "sub2_42")
 	if err != nil {
 		t.Fatalf("buildPaymentReturnURL returned error: %v", err)
 	}
@@ -171,10 +189,26 @@ func TestBuildPaymentReturnURLWithoutResumeTokenStillIncludesOutTradeNo(t *testi
 	}
 }
 
+func TestBuildPaymentReturnURLNeverPropagatesResumeCapability(t *testing.T) {
+	t.Parallel()
+
+	got, err := buildPaymentReturnURL("https://example.com/payment/result", 42, "sub2_42")
+	if err != nil {
+		t.Fatalf("buildPaymentReturnURL returned error: %v", err)
+	}
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse return URL: %v", err)
+	}
+	if got := parsed.Query().Get("resume_token"); got != "" {
+		t.Fatalf("provider return URL leaked resume_token %q", got)
+	}
+}
+
 func TestBuildPaymentReturnURLEmptyBase(t *testing.T) {
 	t.Parallel()
 
-	got, err := buildPaymentReturnURL("", 42, "sub2_42", "resume-token")
+	got, err := buildPaymentReturnURL("", 42, "sub2_42")
 	if err != nil {
 		t.Fatalf("buildPaymentReturnURL returned error: %v", err)
 	}
@@ -261,6 +295,7 @@ func TestWeChatPaymentResumeTokenRoundTrip(t *testing.T) {
 
 	svc := NewPaymentResumeService([]byte("0123456789abcdef0123456789abcdef"))
 	token, err := svc.CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		UserID:      7,
 		OpenID:      "openid-123",
 		PaymentType: payment.TypeWxpay,
 		Amount:      "12.50",
@@ -281,11 +316,44 @@ func TestWeChatPaymentResumeTokenRoundTrip(t *testing.T) {
 	if claims.OpenID != "openid-123" || claims.PaymentType != payment.TypeWxpay {
 		t.Fatalf("claims mismatch: %+v", claims)
 	}
+	if claims.UserID != 7 || claims.JTI == "" {
+		t.Fatalf("claims must be user-bound and one-time: %+v", claims)
+	}
 	if claims.Amount != "12.50" || claims.OrderType != payment.OrderTypeSubscription || claims.PlanID != 7 {
 		t.Fatalf("claims payment context mismatch: %+v", claims)
 	}
 	if claims.RedirectTo != "/purchase?from=wechat" || claims.Scope != "snsapi_base" {
 		t.Fatalf("claims redirect/scope mismatch: %+v", claims)
+	}
+}
+
+func TestCreateWeChatPaymentResumeTokenRejectsMissingUserBinding(t *testing.T) {
+	t.Parallel()
+
+	svc := NewPaymentResumeService([]byte("0123456789abcdef0123456789abcdef"))
+	_, err := svc.CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		OpenID:      "openid-123",
+		PaymentType: payment.TypeWxpay,
+	})
+	if err == nil {
+		t.Fatal("CreateWeChatPaymentResumeToken should require an HFC user binding")
+	}
+}
+
+func TestWeChatPaymentOAuthSubjectTokenRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	svc := NewPaymentResumeService([]byte("0123456789abcdef0123456789abcdef"))
+	token, err := svc.CreateWeChatPaymentOAuthSubjectToken(42)
+	if err != nil {
+		t.Fatalf("CreateWeChatPaymentOAuthSubjectToken returned error: %v", err)
+	}
+	claims, err := svc.ParseWeChatPaymentOAuthSubjectToken(token)
+	if err != nil {
+		t.Fatalf("ParseWeChatPaymentOAuthSubjectToken returned error: %v", err)
+	}
+	if claims.UserID != 42 || claims.JTI == "" {
+		t.Fatalf("subject claims mismatch: %+v", claims)
 	}
 }
 
@@ -319,6 +387,7 @@ func TestParseWeChatPaymentResumeTokenRejectsExpiredToken(t *testing.T) {
 
 	svc := NewPaymentResumeService([]byte("0123456789abcdef0123456789abcdef"))
 	token, err := svc.CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		UserID:      7,
 		OpenID:      "openid-123",
 		PaymentType: payment.TypeWxpay,
 		IssuedAt:    time.Now().Add(-30 * time.Minute).Unix(),
@@ -338,6 +407,7 @@ func TestPaymentServiceParseWeChatPaymentResumeTokenUsesExplicitSigningKey(t *te
 	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", "explicit-payment-resume-signing-key")
 
 	token, err := NewPaymentResumeService([]byte("explicit-payment-resume-signing-key")).CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		UserID:      7,
 		OpenID:      "openid-explicit-key",
 		PaymentType: payment.TypeWxpay,
 	})
@@ -362,9 +432,11 @@ func TestPaymentServiceParseWeChatPaymentResumeTokenUsesExplicitSigningKey(t *te
 
 func TestPaymentServiceParseWeChatPaymentResumeTokenAcceptsLegacyEncryptionKeyDuringMigration(t *testing.T) {
 	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", "explicit-payment-resume-signing-key")
+	t.Setenv("PAYMENT_RESUME_LEGACY_VERIFY_UNTIL", time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 
 	legacyKey := []byte("0123456789abcdef0123456789abcdef")
 	token, err := NewPaymentResumeService(legacyKey).CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		UserID:      7,
 		OpenID:      "openid-legacy-key",
 		PaymentType: payment.TypeWxpay,
 	})
@@ -389,11 +461,13 @@ func TestPaymentServiceParseWeChatPaymentResumeTokenAcceptsLegacyEncryptionKeyDu
 
 func TestNewConfiguredPaymentResumeServicePrefersExplicitSigningKeyAndKeepsLegacyVerificationFallback(t *testing.T) {
 	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", "explicit-payment-resume-signing-key")
+	t.Setenv("PAYMENT_RESUME_LEGACY_VERIFY_UNTIL", time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 
 	legacyKey := []byte("0123456789abcdef0123456789abcdef")
 	svc := newLegacyAwarePaymentResumeService(legacyKey)
 
 	explicitToken, err := svc.CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		UserID:      7,
 		OpenID:      "openid-explicit-key",
 		PaymentType: payment.TypeWxpay,
 	})
@@ -410,6 +484,7 @@ func TestNewConfiguredPaymentResumeServicePrefersExplicitSigningKeyAndKeepsLegac
 	}
 
 	legacyToken, err := NewPaymentResumeService(legacyKey).CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		UserID:      7,
 		OpenID:      "openid-legacy-key",
 		PaymentType: payment.TypeWxpay,
 	})
@@ -423,6 +498,70 @@ func TestNewConfiguredPaymentResumeServicePrefersExplicitSigningKeyAndKeepsLegac
 	}
 	if legacyClaims.OpenID != "openid-legacy-key" {
 		t.Fatalf("openid = %q, want %q", legacyClaims.OpenID, "openid-legacy-key")
+	}
+}
+
+func TestPaymentResumeLegacyVerificationDisabledByDefault(t *testing.T) {
+	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", "explicit-payment-resume-signing-key")
+	t.Setenv("PAYMENT_RESUME_LEGACY_VERIFY_UNTIL", "")
+
+	legacyKey := []byte("0123456789abcdef0123456789abcdef")
+	token, err := NewPaymentResumeService(legacyKey).CreateWeChatPaymentResumeToken(WeChatPaymentResumeClaims{
+		UserID:      7,
+		OpenID:      "openid-legacy-key",
+		PaymentType: payment.TypeWxpay,
+	})
+	if err != nil {
+		t.Fatalf("CreateWeChatPaymentResumeToken returned error: %v", err)
+	}
+
+	svc := newLegacyAwarePaymentResumeService(legacyKey)
+	if _, err := svc.ParseWeChatPaymentResumeToken(token); err == nil {
+		t.Fatal("legacy token should be rejected when no bounded verification window is configured")
+	}
+}
+
+func TestPaymentResumeSigningKeyRejectsWeakConfiguration(t *testing.T) {
+	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", "short-key")
+
+	svc := newLegacyAwarePaymentResumeService(nil)
+	if _, err := svc.CreateWeChatPaymentOAuthSubjectToken(7); err == nil {
+		t.Fatal("weak payment resume signing key should leave token signing unavailable")
+	}
+}
+
+func TestPaymentResumeLegacyVerificationWindowBounds(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		raw     string
+		allowed bool
+		wantErr bool
+	}{
+		{name: "missing", raw: "", allowed: false},
+		{name: "expired", raw: now.Add(-time.Minute).Format(time.RFC3339), allowed: false},
+		{name: "within maximum", raw: now.Add(24 * time.Hour).Format(time.RFC3339), allowed: true},
+		{name: "too far", raw: now.Add(24*time.Hour + time.Second).Format(time.RFC3339), wantErr: true},
+		{name: "malformed", raw: "tomorrow", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, err := paymentResumeLegacyVerificationAllowed(tt.raw, now)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("paymentResumeLegacyVerificationAllowed returned error: %v", err)
+			}
+			if allowed != tt.allowed {
+				t.Fatalf("allowed = %v, want %v", allowed, tt.allowed)
+			}
+		})
 	}
 }
 
@@ -500,6 +639,9 @@ func TestVisibleMethodLoadBalancerUsesEnabledProviderInstance(t *testing.T) {
 	inner := &captureLoadBalancer{}
 	configService := &PaymentConfigService{
 		entClient: client,
+		settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{
+			SettingPaymentVisibleMethodAlipayEnabled: "true",
+		}},
 	}
 	lb := newVisibleMethodLoadBalancer(inner, configService)
 
@@ -608,7 +750,8 @@ func TestVisibleMethodLoadBalancerUsesConfiguredSourceWhenMultipleProvidersEnabl
 				entClient: client,
 				settingRepo: &paymentConfigSettingRepoStub{
 					values: map[string]string{
-						visibleMethodSourceSettingKey(tt.method): tt.sourceSetting,
+						visibleMethodSourceSettingKey(tt.method):  tt.sourceSetting,
+						visibleMethodEnabledSettingKey(tt.method): "true",
 					},
 				},
 			}
@@ -660,7 +803,8 @@ func TestVisibleMethodLoadBalancerPreservesLegacyCrossProviderRoutingWhenSourceM
 		entClient: client,
 		settingRepo: &paymentConfigSettingRepoStub{
 			values: map[string]string{
-				visibleMethodSourceSettingKey(payment.TypeAlipay): "",
+				visibleMethodSourceSettingKey(payment.TypeAlipay):  "",
+				visibleMethodEnabledSettingKey(payment.TypeAlipay): "true",
 			},
 		},
 	}
@@ -744,7 +888,8 @@ func TestVisibleMethodLoadBalancerRejectsInvalidSourceWhenMultipleProvidersEnabl
 				entClient: client,
 				settingRepo: &paymentConfigSettingRepoStub{
 					values: map[string]string{
-						visibleMethodSourceSettingKey(tt.method): tt.sourceValue,
+						visibleMethodSourceSettingKey(tt.method):  tt.sourceValue,
+						visibleMethodEnabledSettingKey(tt.method): "true",
 					},
 				},
 			}
@@ -770,6 +915,9 @@ func TestVisibleMethodLoadBalancerRejectsMissingEnabledVisibleMethodProvider(t *
 	inner := &captureLoadBalancer{}
 	configService := &PaymentConfigService{
 		entClient: newPaymentConfigServiceTestClient(t),
+		settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{
+			SettingPaymentVisibleMethodWxpayEnabled: "true",
+		}},
 	}
 	lb := newVisibleMethodLoadBalancer(inner, configService)
 

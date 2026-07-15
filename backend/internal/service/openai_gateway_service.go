@@ -323,7 +323,8 @@ type OpenAIGatewayService struct {
 	usageLogRepo              UsageLogRepository
 	usageBillingRepo          UsageBillingRepository
 	usageBillingOutboxRepo    UsageBillingOutboxRepository
-	usageBillingOutboxWake    interface{ Wake() }
+	usageBillingOutboxWake    UsageBillingOutboxWaker
+	usageBillingAdmissionRepo UsageBillingAdmissionRepository
 	requireUsageBillingOutbox bool
 	userRepo                  UserRepository
 	userSubRepo               UserSubscriptionRepository
@@ -390,6 +391,7 @@ func NewOpenAIGatewayService(
 	settingService *SettingService,
 	usageBillingOutboxRepo UsageBillingOutboxRepository,
 	usageBillingOutboxWorker *UsageBillingOutboxWorker,
+	usageBillingAdmissionRepo UsageBillingAdmissionRepository,
 ) *OpenAIGatewayService {
 	svc := &OpenAIGatewayService{
 		accountRepo:               accountRepo,
@@ -397,6 +399,7 @@ func NewOpenAIGatewayService(
 		usageBillingRepo:          usageBillingRepo,
 		usageBillingOutboxRepo:    usageBillingOutboxRepo,
 		usageBillingOutboxWake:    usageBillingOutboxWorker,
+		usageBillingAdmissionRepo: usageBillingAdmissionRepo,
 		requireUsageBillingOutbox: true,
 		userRepo:                  userRepo,
 		userSubRepo:               userSubRepo,
@@ -430,6 +433,21 @@ func NewOpenAIGatewayService(
 	}
 	svc.logOpenAIWSModeBootstrap()
 	return svc
+}
+
+func (s *OpenAIGatewayService) AdmitUsageBillingRequest(
+	ctx context.Context,
+	apiKey *APIKey,
+	user *User,
+	account *Account,
+	subscription *UserSubscription,
+	quote UsageBillingReservationQuote,
+) (context.Context, *UsageBillingAdmissionSession, error) {
+	return admitUsageBillingRequest(ctx, s.cfg, s.requireUsageBillingOutbox, s.usageBillingAdmissionRepo, apiKey, user, account, subscription, quote)
+}
+
+func (s *OpenAIGatewayService) AbandonUsageBillingRequest(ctx context.Context, session *UsageBillingAdmissionSession) error {
+	return abandonUsageBillingRequest(ctx, s.usageBillingAdmissionRepo, session)
 }
 
 // ResolveChannelMapping 解析渠道级模型映射（代理到 ChannelService）
@@ -2643,6 +2661,10 @@ func (s *OpenAIGatewayService) ForwardWithOptions(ctx context.Context, c *gin.Co
 			return nil, err
 		}
 	}
+	setOpenAIUsageBillingReservationBody(opts.UsageBilling, body)
+	if err := s.prepareOpenAIForwardUsageBilling(ctx, account, billingIdentity, opts); err != nil {
+		return nil, err
+	}
 
 	// Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
@@ -3231,6 +3253,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			return nil, err
 		}
 	}
+	setOpenAIUsageBillingReservationBody(opts.UsageBilling, body)
+	if err := s.prepareOpenAIForwardUsageBilling(ctx, account, billingIdentity, opts); err != nil {
+		return nil, err
+	}
 
 	// Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
@@ -3797,10 +3823,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 	defer putSSEScannerBuf64K(scanBuf)
@@ -4493,10 +4516,7 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 	imageCounter := newOpenAIImageOutputCounter()
 	var firstTokenMs *int
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
+	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 
@@ -5122,15 +5142,24 @@ func reconstructResponseOutputFromSSE(bodyText string) ([]byte, bool) {
 	acc := apicompat.NewBufferedResponseAccumulator()
 	imageOutputs := make([]json.RawMessage, 0, 1)
 	seenImages := make(map[string]struct{})
+	limitExceeded := false
 	forEachOpenAISSEDataPayload(bodyText, func(data []byte) {
+		if limitExceeded {
+			return
+		}
 		if imageOutput, ok := extractImageGenerationOutputFromSSEData(data, seenImages); ok {
 			imageOutputs = append(imageOutputs, imageOutput)
 		}
 		var event apicompat.ResponsesStreamEvent
 		if err := json.Unmarshal(data, &event); err == nil {
-			acc.ProcessEvent(&event)
+			if err := acc.ProcessEvent(&event); err != nil {
+				limitExceeded = true
+			}
 		}
 	})
+	if limitExceeded {
+		return nil, false
+	}
 	if !acc.HasContent() && len(imageOutputs) == 0 {
 		return nil, false
 	}
@@ -5467,6 +5496,10 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	user := input.User
 	account := input.Account
 	subscription := input.Subscription
+	if s.requireUsageBillingOutbox && subscription != nil && subscription.IsWalletMode() &&
+		(result.BillingIdentity == nil || !validFenceToken(result.BillingIdentity.AdmissionAttemptID) || result.BillingIdentity.AdmissionRef.Validate() != nil) {
+		return ErrUsageBillingLifecycleContractInvalid
+	}
 
 	// 计算实际的新输入token（减去缓存读取的token）
 	// 因为 input_tokens 包含了 cache_read_tokens，而缓存读取的token不应按输入价格计费
@@ -5493,8 +5526,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if resolver == nil {
 		resolver = newUserGroupRateResolver(nil, nil, resolveUserGroupRateCacheTTL(s.cfg), nil, "service.openai_gateway")
 	}
-	multiplier := resolveEffectiveRateMultiplier(ctx, resolver, user.ID, apiKey.GroupID, apiKey.Group, subscription, systemDefault).Multiplier
-	imageMultiplier := resolveImageRateMultiplier(apiKey, multiplier)
+	multiplier := canonicalUsageBillingRate(resolveEffectiveRateMultiplier(ctx, resolver, user.ID, apiKey.GroupID, apiKey.Group, subscription, systemDefault).Multiplier)
+	imageMultiplier := canonicalUsageBillingRate(resolveImageRateMultiplier(apiKey, multiplier))
 
 	var cost *CostBreakdown
 	var err error
@@ -5628,6 +5661,9 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageCount:          result.ImageCount,
 		ImageSize:           optionalTrimmedStringPtr(result.ImageSize),
 	}
+	if result.BillingIdentity != nil {
+		usageLog.UsageBillingAttemptID = strings.TrimSpace(result.BillingIdentity.AdmissionAttemptID)
+	}
 	if usedPreflightQuote {
 		evidence := usedPricingQuote.Evidence
 		usageLog.PricingSource = optionalTrimmedStringPtr(evidence.Source)
@@ -5728,9 +5764,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		if err != nil {
 			return err
 		}
-		billingCtx, cancel := detachedBillingContext(ctx)
-		defer cancel()
-		if _, _, err := s.usageBillingOutboxRepo.Enqueue(billingCtx, envelope); err != nil {
+		if err := enqueueUsageBillingOutboxDurably(ctx, s.usageBillingOutboxRepo, envelope, "service.openai_gateway.usage_billing_outbox"); err != nil {
 			return err
 		}
 		if s.usageBillingOutboxWake != nil {

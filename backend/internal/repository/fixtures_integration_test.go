@@ -4,10 +4,13 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	entgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
@@ -115,6 +118,64 @@ func mustCreateGroup(t *testing.T, client *dbent.Client, g *service.Group) *serv
 	g.CreatedAt = created.CreatedAt
 	g.UpdatedAt = created.UpdatedAt
 	return g
+}
+
+func mustGetOrCreateWalletBusinessGroup(
+	t *testing.T,
+	client *dbent.Client,
+	name, platform string,
+	isExclusive bool,
+	rateMultiplier float64,
+) *service.Group {
+	t.Helper()
+	ctx := context.Background()
+	entity, err := client.Group.Query().
+		Where(entgroup.NameEQ(name), entgroup.DeletedAtIsNil()).
+		Only(ctx)
+	if dbent.IsNotFound(err) {
+		return mustCreateGroup(t, client, &service.Group{
+			Name:             name,
+			Platform:         platform,
+			Status:           service.StatusActive,
+			SubscriptionType: service.SubscriptionTypeStandard,
+			IsExclusive:      isExclusive,
+			RateMultiplier:   rateMultiplier,
+		})
+	}
+	require.NoError(t, err)
+	group := groupEntityToService(entity)
+	require.Equal(t, platform, group.Platform)
+	require.Equal(t, service.StatusActive, group.Status)
+	require.Equal(t, service.SubscriptionTypeStandard, group.SubscriptionType)
+	require.Equal(t, isExclusive, group.IsExclusive)
+	require.InDelta(t, rateMultiplier, group.RateMultiplier, 0.000001)
+	return group
+}
+
+func mustCreateCreditsWallet(t *testing.T, client *dbent.Client, userID int64, balance float64) *dbent.UserSubscription {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	wallet, err := tx.Client().UserSubscription.Create().
+		SetUserID(userID).
+		SetStartsAt(time.Now().UTC().Add(-time.Hour)).
+		SetExpiresAt(service.MaxExpiresAt).
+		SetStatus(service.SubscriptionStatusActive).
+		SetWalletBalanceUsd(balance).
+		SetWalletInitialUsd(balance).
+		SetAssignedAt(time.Now().UTC()).
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = tx.Client().ExecContext(ctx, `
+		INSERT INTO subscription_wallet_ledger
+			(subscription_id, delta_usd, balance_after, reason, notes)
+		VALUES ($1, $2, $2, 'activation', 'integration wallet baseline')
+	`, wallet.ID, balance)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	return wallet
 }
 
 func mustCreateProxy(t *testing.T, client *dbent.Client, p *service.Proxy) *service.Proxy {
@@ -256,12 +317,27 @@ func mustCreateApiKey(t *testing.T, client *dbent.Client, k *service.APIKey) *se
 	if k.Name == "" {
 		k.Name = "default"
 	}
+	if k.KeyHash == "" {
+		k.KeyHash = service.HashAPIKey(k.Key)
+	}
+	if k.KeyPrefix == "" {
+		k.KeyPrefix = service.APIKeyPrefixForStorage(k.Key)
+	}
 
+	storedKey := k.Key
+	if !strings.HasPrefix(storedKey, apiKeyEncryptedStoragePrefix) {
+		storedKey = apiKeyEncryptedStoragePrefix + "fixture." + base64.RawURLEncoding.EncodeToString([]byte(k.Key))
+	}
 	create := client.APIKey.Create().
 		SetUserID(k.UserID).
-		SetKey(k.Key).
+		SetKey(storedKey).
+		SetKeyHash(k.KeyHash).
+		SetKeyPrefix(k.KeyPrefix).
 		SetName(k.Name).
 		SetStatus(k.Status)
+	if k.Purpose != "" {
+		create.SetPurpose(k.Purpose)
+	}
 	if k.Quota != 0 {
 		create.SetQuota(k.Quota)
 	}

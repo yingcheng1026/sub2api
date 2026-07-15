@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -15,6 +16,19 @@ type ValidationOptions struct {
 	AllowedHosts     []string
 	RequireAllowlist bool
 	AllowPrivate     bool
+}
+
+const safeDialTimeout = 5 * time.Second
+
+var blockedSpecialPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT
+	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),  // TEST-NET-1
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmark networks
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001:db8::/32"), // IPv6 documentation range
 }
 
 // ValidateHTTPURL validates an outbound HTTP/HTTPS URL.
@@ -33,7 +47,10 @@ func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions)
 
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid url: %s", trimmed)
+		return "", errors.New("invalid url")
+	}
+	if parsed.User != nil {
+		return "", errors.New("url userinfo is not allowed")
 	}
 
 	scheme := strings.ToLower(parsed.Scheme)
@@ -78,7 +95,10 @@ func ValidateURLFormat(raw string, allowInsecureHTTP bool) (string, error) {
 
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid url: %s", trimmed)
+		return "", errors.New("invalid url")
+	}
+	if parsed.User != nil {
+		return "", errors.New("url userinfo is not allowed")
 	}
 
 	scheme := strings.ToLower(parsed.Scheme)
@@ -115,14 +135,68 @@ func ValidateResolvedIP(host string) error {
 	if err != nil {
 		return fmt.Errorf("dns resolution failed: %w", err)
 	}
+	if err := validateResolvedAddresses(ips); err != nil {
+		return err
+	}
+	return nil
+}
 
+// NewSafeDialContext resolves a hostname once, rejects every non-public answer,
+// and dials one of the exact validated IPs. This closes the validate-then-
+// resolve TOCTOU window that otherwise permits DNS rebinding between a
+// preflight lookup and net.Dialer.
+func NewSafeDialContext(allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: safeDialTimeout}
+	if allowPrivate {
+		return dialer.DialContext
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dial address: %w", err)
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("dns resolution failed: %w", err)
+		}
+		if err := validateResolvedAddresses(ips); err != nil {
+			return nil, err
+		}
+		return dialValidatedAddresses(ctx, dialer, network, port, ips)
+	}
+}
+
+func validateResolvedAddresses(ips []net.IP) error {
+	if len(ips) == 0 {
+		return errors.New("dns resolution returned no addresses")
+	}
 	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return fmt.Errorf("resolved ip %s is not allowed", ip.String())
+		if isBlockedIP(ip) {
+			return errors.New("resolved address is not publicly routable")
 		}
 	}
 	return nil
+}
+
+func dialValidatedAddresses(ctx context.Context, dialer *net.Dialer, network, port string, ips []net.IP) (net.Conn, error) {
+	var lastErr error
+	for _, ip := range ips {
+		if network == "tcp4" && ip.To4() == nil {
+			continue
+		}
+		if network == "tcp6" && ip.To4() != nil {
+			continue
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no resolved address matches the requested network")
+	}
+	return nil, lastErr
 }
 
 func normalizeAllowlist(values []string) []string {
@@ -167,7 +241,28 @@ func isBlockedHost(host string) bool {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		if isBlockedIP(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	if !addr.IsGlobalUnicast() {
+		return true
+	}
+	for _, prefix := range blockedSpecialPrefixes {
+		if prefix.Contains(addr) {
 			return true
 		}
 	}

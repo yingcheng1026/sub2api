@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"encoding/hex"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,33 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
+
+func TestGenerateOutTradeNoUses128BitRandomSuffix(t *testing.T) {
+	tradeNo, err := generateOutTradeNo()
+	if err != nil {
+		t.Fatalf("generateOutTradeNo: %v", err)
+	}
+	if len(tradeNo) != 32 {
+		t.Fatalf("out_trade_no length=%d, want 32", len(tradeNo))
+	}
+	if _, err := hex.DecodeString(tradeNo); err != nil {
+		t.Fatalf("random suffix is not 128-bit hexadecimal: %v", err)
+	}
+}
+
+func TestValidateStripeClientSecretBinding(t *testing.T) {
+	t.Parallel()
+
+	if err := validateStripeClientSecretBinding(payment.TypeStripe, "pi_order_123", "pi_order_123_secret_client"); err != nil {
+		t.Fatalf("valid Stripe order/session pair rejected: %v", err)
+	}
+	if err := validateStripeClientSecretBinding(payment.TypeStripe, "pi_order_123", "pi_attacker_secret_client"); err == nil {
+		t.Fatal("mismatched Stripe order/client_secret pair must be rejected server-side")
+	}
+	if err := validateStripeClientSecretBinding(payment.TypeAlipay, "trade-123", "opaque"); err != nil {
+		t.Fatalf("non-Stripe sessions should not use Stripe binding rules: %v", err)
+	}
+}
 
 func TestBuildCreateOrderResponseDefaultsToOrderCreated(t *testing.T) {
 	t.Parallel()
@@ -105,6 +134,7 @@ func TestMaybeBuildWeChatOAuthRequiredResponse(t *testing.T) {
 	})
 
 	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		UserID:          7,
 		Amount:          12.5,
 		PaymentType:     payment.TypeWxpay,
 		IsWeChatBrowser: true,
@@ -132,8 +162,20 @@ func TestMaybeBuildWeChatOAuthRequiredResponse(t *testing.T) {
 	if resp.OAuth.RedirectURL != "/auth/wechat/payment/callback" {
 		t.Fatalf("redirect_url = %q, want %q", resp.OAuth.RedirectURL, "/auth/wechat/payment/callback")
 	}
-	if resp.OAuth.AuthorizeURL != "/api/v1/auth/oauth/wechat/payment/start?amount=12.5&order_type=balance&payment_type=wxpay&redirect=%2Fpurchase%3Ffrom%3Dwechat&scope=snsapi_base" {
-		t.Fatalf("authorize_url = %q", resp.OAuth.AuthorizeURL)
+	authorizeURL, err := url.Parse(resp.OAuth.AuthorizeURL)
+	if err != nil {
+		t.Fatalf("parse authorize_url: %v", err)
+	}
+	query := authorizeURL.Query()
+	if query.Get("amount") != "12.5" || query.Get("order_type") != payment.OrderTypeBalance || query.Get("payment_type") != payment.TypeWxpay || query.Get("scope") != "snsapi_base" {
+		t.Fatalf("authorize_url context = %q", resp.OAuth.AuthorizeURL)
+	}
+	subjectClaims, err := svc.paymentResume().ParseWeChatPaymentOAuthSubjectToken(query.Get("subject_token"))
+	if err != nil {
+		t.Fatalf("parse oauth subject token: %v", err)
+	}
+	if subjectClaims.UserID != 7 || subjectClaims.JTI == "" {
+		t.Fatalf("oauth subject token is not user-bound: %+v", subjectClaims)
 	}
 }
 
@@ -143,6 +185,7 @@ func TestMaybeBuildWeChatOAuthRequiredResponseRequiresMPConfigInWeChat(t *testin
 	svc := newWeChatPaymentOAuthTestService(nil)
 
 	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		UserID:          7,
 		Amount:          12.5,
 		PaymentType:     payment.TypeWxpay,
 		IsWeChatBrowser: true,
@@ -182,6 +225,7 @@ func TestMaybeBuildWeChatOAuthRequiredResponseRequiresResumeSigningKey(t *testin
 	}
 
 	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		UserID:          7,
 		Amount:          12.5,
 		PaymentType:     payment.TypeWxpay,
 		IsWeChatBrowser: true,
@@ -219,6 +263,7 @@ func TestMaybeBuildWeChatOAuthRequiredResponseFallsBackToConfiguredLegacySigning
 	}
 
 	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		UserID:          7,
 		Amount:          12.5,
 		PaymentType:     payment.TypeWxpay,
 		IsWeChatBrowser: true,
@@ -251,6 +296,7 @@ func TestMaybeBuildWeChatOAuthRequiredResponseForSelectionSkipsEasyPayProvider(t
 	})
 
 	resp, err := svc.maybeBuildWeChatOAuthRequiredResponseForSelection(context.Background(), CreateOrderRequest{
+		UserID:          7,
 		Amount:          12.5,
 		PaymentType:     payment.TypeWxpay,
 		IsWeChatBrowser: true,

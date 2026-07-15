@@ -7,6 +7,25 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 )
 
+type SubscriptionUsageWindow string
+
+const (
+	SubscriptionUsageWindowDaily   SubscriptionUsageWindow = "daily"
+	SubscriptionUsageWindowWeekly  SubscriptionUsageWindow = "weekly"
+	SubscriptionUsageWindowMonthly SubscriptionUsageWindow = "monthly"
+)
+
+// SubscriptionUsageWindowAdvance is an optimistic state transition for one
+// usage window. ExpectedStart=nil means the stored window must still be NULL.
+// ResetUsage is false for first activation so already-recorded concurrent usage
+// is never erased; expired-window transitions set it true.
+type SubscriptionUsageWindowAdvance struct {
+	Window        SubscriptionUsageWindow
+	ExpectedStart *time.Time
+	NewStart      time.Time
+	ResetUsage    bool
+}
+
 type UserSubscriptionRepository interface {
 	Create(ctx context.Context, sub *UserSubscription) error
 	GetByID(ctx context.Context, id int64) (*UserSubscription, error)
@@ -15,6 +34,9 @@ type UserSubscriptionRepository interface {
 	// 钱包模式 (v4)：返回用户最快到期的 active 钱包订阅（先到期先消费），
 	// 与具体 group 解耦，gateway 中间件先 lookup 钱包再 fallback (user, group)。
 	GetActiveWalletByUserID(ctx context.Context, userID int64) (*UserSubscription, error)
+	// GetActiveCreditsWalletByUserID returns the user's permanent credits
+	// wallet and excludes finite legacy wallet-shaped monthly rows.
+	GetActiveCreditsWalletByUserID(ctx context.Context, userID int64) (*UserSubscription, error)
 	// GetActiveByPlanCoveringGroup 查询用户有没有 active 月卡订阅，其 plan 通过
 	// subscription_plan_groups 间接覆盖了 targetGroupID。
 	//
@@ -40,6 +62,7 @@ type UserSubscriptionRepository interface {
 	UpdateNotes(ctx context.Context, subscriptionID int64, notes string) error
 
 	ActivateWindows(ctx context.Context, id int64, start time.Time) error
+	AdvanceUsageWindow(ctx context.Context, id int64, advance SubscriptionUsageWindowAdvance) (bool, error)
 	ResetDailyUsage(ctx context.Context, id int64, newWindowStart time.Time) error
 	ResetWeeklyUsage(ctx context.Context, id int64, newWindowStart time.Time) error
 	ResetMonthlyUsage(ctx context.Context, id int64, newWindowStart time.Time) error

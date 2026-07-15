@@ -2,10 +2,16 @@
 #
 # Sub2API Installation Script
 # Sub2API 安装脚本
-# Usage: curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | bash
+# Usage: run this local file from a reviewed checkout or release archive.
 #
 
 set -e
+umask 077
+
+if [ -z "${BASH_SOURCE[0]:-}" ]; then
+    echo "Refusing piped installer input. Run deploy/install.sh from a reviewed checkout or release archive." >&2
+    exit 1
+fi
 
 # Colors
 RED='\033[0;31m'
@@ -21,6 +27,7 @@ INSTALL_DIR="/opt/sub2api"
 SERVICE_NAME="sub2api"
 SERVICE_USER="sub2api"
 CONFIG_DIR="/etc/sub2api"
+SECRET_ENV_FILE="${CONFIG_DIR}/sub2api.env"
 
 # Server configuration (will be set by user)
 SERVER_HOST="0.0.0.0"
@@ -310,8 +317,74 @@ print_error() {
     echo -e "${RED}[$(msg 'error')]${NC} $1"
 }
 
-# Check if running interactively (can access terminal)
-# When piped (curl | bash), stdin is not a terminal, but /dev/tty may still be available
+generate_secret() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+        return
+    fi
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+ensure_environment_secret() {
+    local name="$1"
+    local current=""
+    if [ -f "$SECRET_ENV_FILE" ]; then
+        current=$(sed -n "s/^${name}=//p" "$SECRET_ENV_FILE" | tail -n 1)
+    fi
+    if [ -n "$current" ]; then
+        return
+    fi
+
+    local generated
+    generated=$(generate_secret)
+    if [ -f "$SECRET_ENV_FILE" ] && grep -q "^${name}=" "$SECRET_ENV_FILE"; then
+        sed -i "s/^${name}=.*/${name}=${generated}/" "$SECRET_ENV_FILE"
+    else
+        printf '%s=%s\n' "$name" "$generated" >> "$SECRET_ENV_FILE"
+    fi
+}
+
+ensure_secret_environment() {
+    mkdir -p "$CONFIG_DIR"
+    touch "$SECRET_ENV_FILE"
+    chmod 600 "$SECRET_ENV_FILE"
+    chown root:root "$SECRET_ENV_FILE"
+
+    local name
+    for name in \
+        JWT_SECRET \
+        SECRET_ENCRYPTION_TOTP_SECRET_KEY \
+        SECRET_ENCRYPTION_TOTP_CACHE_KEY \
+        SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY \
+        SECRET_ENCRYPTION_BACKUP_S3_KEY \
+        SECRET_ENCRYPTION_CONTENT_MODERATION_KEY \
+        SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY \
+        SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY \
+        SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY \
+        SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY \
+        SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY \
+        SECRET_ENCRYPTION_JWT_HMAC_KEY \
+        SECRET_ENCRYPTION_SETTING_SECRET_KEY \
+        API_KEY_ENCRYPTION_KEY \
+        PAYMENT_RESUME_SIGNING_KEY; do
+        ensure_environment_secret "$name"
+    done
+}
+
+ensure_service_environment_reference() {
+    local unit_file="/etc/systemd/system/sub2api.service"
+    ensure_secret_environment
+    if [ ! -f "$unit_file" ]; then
+        print_error "Missing systemd unit: $unit_file"
+        exit 1
+    fi
+    if ! grep -Fq "EnvironmentFile=-${SECRET_ENV_FILE}" "$unit_file"; then
+        sed -i "\|^WorkingDirectory=/opt/sub2api$|a EnvironmentFile=-${SECRET_ENV_FILE}" "$unit_file"
+    fi
+    systemctl daemon-reload
+}
+
+# Check if running interactively (can access terminal).
 is_interactive() {
     # Check if /dev/tty is available (works even when piped)
     [ -e /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]
@@ -319,7 +392,7 @@ is_interactive() {
 
 # Select language
 select_language() {
-    # If not interactive (piped), use default language
+    # If not interactive, use default language.
     if ! is_interactive; then
         LANG_CHOICE="zh"
         return
@@ -651,6 +724,8 @@ setup_directories() {
 install_service() {
     print_info "$(msg 'installing_service')"
 
+    ensure_secret_environment
+
     # Create service file with configured host and port
     cat > /etc/systemd/system/sub2api.service << EOF
 [Unit]
@@ -664,6 +739,7 @@ Type=simple
 User=sub2api
 Group=sub2api
 WorkingDirectory=/opt/sub2api
+EnvironmentFile=-${SECRET_ENV_FILE}
 ExecStart=/opt/sub2api/sub2api
 Restart=always
 RestartSec=5
@@ -820,6 +896,8 @@ upgrade() {
     # Set permissions
     chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/sub2api"
 
+    ensure_service_environment_reference
+
     # Start service
     print_info "$(msg 'starting_service')"
     systemctl start sub2api
@@ -882,6 +960,8 @@ install_version() {
     # Set permissions
     chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/sub2api"
 
+    ensure_service_environment_reference
+
     # Start service
     print_info "$(msg 'starting_service')"
     if systemctl start sub2api; then
@@ -907,10 +987,10 @@ install_version() {
 uninstall() {
     print_warning "$(msg 'uninstall_confirm')"
 
-    # If not interactive (piped), require -y flag or skip confirmation
+    # If not interactive, require -y.
     if ! is_interactive; then
         if [ "${FORCE_YES:-}" != "true" ]; then
-            print_error "Non-interactive mode detected. Use 'curl ... | bash -s -- uninstall -y' to confirm."
+            print_error "Non-interactive mode detected. Run 'bash deploy/install.sh uninstall -y' from a reviewed checkout."
             exit 1
         fi
     else

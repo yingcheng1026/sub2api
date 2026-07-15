@@ -36,6 +36,48 @@ func TestNormalizeEasyPayAPIBase(t *testing.T) {
 	}
 }
 
+func TestNewEasyPayRejectsExternalPlainHTTPAPIBase(t *testing.T) {
+	_, err := NewEasyPay("test-instance", map[string]string{
+		"pid":       "merchant",
+		"pkey":      "secret",
+		"apiBase":   "http://payments.example.com",
+		"notifyUrl": "https://relay.example.com/easypay/notify",
+		"returnUrl": "https://relay.example.com/payment/result",
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "invalid url scheme") {
+		t.Fatalf("NewEasyPay error=%v, want HTTPS rejection", err)
+	}
+}
+
+func TestNewEasyPayRejectsPrivateAPIBase(t *testing.T) {
+	for _, raw := range []string{"https://127.0.0.1:8443", "https://169.254.169.254", "https://localhost"} {
+		_, err := NewEasyPay("test-instance", map[string]string{
+			"pid":       "merchant",
+			"pkey":      "secret",
+			"apiBase":   raw,
+			"notifyUrl": "https://merchant.example/notify",
+			"returnUrl": "https://merchant.example/return",
+		})
+		if err == nil {
+			t.Fatalf("private apiBase %q was accepted", raw)
+		}
+	}
+}
+
+func TestEasyPaySafeClientRejectsPrivateDestinationBeforeRequest(t *testing.T) {
+	provider := &EasyPay{
+		instanceID: "private-runtime-test",
+		config: map[string]string{
+			"pid": "merchant", "pkey": "secret", "apiBase": "https://127.0.0.1:1",
+		},
+		httpClient: newEasyPayHTTPClient(),
+	}
+	if _, err := provider.QueryOrder(context.Background(), "order-1"); err == nil || !strings.Contains(err.Error(), "not publicly routable") {
+		t.Fatalf("private runtime destination error = %v", err)
+	}
+}
+
 func TestEasyPayRefundNormalizesAPIBaseAndSendsOutTradeNoOnly(t *testing.T) {
 	t.Parallel()
 
@@ -182,15 +224,18 @@ func TestEasyPayRefundResponseErrors(t *testing.T) {
 func newTestEasyPay(t *testing.T, apiBase string) *EasyPay {
 	t.Helper()
 
-	provider, err := NewEasyPay("test-instance", map[string]string{
-		"pid":       "pid-1",
-		"pkey":      "pkey-1",
-		"apiBase":   apiBase,
-		"notifyUrl": "https://example.com/notify",
-		"returnUrl": "https://example.com/return",
-	})
-	if err != nil {
-		t.Fatalf("NewEasyPay: %v", err)
+	return &EasyPay{
+		instanceID: "test-instance",
+		config: map[string]string{
+			"pid":       "pid-1",
+			"pkey":      "pkey-1",
+			"apiBase":   apiBase,
+			"notifyUrl": "https://example.com/notify",
+			"returnUrl": "https://example.com/return",
+		},
+		httpClient: &http.Client{
+			Timeout:   easypayHTTPTimeout,
+			Transport: &http.Transport{},
+		},
 	}
-	return provider
 }

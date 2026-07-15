@@ -21,6 +21,16 @@ type walletGroupKeyAPIKeyRepoStub struct {
 	listFilters APIKeyListFilters
 }
 
+func (s *walletGroupKeyAPIKeyRepoStub) GetByUserIDAndPurpose(_ context.Context, userID int64, purpose string) (*APIKey, error) {
+	for i := range s.keys {
+		key := s.keys[i]
+		if key.UserID == userID && key.Purpose == purpose {
+			return &key, nil
+		}
+	}
+	return nil, ErrAPIKeyNotFound
+}
+
 func (s *walletGroupKeyAPIKeyRepoStub) ListByUserID(_ context.Context, userID int64, params pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error) {
 	s.listCalls++
 	s.listUserID = userID
@@ -40,18 +50,62 @@ func (s *walletGroupKeyAPIKeyRepoStub) Create(_ context.Context, key *APIKey) er
 	return nil
 }
 
+func (s *walletGroupKeyAPIKeyRepoStub) CountByUserID(_ context.Context, userID int64) (int64, error) {
+	var count int64
+	for i := range s.keys {
+		if s.keys[i].UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 type walletGroupKeyUserRepoStub struct {
 	UserRepository
+	allowedGroups []int64
+}
+
+type walletGroupKeyUserSubRepoStub struct {
+	UserSubscriptionRepository
+}
+
+func (walletGroupKeyUserSubRepoStub) GetActiveCreditsWalletByUserID(_ context.Context, userID int64) (*UserSubscription, error) {
+	balance := 100.0
+	return &UserSubscription{
+		ID:               9001,
+		UserID:           userID,
+		Status:           SubscriptionStatusActive,
+		ExpiresAt:        MaxExpiresAt,
+		WalletBalanceUSD: &balance,
+	}, nil
 }
 
 func (s walletGroupKeyUserRepoStub) GetByID(_ context.Context, id int64) (*User, error) {
-	return &User{ID: id, Status: StatusActive}, nil
+	return &User{ID: id, Status: StatusActive, AllowedGroups: append([]int64(nil), s.allowedGroups...)}, nil
 }
 
 type walletGroupKeyGroupRepoStub struct {
 	GroupRepository
 
 	groups map[int64]*Group
+}
+
+type apiKeyCreateReservationCacheStub struct {
+	APIKeyCache
+	reservation int
+	err         error
+}
+
+func (s *apiKeyCreateReservationCacheStub) ReserveAPIKeyCreate(context.Context, int64) (int, error) {
+	return s.reservation, s.err
+}
+
+func (*apiKeyCreateReservationCacheStub) DeleteAuthCache(context.Context, string) error {
+	return nil
+}
+
+func (*apiKeyCreateReservationCacheStub) PublishAuthCacheInvalidation(context.Context, string) error {
+	return nil
 }
 
 func (s walletGroupKeyGroupRepoStub) GetByID(_ context.Context, id int64) (*Group, error) {
@@ -62,7 +116,7 @@ func (s walletGroupKeyGroupRepoStub) GetByID(_ context.Context, id int64) (*Grou
 }
 
 func newWalletGroupKeyTestService(repo APIKeyRepository, groupRepo GroupRepository) *APIKeyService {
-	return NewAPIKeyService(repo, walletGroupKeyUserRepoStub{}, groupRepo, nil, nil, nil, &config.Config{})
+	return NewAPIKeyService(repo, walletGroupKeyUserRepoStub{}, groupRepo, walletGroupKeyUserSubRepoStub{}, nil, nil, &config.Config{})
 }
 
 func TestAPIKeyServiceEnsureWalletGroupKeysCreatesAllForFreshUser(t *testing.T) {
@@ -164,6 +218,7 @@ func TestAPIKeyServiceEnsureWalletUniversalKeyCreatesForFreshUser(t *testing.T) 
 	require.True(t, created, "fresh user 应新建 universal key")
 	require.NotNil(t, key)
 	require.Equal(t, WalletUniversalAPIKeyName, key.Name)
+	require.Equal(t, APIKeyPurposeWalletUniversal, key.Purpose)
 	require.Nil(t, key.GroupID, "universal key 的 group_id 必须为 NULL")
 	require.Equal(t, 1, repo.createCalls)
 }
@@ -175,6 +230,7 @@ func TestAPIKeyServiceEnsureWalletUniversalKeyReusesExisting(t *testing.T) {
 				ID:      55,
 				UserID:  42,
 				Name:    WalletUniversalAPIKeyName,
+				Purpose: APIKeyPurposeWalletUniversal,
 				GroupID: nil,
 				Status:  StatusAPIKeyActive,
 			},
@@ -219,6 +275,69 @@ func TestAPIKeyServiceEnsureWalletUniversalKeyIgnoresGroupBoundKeys(t *testing.T
 	require.Equal(t, 1, repo.createCalls)
 }
 
+func TestAPIKeyServiceCreateRejectsUserCreatedNullGroupKey(t *testing.T) {
+	repo := &walletGroupKeyAPIKeyRepoStub{}
+	svc := newWalletGroupKeyTestService(repo, walletGroupKeyGroupRepoStub{})
+
+	_, err := svc.Create(context.Background(), 42, CreateAPIKeyRequest{Name: "manual unscoped key"})
+
+	require.ErrorIs(t, err, ErrAPIKeyGroupRequired)
+	require.Zero(t, repo.createCalls)
+}
+
+func TestAPIKeyServiceCreateRejectsUnboundedActiveKeyGrowth(t *testing.T) {
+	keys := make([]APIKey, 50)
+	for i := range keys {
+		keys[i] = APIKey{ID: int64(i + 1), UserID: 42, Purpose: APIKeyPurposeStandard, Status: StatusActive}
+	}
+	repo := &walletGroupKeyAPIKeyRepoStub{keys: keys}
+	groupID := int64(2)
+	svc := newWalletGroupKeyTestService(repo, walletGroupKeyGroupRepoStub{groups: map[int64]*Group{
+		groupID: {ID: groupID, Name: "openai-default", Status: StatusActive},
+	}})
+
+	_, err := svc.Create(context.Background(), 42, CreateAPIKeyRequest{Name: "key-51", GroupID: &groupID})
+	require.Error(t, err)
+	require.Zero(t, repo.createCalls)
+}
+
+func TestAPIKeyServiceCreateEnforcesSuccessfulCreateRateLimit(t *testing.T) {
+	repo := &walletGroupKeyAPIKeyRepoStub{}
+	groupID := int64(2)
+	cache := &apiKeyCreateReservationCacheStub{
+		reservation: 21,
+	}
+	svc := NewAPIKeyService(
+		repo,
+		walletGroupKeyUserRepoStub{},
+		walletGroupKeyGroupRepoStub{groups: map[int64]*Group{
+			groupID: {ID: groupID, Name: "openai-default", Status: StatusActive},
+		}},
+		walletGroupKeyUserSubRepoStub{},
+		nil,
+		cache,
+		&config.Config{},
+	)
+
+	_, err := svc.Create(context.Background(), 42, CreateAPIKeyRequest{Name: "rate-limited", GroupID: &groupID})
+	require.ErrorIs(t, err, ErrAPIKeyRateLimited)
+	require.Zero(t, repo.createCalls)
+}
+
+func TestValidateWalletUniversalKeyMutationKeepsSystemIdentityImmutable(t *testing.T) {
+	newName := "renamed wallet key"
+	exactName := WalletUniversalAPIKeyName
+	groupID := int64(3)
+	exact := &APIKey{Name: WalletUniversalAPIKeyName, Purpose: APIKeyPurposeWalletUniversal, GroupID: nil}
+	legacy := &APIKey{Name: "manual null key", Purpose: APIKeyPurposeStandard, GroupID: nil}
+
+	require.ErrorIs(t, validateWalletUniversalKeyMutation(exact, UpdateAPIKeyRequest{Name: &newName}), ErrWalletUniversalKeyImmutable)
+	require.ErrorIs(t, validateWalletUniversalKeyMutation(exact, UpdateAPIKeyRequest{GroupID: &groupID}), ErrWalletUniversalKeyImmutable)
+	require.NoError(t, validateWalletUniversalKeyMutation(exact, UpdateAPIKeyRequest{Name: &exactName}))
+	require.ErrorIs(t, validateWalletUniversalKeyMutation(legacy, UpdateAPIKeyRequest{Name: &exactName}), ErrWalletUniversalKeyReserved)
+	require.NoError(t, validateWalletUniversalKeyMutation(legacy, UpdateAPIKeyRequest{GroupID: &groupID}))
+}
+
 // --------------------------------------------------------------------------
 // GetWalletModelRoutes 测试（B1.5 路由列表，保留作底层能力）
 // --------------------------------------------------------------------------
@@ -251,15 +370,15 @@ func (s walletModelRouteUserRateRepoStub) GetByUserID(context.Context, int64) (m
 
 func TestAPIKeyServiceGetWalletModelRoutesUsesConfiguredRoutesAndGroups(t *testing.T) {
 	groupRepo := walletModelRouteGroupRepoStub{groups: []Group{
-		{ID: 2, Name: "gpt-5", Platform: PlatformOpenAI, Status: StatusActive, RateMultiplier: 1.0},
-		{ID: 3, Name: "claude-sonnet", Platform: PlatformAnthropic, Status: StatusActive, RateMultiplier: 1.5},
+		{ID: 3, Name: WalletDefaultOpenAIGroupName, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true, SubscriptionType: SubscriptionTypeStandard, RateMultiplier: 1.0},
+		{ID: 22, Name: WalletDefaultVIPGroupName, Platform: PlatformAnthropic, Status: StatusActive, Hydrated: true, IsExclusive: true, SubscriptionType: SubscriptionTypeStandard, RateMultiplier: 1.5},
 	}}
-	rateRepo := walletModelRouteUserRateRepoStub{rates: map[int64]float64{3: 1.25}}
-	svc := NewAPIKeyService(nil, nil, groupRepo, nil, rateRepo, nil, &config.Config{})
+	rateRepo := walletModelRouteUserRateRepoStub{rates: map[int64]float64{22: 1.25}}
+	svc := NewAPIKeyService(nil, walletGroupKeyUserRepoStub{allowedGroups: []int64{22}}, groupRepo, nil, rateRepo, nil, &config.Config{})
 
 	routes, err := svc.GetWalletModelRoutes(context.Background(), 42, []ModelRoute{
-		{Pattern: "claude-sonnet-*", GroupName: "claude-sonnet", ExampleModel: "claude-sonnet-4-6"},
-		{Pattern: "gpt-*", GroupName: "gpt-5", ExampleModel: "gpt-5"},
+		{Pattern: "claude-sonnet-*", GroupName: WalletDefaultVIPGroupName, ExampleModel: "claude-sonnet-4-6"},
+		{Pattern: "gpt-*", GroupName: WalletDefaultOpenAIGroupName, ExampleModel: "gpt-5"},
 		{Pattern: "missing-*", GroupName: "missing", ExampleModel: "missing-model"},
 	})
 
@@ -267,11 +386,27 @@ func TestAPIKeyServiceGetWalletModelRoutesUsesConfiguredRoutesAndGroups(t *testi
 	require.Len(t, routes, 2)
 	require.Equal(t, "claude-sonnet-*", routes[0].Pattern)
 	require.Equal(t, "claude-sonnet-4-6", routes[0].ExampleModel)
-	require.Equal(t, int64(3), routes[0].GroupID)
-	require.Equal(t, "claude-sonnet", routes[0].GroupName)
+	require.Equal(t, int64(22), routes[0].GroupID)
+	require.Equal(t, WalletDefaultVIPGroupName, routes[0].GroupName)
 	require.Equal(t, 1.5, routes[0].RateMultiplier)
 	require.Equal(t, 1.25, routes[0].EffectiveRateMultiplier)
 	require.Equal(t, "gpt-*", routes[1].Pattern)
-	require.Equal(t, int64(2), routes[1].GroupID)
+	require.Equal(t, int64(3), routes[1].GroupID)
 	require.Equal(t, 1.0, routes[1].EffectiveRateMultiplier)
+}
+
+func TestAPIKeyServiceGetWalletModelRoutesHidesVIPWithoutExplicitGrant(t *testing.T) {
+	groupRepo := walletModelRouteGroupRepoStub{groups: []Group{
+		{ID: 3, Name: WalletDefaultOpenAIGroupName, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true, SubscriptionType: SubscriptionTypeStandard},
+		{ID: 22, Name: WalletDefaultVIPGroupName, Platform: PlatformAnthropic, Status: StatusActive, Hydrated: true, IsExclusive: true, SubscriptionType: SubscriptionTypeStandard},
+	}}
+	svc := NewAPIKeyService(nil, walletGroupKeyUserRepoStub{}, groupRepo, nil, walletModelRouteUserRateRepoStub{}, nil, &config.Config{})
+
+	routes, err := svc.GetWalletModelRoutes(context.Background(), 42, DefaultModelRoutes())
+
+	require.NoError(t, err)
+	require.NotEmpty(t, routes)
+	for _, route := range routes {
+		require.Equal(t, WalletDefaultOpenAIGroupName, route.GroupName)
+	}
 }

@@ -302,6 +302,13 @@ func TestNewHTTPClient_InvalidProxy(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid proxy URL")
 }
 
+func TestNewHTTPClient_InvalidProxyErrorDoesNotLeakCredentials(t *testing.T) {
+	_, err := newHTTPClient("http://alice:super-secret@proxy.example.com:bad-port")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "alice")
+	require.NotContains(t, err.Error(), "super-secret")
+}
+
 func TestNewHTTPClient_ValidHTTPProxy(t *testing.T) {
 	c, err := newHTTPClient("http://proxy.example.com:8080")
 	require.NoError(t, err)

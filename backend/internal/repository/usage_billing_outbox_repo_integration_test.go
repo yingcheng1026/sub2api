@@ -21,6 +21,8 @@ type usageBillingOutboxBindingFixture struct {
 	groupID          int64
 }
 
+const integrationUsageRequestPayloadHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func newUsageBillingOutboxBindingFixture(t *testing.T) usageBillingOutboxBindingFixture {
 	t.Helper()
 	client := testEntClient(t)
@@ -30,7 +32,7 @@ func newUsageBillingOutboxBindingFixture(t *testing.T) usageBillingOutboxBinding
 	account := mustCreateAccount(t, client, &service.Account{Name: "outbox-fixture-" + uuid.NewString(), Type: service.AccountTypeAPIKey})
 	mustBindAccountToGroup(t, client, account.ID, group.ID, 1)
 	return usageBillingOutboxBindingFixture{
-		userID: user.ID, apiKeyID: apiKey.ID, authCacheLocator: service.APIKeyAuthCacheLocator(apiKey.Key),
+		userID: user.ID, apiKeyID: apiKey.ID, authCacheLocator: apiKey.KeyHash,
 		accountID: account.ID, groupID: group.ID,
 	}
 }
@@ -39,6 +41,7 @@ func newOutboxEnvelope(t *testing.T, fixture usageBillingOutboxBindingFixture, r
 	t.Helper()
 	envelope, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID:             requestID,
+		RequestPayloadHash:    integrationUsageRequestPayloadHash,
 		APIKeyID:              fixture.apiKeyID,
 		AuthCacheLocator:      fixture.authCacheLocator,
 		UserID:                fixture.userID,
@@ -196,7 +199,7 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	subscriptionTwo := mustCreateSubscription(t, client, &service.UserSubscription{UserID: userTwo.ID, GroupID: &group.ID})
 
 	fixture := usageBillingOutboxBindingFixture{
-		userID: userOne.ID, apiKeyID: apiKeyOne.ID, authCacheLocator: service.APIKeyAuthCacheLocator(apiKeyOne.Key),
+		userID: userOne.ID, apiKeyID: apiKeyOne.ID, authCacheLocator: apiKeyOne.KeyHash,
 		accountID: account.ID, groupID: group.ID,
 	}
 	valid := newOutboxEnvelope(t, fixture, "outbox-owner-valid-"+uuid.NewString(), 1)
@@ -217,6 +220,7 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	subscriptionID := subscriptionTwo.ID
 	wrongSubscriptionOwner, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID:             "outbox-owner-sub-" + uuid.NewString(),
+		RequestPayloadHash:    integrationUsageRequestPayloadHash,
 		APIKeyID:              apiKeyOne.ID,
 		UserID:                userOne.ID,
 		AccountID:             account.ID,
@@ -243,6 +247,7 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	uncoveredSubscription := mustCreateSubscription(t, client, &service.UserSubscription{UserID: userOne.ID, GroupID: &uncoveredAnchorGroup.ID})
 	uncoveredSubscriptionEnvelope, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID:               "outbox-uncovered-sub-" + uuid.NewString(),
+		RequestPayloadHash:      integrationUsageRequestPayloadHash,
 		APIKeyID:                apiKeyOne.ID,
 		UserID:                  userOne.ID,
 		AccountID:               account.ID,
@@ -286,7 +291,8 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	monthlyID := monthly.ID
 	walletCostOnMonthly, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID: "outbox-wallet-on-monthly-" + uuid.NewString(), APIKeyID: apiKeyOne.ID,
-		UserID: userOne.ID, AccountID: account.ID, SubscriptionID: &monthlyID, GroupID: &group.ID,
+		RequestPayloadHash: integrationUsageRequestPayloadHash,
+		UserID:             userOne.ID, AccountID: account.ID, SubscriptionID: &monthlyID, GroupID: &group.ID,
 		AccountType: service.AccountTypeAPIKey, BillingModel: "gpt-5.6-sol", BillingType: service.BillingTypeSubscription,
 		PricingSource: service.PricingSourceBuiltinGPT56, PricingRevision: service.GPT56PricingRevision,
 		PricingHash:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -294,23 +300,14 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	})
 	require.NoError(t, err)
 	_, _, err = repo.Enqueue(ctx, walletCostOnMonthly)
-	require.ErrorIs(t, err, service.ErrUsageBillingCrossTenant)
+	require.ErrorIs(t, err, service.ErrUsageBillingAdmissionMissing)
 
-	now := time.Now().UTC()
-	wallet, err := client.UserSubscription.Create().
-		SetUserID(userOne.ID).
-		SetStartsAt(now.Add(-time.Hour)).
-		SetExpiresAt(now.Add(time.Hour)).
-		SetStatus(service.SubscriptionStatusActive).
-		SetWalletBalanceUsd(10).
-		SetWalletInitialUsd(10).
-		SetAssignedAt(now).
-		Save(ctx)
-	require.NoError(t, err)
+	wallet := mustCreateCreditsWallet(t, client, userOne.ID, 10)
 	walletID := wallet.ID
 	monthlyCostOnWallet, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID: "outbox-monthly-on-wallet-" + uuid.NewString(), APIKeyID: apiKeyOne.ID,
-		UserID: userOne.ID, AccountID: account.ID, SubscriptionID: &walletID, GroupID: &group.ID,
+		RequestPayloadHash: integrationUsageRequestPayloadHash,
+		UserID:             userOne.ID, AccountID: account.ID, SubscriptionID: &walletID, GroupID: &group.ID,
 		AccountType: service.AccountTypeAPIKey, BillingModel: "gpt-5.6-sol", BillingType: service.BillingTypeSubscription,
 		PricingSource: service.PricingSourceBuiltinGPT56, PricingRevision: service.GPT56PricingRevision,
 		PricingHash:    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
@@ -323,7 +320,8 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	randomUnboundKey := mustCreateApiKey(t, client, &service.APIKey{UserID: userOne.ID, Name: "not-a-wallet-key", Key: "sk-outbox-unbound-" + uuid.NewString()})
 	randomKeyWalletEnvelope, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID: "outbox-random-unbound-wallet-" + uuid.NewString(), APIKeyID: randomUnboundKey.ID,
-		UserID: userOne.ID, AccountID: account.ID, SubscriptionID: &walletID, GroupID: &group.ID,
+		RequestPayloadHash: integrationUsageRequestPayloadHash,
+		UserID:             userOne.ID, AccountID: account.ID, SubscriptionID: &walletID, GroupID: &group.ID,
 		AccountType: service.AccountTypeAPIKey, BillingModel: "gpt-5.6-sol", BillingType: service.BillingTypeSubscription,
 		PricingSource: service.PricingSourceBuiltinGPT56, PricingRevision: service.GPT56PricingRevision,
 		PricingHash:    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -331,12 +329,13 @@ func TestUsageBillingOutboxRepository_EnqueueRejectsCrossTenantAndInvalidBilling
 	})
 	require.NoError(t, err)
 	_, _, err = repo.Enqueue(ctx, randomKeyWalletEnvelope)
-	require.ErrorIs(t, err, service.ErrUsageBillingCrossTenant)
+	require.ErrorIs(t, err, service.ErrUsageBillingAdmissionMissing)
 
-	universalKey := mustCreateApiKey(t, client, &service.APIKey{UserID: userOne.ID, Name: service.WalletUniversalAPIKeyName, Key: "sk-outbox-universal-" + uuid.NewString()})
+	universalKey := mustCreateApiKey(t, client, &service.APIKey{UserID: userOne.ID, Name: service.WalletUniversalAPIKeyName, Purpose: service.APIKeyPurposeWalletUniversal, Key: "sk-outbox-universal-" + uuid.NewString()})
 	universalKeyMonthlyEnvelope, err := service.NewUsageBillingEnvelope(service.UsageBillingEnvelopeInput{
 		RequestID: "outbox-universal-monthly-" + uuid.NewString(), APIKeyID: universalKey.ID,
-		UserID: userOne.ID, AccountID: account.ID, SubscriptionID: &monthlyID, GroupID: &group.ID,
+		RequestPayloadHash: integrationUsageRequestPayloadHash,
+		UserID:             userOne.ID, AccountID: account.ID, SubscriptionID: &monthlyID, GroupID: &group.ID,
 		AccountType: service.AccountTypeAPIKey, BillingModel: "gpt-5.6-sol", BillingType: service.BillingTypeSubscription,
 		PricingSource: service.PricingSourceBuiltinGPT56, PricingRevision: service.GPT56PricingRevision,
 		PricingHash:    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",

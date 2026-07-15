@@ -43,8 +43,9 @@ func NewBedrockSignerFromAccount(account *Account) (*BedrockSigner, error) {
 		return nil, fmt.Errorf("aws_secret_access_key not found in credentials")
 	}
 	region := account.GetCredential("aws_region")
-	if region == "" {
-		region = defaultBedrockRegion
+	region, err := normalizeBedrockRegion(region)
+	if err != nil {
+		return nil, err
 	}
 	sessionToken := account.GetCredential("aws_session_token") // 可选
 

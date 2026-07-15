@@ -154,9 +154,10 @@ func TestAntigravityTokenCacheKey(t *testing.T) {
 
 func TestOpenAITokenCacheKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		account  *Account
-		expected string
+		name            string
+		account         *Account
+		expected        string
+		credentialBound bool
 	}{
 		{
 			name: "basic_account",
@@ -173,7 +174,8 @@ func TestOpenAITokenCacheKey(t *testing.T) {
 					"access_token": "test-token",
 				},
 			},
-			expected: "openai:account:301",
+			expected:        "openai:account:301",
+			credentialBound: true,
 		},
 		{
 			name: "account_id_zero",
@@ -194,6 +196,11 @@ func TestOpenAITokenCacheKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := OpenAITokenCacheKey(tt.account)
+			if tt.credentialBound {
+				require.Regexp(t, `^`+tt.expected+`:cred:[0-9a-f]{64}$`, result)
+				require.NotContains(t, result, tt.account.GetCredential("access_token"))
+				return
+			}
 			require.Equal(t, tt.expected, result)
 		})
 	}
@@ -201,9 +208,10 @@ func TestOpenAITokenCacheKey(t *testing.T) {
 
 func TestClaudeTokenCacheKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		account  *Account
-		expected string
+		name            string
+		account         *Account
+		expected        string
+		credentialBound bool
 	}{
 		{
 			name: "basic_account",
@@ -220,7 +228,8 @@ func TestClaudeTokenCacheKey(t *testing.T) {
 					"access_token": "claude-token",
 				},
 			},
-			expected: "claude:account:401",
+			expected:        "claude:account:401",
+			credentialBound: true,
 		},
 		{
 			name: "account_id_zero",
@@ -241,6 +250,11 @@ func TestClaudeTokenCacheKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ClaudeTokenCacheKey(tt.account)
+			if tt.credentialBound {
+				require.Regexp(t, `^`+tt.expected+`:cred:[0-9a-f]{64}$`, result)
+				require.NotContains(t, result, tt.account.GetCredential("access_token"))
+				return
+			}
 			require.Equal(t, tt.expected, result)
 		})
 	}

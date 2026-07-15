@@ -92,6 +92,10 @@ func (s *refreshTokenCacheStub) GetRefreshToken(context.Context, string) (*Refre
 	return nil, ErrRefreshTokenNotFound
 }
 
+func (s *refreshTokenCacheStub) ConsumeRefreshToken(context.Context, string) (*RefreshTokenData, error) {
+	return nil, ErrRefreshTokenNotFound
+}
+
 func (s *refreshTokenCacheStub) DeleteRefreshToken(context.Context, string) error {
 	return nil
 }
@@ -351,6 +355,18 @@ func TestAuthService_SendVerifyCode_EmailSuffixNotAllowed(t *testing.T) {
 	require.Equal(t, "2", appErr.Metadata["allowed_suffix_count"])
 }
 
+func TestAuthService_SendVerifyCodeAsync_ExistingEmailDoesNotRevealAccount(t *testing.T) {
+	repo := &userRepoStub{exists: true}
+	service := newAuthService(repo, map[string]string{
+		SettingKeyRegistrationEnabled: "true",
+	}, nil)
+
+	result, err := service.SendVerifyCodeAsync(context.Background(), "existing@test.com")
+
+	require.NoError(t, err)
+	require.Equal(t, 60, result.Countdown)
+}
+
 func TestAuthService_Register_CreateError(t *testing.T) {
 	repo := &userRepoStub{createErr: errors.New("create failed")}
 	service := newAuthService(repo, map[string]string{
@@ -391,6 +407,25 @@ func TestAuthService_Register_Success(t *testing.T) {
 	require.Equal(t, 2, user.Concurrency)
 	require.Len(t, repo.created, 1)
 	require.True(t, user.CheckPassword("password"))
+}
+
+func TestAuthService_Login_UnknownEmailAndWrongPasswordUseGenericFailure(t *testing.T) {
+	unknownService := newAuthService(&userRepoStub{}, nil, nil)
+	_, _, unknownErr := unknownService.Login(
+		context.Background(),
+		"unknown@test.com",
+		"sub2api-login-dummy-password",
+	)
+
+	knownUser := &User{Email: "known@test.com", PasswordHash: invalidLoginPasswordHash, Status: StatusActive}
+	knownService := newAuthService(&userRepoStub{user: knownUser}, nil, nil)
+	require.True(t, knownService.CheckPassword("sub2api-login-dummy-password", invalidLoginPasswordHash))
+	_, _, wrongPasswordErr := knownService.Login(context.Background(), knownUser.Email, "wrong-password")
+
+	require.ErrorIs(t, unknownErr, ErrInvalidCredentials)
+	require.ErrorIs(t, wrongPasswordErr, ErrInvalidCredentials)
+	require.Equal(t, infraerrors.Reason(unknownErr), infraerrors.Reason(wrongPasswordErr))
+	require.Equal(t, infraerrors.Message(unknownErr), infraerrors.Message(wrongPasswordErr))
 }
 
 func TestAuthService_RegisterWithVerificationAndRisk_StoresSignupRiskSignals(t *testing.T) {

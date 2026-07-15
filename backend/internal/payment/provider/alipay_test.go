@@ -290,6 +290,25 @@ func TestAlipayMerchantIdentityMetadata(t *testing.T) {
 	}
 }
 
+func TestAlipayNotificationMerchantMetadataRequiresSignedAppID(t *testing.T) {
+	t.Parallel()
+
+	provider := &Alipay{config: map[string]string{"appId": "2021001234567890"}}
+	if _, err := provider.notificationMerchantMetadata(&alipay.Notification{}); err == nil {
+		t.Fatal("missing notification app_id was accepted")
+	}
+	if _, err := provider.notificationMerchantMetadata(&alipay.Notification{AppId: "2021009999999999"}); err == nil {
+		t.Fatal("mismatched notification app_id was accepted")
+	}
+	metadata, err := provider.notificationMerchantMetadata(&alipay.Notification{AppId: "2021001234567890"})
+	if err != nil {
+		t.Fatalf("matching notification app_id: %v", err)
+	}
+	if got := metadata["app_id"]; got != "2021001234567890" {
+		t.Fatalf("metadata app_id = %q", got)
+	}
+}
+
 func TestParseAlipayAmount(t *testing.T) {
 	t.Parallel()
 

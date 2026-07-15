@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -169,5 +171,19 @@ func TestOpsRuntimeLoggingHandler_UpdateAndResetSuccess(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("reset status=%d, want 200, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestLoadOpsWSRuntimeLimitsRejectsInt32Overflow(t *testing.T) {
+	t.Setenv(envOpsWSMaxConns, strconv.FormatInt(int64(math.MaxInt32)+1, 10))
+	t.Setenv(envOpsWSMaxConnsPerIP, strconv.FormatInt(int64(math.MaxInt32)+1, 10))
+
+	limits := loadOpsWSRuntimeLimitsFromEnv()
+
+	if limits.MaxConns != defaultMaxWSConns {
+		t.Fatalf("MaxConns=%d, want safe default %d", limits.MaxConns, defaultMaxWSConns)
+	}
+	if limits.MaxConnsPerIP != defaultMaxWSConnsPerIP {
+		t.Fatalf("MaxConnsPerIP=%d, want safe default %d", limits.MaxConnsPerIP, defaultMaxWSConnsPerIP)
 	}
 }

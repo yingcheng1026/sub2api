@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import PaymentView from '../PaymentView.vue'
-import { PAYMENT_RECOVERY_STORAGE_KEY } from '@/components/payment/paymentFlow'
+import {
+  PAYMENT_RECOVERY_SESSION_STORAGE_KEY,
+  PAYMENT_RECOVERY_STORAGE_KEY,
+} from '@/components/payment/paymentFlow'
 
 const routeState = vi.hoisted(() => ({
   path: '/purchase',
@@ -10,8 +13,9 @@ const routeState = vi.hoisted(() => ({
 
 const routerReplace = vi.hoisted(() => vi.fn())
 const routerPush = vi.hoisted(() => vi.fn())
-const routerResolve = vi.hoisted(() => vi.fn(() => ({ href: '/payment/stripe?mock=1' })))
+const routerResolve = vi.hoisted(() => vi.fn(() => ({ href: '#stripe-checkout' })))
 const createOrder = vi.hoisted(() => vi.fn())
+const cancelOrder = vi.hoisted(() => vi.fn())
 const refreshUser = vi.hoisted(() => vi.fn())
 const fetchActiveSubscriptions = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 const showError = vi.hoisted(() => vi.fn())
@@ -19,6 +23,9 @@ const showInfo = vi.hoisted(() => vi.fn())
 const showWarning = vi.hoisted(() => vi.fn())
 const getCheckoutInfo = vi.hoisted(() => vi.fn())
 const bridgeInvoke = vi.hoisted(() => vi.fn())
+const subscriptionState = vi.hoisted(() => ({
+  activeSubscriptions: [] as Array<Record<string, unknown>>,
+}))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -46,6 +53,7 @@ vi.mock('vue-i18n', async () => {
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({
     user: {
+      id: 7,
       username: 'demo-user',
       balance: 0,
     },
@@ -61,7 +69,9 @@ vi.mock('@/stores/payment', () => ({
 
 vi.mock('@/stores/subscriptions', () => ({
   useSubscriptionStore: () => ({
-    activeSubscriptions: [],
+    get activeSubscriptions() {
+      return subscriptionState.activeSubscriptions
+    },
     fetchActiveSubscriptions,
   }),
 }))
@@ -77,6 +87,7 @@ vi.mock('@/stores', () => ({
 vi.mock('@/api/payment', () => ({
   paymentAPI: {
     getCheckoutInfo,
+    cancelOrder,
   },
 }))
 
@@ -191,6 +202,7 @@ describe('PaymentView WeChat JSAPI flow', () => {
     routerPush.mockReset().mockResolvedValue(undefined)
     routerResolve.mockClear()
     createOrder.mockReset()
+    cancelOrder.mockReset().mockResolvedValue({ data: { message: 'cancelled' } })
     refreshUser.mockReset()
     fetchActiveSubscriptions.mockReset().mockResolvedValue(undefined)
     showError.mockReset()
@@ -198,7 +210,9 @@ describe('PaymentView WeChat JSAPI flow', () => {
     showWarning.mockReset()
     getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoFixture())
     bridgeInvoke.mockReset()
+    subscriptionState.activeSubscriptions = []
     window.localStorage.clear()
+    window.sessionStorage.clear()
     ;(window as Window & { WeixinJSBridge?: { invoke: typeof bridgeInvoke } }).WeixinJSBridge = {
       invoke: bridgeInvoke,
     }
@@ -227,10 +241,40 @@ describe('PaymentView WeChat JSAPI flow', () => {
       query: {
         order_id: '123',
         out_trade_no: 'sub2_jsapi_123',
-        resume_token: 'resume-token-123',
       },
     })
-    expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toBeNull()
+    expect(window.sessionStorage.getItem(PAYMENT_RECOVERY_SESSION_STORAGE_KEY)).toContain('resume-token-123')
+    expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).not.toContain('resume-token-123')
+  })
+
+  it('keeps the Stripe client secret out of the route while preserving the order-bound session snapshot', async () => {
+    createOrder.mockResolvedValue({
+      order_id: 812,
+      amount: 88,
+      pay_amount: 88,
+      fee_rate: 0,
+      expires_at: '2099-01-01T00:10:00.000Z',
+      payment_type: 'stripe',
+      out_trade_no: 'sub2_stripe_812',
+      client_secret: 'cs_secret_must_not_enter_url',
+    })
+
+    shallowMount(PaymentView, {
+      global: { stubs: { Teleport: true, Transition: false } },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(routerResolve).toHaveBeenCalledWith({
+      path: '/payment/stripe',
+      query: {
+        order_id: '812',
+        method: 'wechat_pay',
+      },
+    })
+    expect(JSON.stringify(routerResolve.mock.calls)).not.toContain('cs_secret_must_not_enter_url')
+    expect(window.sessionStorage.getItem(PAYMENT_RECOVERY_SESSION_STORAGE_KEY))
+      .toContain('cs_secret_must_not_enter_url')
   })
 
   it('resets payment state when JSAPI reports cancellation', async () => {
@@ -251,6 +295,7 @@ describe('PaymentView WeChat JSAPI flow', () => {
     await flushPromises()
 
     expect(showInfo).toHaveBeenCalledWith('payment.qr.cancelled')
+    expect(cancelOrder).toHaveBeenCalledWith(123)
     expect(routerPush).not.toHaveBeenCalled()
     expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toBeNull()
   })
@@ -409,10 +454,11 @@ describe('PaymentView WeChat JSAPI flow', () => {
     }))
     expect(showWarning).toHaveBeenCalledWith('payment.errors.mobilePaymentFallbackToQr')
     expect(showError).not.toHaveBeenCalled()
-    expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toContain('weixin://wxpay/bizpayurl?pr=fallback-native')
+    expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).not.toContain('weixin://wxpay/bizpayurl?pr=fallback-native')
+    expect(window.sessionStorage.getItem(PAYMENT_RECOVERY_SESSION_STORAGE_KEY)).toContain('weixin://wxpay/bizpayurl?pr=fallback-native')
   })
 
-  it('opens the Liandong paid-lite SKU directly from the subscription tab', async () => {
+  it('ignores the retired subscription tab and only opens credit top-up SKUs', async () => {
     routeState.query = { tab: 'subscription' }
     getCheckoutInfo.mockResolvedValue(checkoutInfoFixture())
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
@@ -428,23 +474,120 @@ describe('PaymentView WeChat JSAPI flow', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('[data-hfc-purchase-liandong-subscription="monthly"]').exists()).toBe(true)
-    const trialCardText = wrapper.get('[data-hfc-liandong-tier="trial"]').text()
-    expect(trialCardText).toContain('限购一次')
-    expect(trialCardText).toContain('低门槛体验,先试再买')
-    expect(trialCardText).not.toContain('注册送 $15')
-    expect(wrapper.text()).toContain('轻量正式版')
-    expect(wrapper.text()).toContain('$400')
-    expect(wrapper.text()).toContain('$50')
-    expect(wrapper.text()).toContain('$4,500')
-    expect(wrapper.text()).not.toContain('×0')
-    expect(wrapper.text()).not.toContain('无限制')
+    expect(wrapper.find('[data-hfc-purchase-liandong-subscription]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('$30')
+    expect(wrapper.text()).toContain('$100')
+    expect(wrapper.text()).toContain('$500')
+    expect(wrapper.text()).toContain('兑换码')
+    expect(wrapper.text()).not.toContain('月卡')
+    expect(wrapper.text()).not.toContain('自动到账')
 
-    await wrapper.get('[data-hfc-liandong-tier="lite"] button').trigger('click')
+    await wrapper.get('[data-hfc-liandong-credit="100"]').trigger('click')
 
-    expect(openSpy).toHaveBeenCalledWith('https://pay.ldxp.cn/item/neu4dr', '_blank', 'noopener')
+    expect(openSpy).toHaveBeenCalledWith('https://pay.ldxp.cn/item/b4nrv0', '_blank', 'noopener')
     expect(createOrder).not.toHaveBeenCalled()
 
     openSpy.mockRestore()
+  })
+
+  it('shows the wallet balance and the redeem plus manual top-up flow', async () => {
+    routeState.query = {}
+    subscriptionState.activeSubscriptions = [
+      {
+        id: 17,
+        status: 'active',
+        group_id: null,
+        wallet_balance_usd: 321.45,
+        wallet_initial_usd: 500,
+        expires_at: '2099-12-31T23:59:59Z',
+      },
+    ]
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('payment.currentBalance: $321.45')
+    expect(wrapper.text()).toContain('链动小铺')
+    expect(wrapper.text()).toContain('兑换码')
+    expect(wrapper.text()).toContain('联系管理员或客服人工自定义充值')
+    expect(wrapper.text()).not.toContain('联系管理员微信')
+    expect(wrapper.text()).not.toContain('微信转账')
+  })
+
+  it('does not present a negative wallet balance as spendable credit', async () => {
+    routeState.query = {}
+    subscriptionState.activeSubscriptions = [
+      {
+        id: 19,
+        status: 'active',
+        group_id: null,
+        wallet_balance_usd: -25.5,
+        wallet_initial_usd: 500,
+        expires_at: '2099-12-31T23:59:59Z',
+      },
+    ]
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('payment.currentBalance: $0.00')
+    expect(wrapper.text()).toContain('payment.walletDebt')
+    expect(wrapper.text()).not.toContain('$-25.50')
+  })
+
+  it('does not list legacy group-backed entitlements as purchasable plans', async () => {
+    routeState.query = { tab: 'subscription' }
+    subscriptionState.activeSubscriptions = [
+      {
+        id: 17,
+        status: 'active',
+        group_id: null,
+        wallet_balance_usd: 321.45,
+        expires_at: '2099-12-31T23:59:59Z',
+      },
+      {
+        id: 18,
+        status: 'active',
+        group_id: 3,
+        wallet_balance_usd: null,
+        expires_at: '2026-08-12T00:00:00Z',
+        group: {
+          id: 3,
+          name: 'openai-default monthly',
+          platform: 'openai',
+          monthly_limit_usd: 400,
+        },
+      },
+    ]
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-hfc-active-monthly-subscription]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('openai-default monthly')
   })
 })

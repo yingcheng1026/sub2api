@@ -3,12 +3,15 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/enttest"
+	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
@@ -23,6 +26,18 @@ func (fakeCredentialEncryptor) Encrypt(plaintext string) (string, error) {
 
 func (fakeCredentialEncryptor) Decrypt(ciphertext string) (string, error) {
 	return strings.TrimPrefix(ciphertext, "enc:"), nil
+}
+
+func (fakeCredentialEncryptor) EncryptForDomain(domain, plaintext string) (string, error) {
+	return "domain:" + domain + ":" + plaintext, nil
+}
+
+func (fakeCredentialEncryptor) DecryptForDomain(domain, ciphertext string) (string, error) {
+	prefix := "domain:" + domain + ":"
+	if !strings.HasPrefix(ciphertext, prefix) {
+		return "", errors.New("ciphertext domain mismatch")
+	}
+	return strings.TrimPrefix(ciphertext, prefix), nil
 }
 
 func TestEncryptAccountCredentialsProtectsSensitiveKeysOnly(t *testing.T) {
@@ -84,19 +99,90 @@ func TestEncryptAccountCredentialsIsIdempotentForEncryptedValues(t *testing.T) {
 	}
 }
 
-func TestEncryptAccountCredentialsWithoutEncryptorReturnsPlainCopy(t *testing.T) {
+func TestEncryptAccountCredentialsWithoutDomainEncryptorFailsClosed(t *testing.T) {
 	input := map[string]any{"api_key": "sk-secret"}
 
-	stored, err := encryptAccountCredentials(input, nil)
+	if _, err := encryptAccountCredentials(input, nil); err == nil {
+		t.Fatal("encryptAccountCredentials() accepted a nil domain encryptor")
+	}
+}
+
+func TestMigrateLegacyAccountCredentialEnvelopeToDomainBoundV2(t *testing.T) {
+	ctx := context.Background()
+	client := newCredentialEncryptionTestClient(t)
+	encryptor := fakeCredentialEncryptor{}
+
+	legacyCiphertext, err := encryptor.Encrypt(`"legacy-secret"`)
 	if err != nil {
-		t.Fatalf("encryptAccountCredentials() error = %v", err)
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(stored, input) {
-		t.Fatalf("stored = %#v, want %#v", stored, input)
+	legacy := map[string]any{
+		"api_key": map[string]any{
+			encryptedCredentialMarkerKey: true,
+			encryptedCredentialAlgKey:    encryptedCredentialAlgV1,
+			encryptedCredentialValueKey:  legacyCiphertext,
+		},
 	}
-	stored["api_key"] = "changed"
-	if input["api_key"] != "sk-secret" {
-		t.Fatal("encryptAccountCredentials returned the original map")
+	account, err := client.Account.Create().
+		SetName("legacy").
+		SetPlatform("openai").
+		SetType("api_key").
+		SetCredentials(legacy).
+		Save(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	softDeleted, err := client.Account.Create().
+		SetName("legacy-soft-deleted").
+		SetPlatform("openai").
+		SetType("api_key").
+		SetCredentials(legacy).
+		Save(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Account.UpdateOneID(softDeleted.ID).SetDeletedAt(time.Now()).Save(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := MigrateDomainBoundSecrets(ctx, client, encryptor)
+	if err != nil {
+		t.Fatalf("MigrateDomainBoundSecrets() error = %v", err)
+	}
+	if result.AccountCredentials != 2 {
+		t.Fatalf("AccountCredentials = %d, want 2 including soft-deleted data", result.AccountCredentials)
+	}
+
+	refreshed, err := client.Account.Get(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, ok := refreshed.Credentials["api_key"].(map[string]any)
+	if !ok || envelope[encryptedCredentialAlgKey] != encryptedCredentialAlgV3 {
+		t.Fatalf("migrated envelope = %#v", refreshed.Credentials["api_key"])
+	}
+	decrypted, err := decryptAccountCredentials(refreshed.Credentials, encryptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decrypted["api_key"] != "legacy-secret" {
+		t.Fatalf("decrypted api_key = %#v", decrypted["api_key"])
+	}
+	refreshedSoftDeleted, err := client.Account.Get(mixins.SkipSoftDelete(ctx), softDeleted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	softEnvelope, ok := refreshedSoftDeleted.Credentials["api_key"].(map[string]any)
+	if !ok || softEnvelope[encryptedCredentialAlgKey] != encryptedCredentialAlgV3 {
+		t.Fatalf("soft-deleted account was not migrated: %#v", refreshedSoftDeleted.Credentials)
+	}
+
+	again, err := MigrateDomainBoundSecrets(ctx, client, encryptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.AccountCredentials != 0 {
+		t.Fatalf("idempotent migration updated %d account(s)", again.AccountCredentials)
 	}
 }
 

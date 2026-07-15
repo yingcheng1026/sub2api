@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/authidentity"
 	"github.com/Wei-Shaw/sub2api/ent/authidentitychannel"
 	"github.com/Wei-Shaw/sub2api/ent/identityadoptiondecision"
+	"github.com/Wei-Shaw/sub2api/ent/pendingauthsession"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	dbuser "github.com/Wei-Shaw/sub2api/ent/user"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -496,26 +498,6 @@ func (h *AuthHandler) SendPendingOAuthVerifyCode(c *gin.Context) {
 		return
 	}
 	if err := ensurePendingOAuthCompleteRegistrationSession(session); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	client := h.entClient()
-	if client == nil {
-		response.ErrorFrom(c, infraerrors.ServiceUnavailable("PENDING_AUTH_NOT_READY", "pending auth service is not ready"))
-		return
-	}
-
-	email := strings.TrimSpace(strings.ToLower(req.Email))
-	if existingUser, err := findUserByNormalizedEmail(c.Request.Context(), client, email); err == nil && existingUser != nil {
-		session, err = h.transitionPendingOAuthAccountToChoiceState(c, client, session, existingUser, email)
-		if err != nil {
-			response.ErrorFrom(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, buildPendingOAuthSessionStatusPayload(session))
-		return
-	} else if err != nil && !errors.Is(err, service.ErrUserNotFound) {
 		response.ErrorFrom(c, err)
 		return
 	}
@@ -1203,6 +1185,18 @@ func consumePendingOAuthBrowserSessionTx(
 		}
 		return err
 	}
+	return consumeStoredPendingOAuthBrowserSessionTx(ctx, tx, storedSession, session.BrowserSessionKey)
+}
+
+func consumeStoredPendingOAuthBrowserSessionTx(
+	ctx context.Context,
+	tx *dbent.Tx,
+	storedSession *dbent.PendingAuthSession,
+	browserSessionKey string,
+) error {
+	if tx == nil || storedSession == nil {
+		return service.ErrPendingAuthSessionNotFound
+	}
 
 	now := time.Now().UTC()
 	if storedSession.ConsumedAt != nil {
@@ -1212,16 +1206,44 @@ func consumePendingOAuthBrowserSessionTx(
 		return service.ErrPendingAuthSessionExpired
 	}
 	if strings.TrimSpace(storedSession.BrowserSessionKey) != "" &&
-		strings.TrimSpace(storedSession.BrowserSessionKey) != strings.TrimSpace(session.BrowserSessionKey) {
+		strings.TrimSpace(storedSession.BrowserSessionKey) != strings.TrimSpace(browserSessionKey) {
 		return service.ErrPendingAuthBrowserMismatch
 	}
 
-	if _, err := tx.Client().PendingAuthSession.UpdateOneID(storedSession.ID).
+	update := tx.Client().PendingAuthSession.UpdateOneID(storedSession.ID).
+		Where(
+			pendingauthsession.ConsumedAtIsNil(),
+			pendingauthsession.ExpiresAtGTE(now),
+		).
 		SetConsumedAt(now).
 		SetCompletionCodeHash("").
-		ClearCompletionCodeExpiresAt().
-		Save(ctx); err != nil {
-		return err
+		ClearCompletionCodeExpiresAt()
+	if expectedBrowserSessionKey := strings.TrimSpace(storedSession.BrowserSessionKey); expectedBrowserSessionKey != "" {
+		update = update.Where(pendingauthsession.BrowserSessionKeyEQ(expectedBrowserSessionKey))
+	}
+	if _, err := update.Save(ctx); err != nil {
+		if !dbent.IsNotFound(err) {
+			return err
+		}
+
+		current, currentErr := tx.Client().PendingAuthSession.Get(ctx, storedSession.ID)
+		if currentErr != nil {
+			if dbent.IsNotFound(currentErr) {
+				return service.ErrPendingAuthSessionNotFound
+			}
+			return currentErr
+		}
+		if current.ConsumedAt != nil {
+			return service.ErrPendingAuthSessionConsumed
+		}
+		if !current.ExpiresAt.IsZero() && now.After(current.ExpiresAt) {
+			return service.ErrPendingAuthSessionExpired
+		}
+		if strings.TrimSpace(current.BrowserSessionKey) != "" &&
+			strings.TrimSpace(current.BrowserSessionKey) != strings.TrimSpace(browserSessionKey) {
+			return service.ErrPendingAuthBrowserMismatch
+		}
+		return service.ErrPendingAuthSessionConsumed
 	}
 
 	return nil
@@ -1524,13 +1546,14 @@ func (h *AuthHandler) transitionPendingOAuthAccountToChoiceState(
 	return session, nil
 }
 
-func writeOAuthTokenPairResponse(c *gin.Context, tokenPair *service.TokenPair) {
-	c.JSON(http.StatusOK, gin.H{
-		"access_token":  tokenPair.AccessToken,
-		"refresh_token": tokenPair.RefreshToken,
-		"expires_in":    tokenPair.ExpiresIn,
-		"token_type":    "Bearer",
-	})
+func (h *AuthHandler) writeOAuthTokenPairResponse(c *gin.Context, tokenPair *service.TokenPair) {
+	payload, err := h.browserSessionTokenPairPayload(c, tokenPair)
+	if err != nil {
+		slog.Error("failed to establish browser oauth session", "error", err)
+		response.InternalError(c, "Failed to establish browser session")
+		return
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 func (h *AuthHandler) bindPendingOAuthLogin(c *gin.Context, provider string) {
@@ -1557,6 +1580,12 @@ func (h *AuthHandler) bindPendingOAuthLogin(c *gin.Context, provider string) {
 	}
 	if session.TargetUserID != nil && *session.TargetUserID > 0 && user.ID != *session.TargetUserID {
 		response.ErrorFrom(c, infraerrors.Conflict("PENDING_AUTH_TARGET_USER_MISMATCH", "pending oauth session must be completed by the targeted user"))
+		return
+	}
+	providerType := strings.ToLower(strings.TrimSpace(session.ProviderType))
+	if (providerType == "github" || providerType == "google") &&
+		!strings.EqualFold(strings.TrimSpace(session.ResolvedEmail), strings.TrimSpace(user.Email)) {
+		response.ErrorFrom(c, infraerrors.Conflict("PENDING_AUTH_TARGET_EMAIL_MISMATCH", "pending oauth session email does not match the targeted user"))
 		return
 	}
 	if err := h.ensureBackendModeAllowsUser(c.Request.Context(), user); err != nil {
@@ -1606,7 +1635,7 @@ func (h *AuthHandler) bindPendingOAuthLogin(c *gin.Context, provider string) {
 	}
 
 	clearCookies()
-	writeOAuthTokenPairResponse(c, tokenPair)
+	h.writeOAuthTokenPairResponse(c, tokenPair)
 }
 
 func respondPendingOAuthBindingApplyError(c *gin.Context, err error) {
@@ -1645,6 +1674,10 @@ func (h *AuthHandler) createPendingOAuthAccount(c *gin.Context, provider string)
 	}
 
 	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if err := h.authService.VerifyOAuthEmailCode(c.Request.Context(), email, req.VerifyCode); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	existingUser, err := findUserByNormalizedEmail(c.Request.Context(), client, email)
 	if err != nil {
 		switch {
@@ -1672,11 +1705,10 @@ func (h *AuthHandler) createPendingOAuthAccount(c *gin.Context, provider string)
 		return
 	}
 
-	tokenPair, user, err := h.authService.RegisterOAuthEmailAccount(
+	tokenPair, user, err := h.authService.RegisterVerifiedOAuthEmailAccount(
 		c.Request.Context(),
 		email,
 		req.Password,
-		strings.TrimSpace(req.VerifyCode),
 		strings.TrimSpace(req.InvitationCode),
 		strings.TrimSpace(session.ProviderType),
 	)
@@ -1793,7 +1825,7 @@ func (h *AuthHandler) createPendingOAuthAccount(c *gin.Context, provider string)
 
 	h.authService.RecordSuccessfulLogin(c.Request.Context(), user.ID)
 	clearCookies()
-	writeOAuthTokenPairResponse(c, tokenPair)
+	h.writeOAuthTokenPairResponse(c, tokenPair)
 }
 
 // ExchangePendingOAuthCompletion redeems a pending OAuth browser session into a frontend-safe payload.
@@ -1935,10 +1967,16 @@ func (h *AuthHandler) ExchangePendingOAuthCompletion(c *gin.Context) {
 			return
 		}
 		h.authService.RecordSuccessfulLogin(c.Request.Context(), loginUser.ID)
-		payload["access_token"] = tokenPair.AccessToken
-		payload["refresh_token"] = tokenPair.RefreshToken
-		payload["expires_in"] = tokenPair.ExpiresIn
-		payload["token_type"] = "Bearer"
+		tokenPayload, err := h.browserSessionTokenPairPayload(c, tokenPair)
+		if err != nil {
+			clearCookies()
+			slog.Error("failed to establish pending oauth browser session", "error", err)
+			response.InternalError(c, "Failed to establish browser session")
+			return
+		}
+		for key, value := range tokenPayload {
+			payload[key] = value
+		}
 	}
 
 	clearCookies()

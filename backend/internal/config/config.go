@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -57,6 +58,15 @@ const (
 // 可通过 gateway.upstream_response_read_max_bytes 配置项覆盖。
 const DefaultUpstreamResponseReadMaxBytes int64 = 128 * 1024 * 1024
 
+const (
+	// DefaultGatewayMaxLineSize bounds one untrusted SSE token while retaining
+	// room for large tool-call payloads.
+	DefaultGatewayMaxLineSize = 8 * 1024 * 1024
+	// MaxGatewayMaxLineSize is a hard safety ceiling. A higher configured value
+	// would permit a single upstream line to consume excessive heap per stream.
+	MaxGatewayMaxLineSize = 16 * 1024 * 1024
+)
+
 type Config struct {
 	Server                  ServerConfig                  `mapstructure:"server"`
 	Log                     LogConfig                     `mapstructure:"log"`
@@ -69,6 +79,8 @@ type Config struct {
 	Ops                     OpsConfig                     `mapstructure:"ops"`
 	JWT                     JWTConfig                     `mapstructure:"jwt"`
 	Totp                    TotpConfig                    `mapstructure:"totp"`
+	SecretEncryption        SecretEncryptionConfig        `mapstructure:"secret_encryption"`
+	APIKey                  APIKeyConfig                  `mapstructure:"api_key"`
 	LinuxDo                 LinuxDoConnectConfig          `mapstructure:"linuxdo_connect"`
 	WeChat                  WeChatConnectConfig           `mapstructure:"wechat_connect"`
 	OIDC                    OIDCConnectConfig             `mapstructure:"oidc_connect"`
@@ -1154,12 +1166,36 @@ type JWTConfig struct {
 
 // TotpConfig TOTP 双因素认证配置
 type TotpConfig struct {
-	// EncryptionKey 用于加密 TOTP 密钥的 AES-256 密钥（32 字节 hex 编码）
-	// 如果为空，将自动生成一个随机密钥（仅适用于开发环境）
+	// EncryptionKey is the optional legacy v1/v2 root retained only while
+	// startup migration or payment-resume legacy verification still needs it.
 	EncryptionKey string `mapstructure:"encryption_key"`
-	// EncryptionKeyConfigured 标记加密密钥是否为手动配置（非自动生成）
-	// 只有手动配置了密钥才允许在管理后台启用 TOTP 功能
+	// EncryptionKeyConfigured records whether the legacy root was explicit.
 	EncryptionKeyConfigured bool `mapstructure:"-"`
+}
+
+// SecretEncryptionConfig contains independent roots for unrelated application
+// secret domains. The legacy TOTP key is deliberately not a fallback for any
+// of these values; it may only be used by startup migration code.
+type SecretEncryptionConfig struct {
+	TOTPSecretKey        string `mapstructure:"totp_secret_key"`
+	TOTPCacheKey         string `mapstructure:"totp_cache_key"`
+	AccountCredentialKey string `mapstructure:"account_credential_key"`
+	BackupS3Key          string `mapstructure:"backup_s3_key"`
+	ContentModerationKey string `mapstructure:"content_moderation_key"`
+	ChannelMonitorKey    string `mapstructure:"channel_monitor_key"`
+	PaymentProviderKey   string `mapstructure:"payment_provider_key"`
+	ProxyCredentialKey   string `mapstructure:"proxy_credential_key"`
+	SchedulerCacheKey    string `mapstructure:"scheduler_cache_key"`
+	OAuthTokenCacheKey   string `mapstructure:"oauth_token_cache_key"`
+	JWTHMACKey           string `mapstructure:"jwt_hmac_key"`
+	SettingSecretKey     string `mapstructure:"setting_secret_key"`
+}
+
+// APIKeyConfig contains the independent master key used to derive the
+// API-key AES-GCM and HMAC lookup subkeys.
+type APIKeyConfig struct {
+	EncryptionKey           string `mapstructure:"encryption_key"`
+	EncryptionKeyConfigured bool   `mapstructure:"-"`
 }
 
 type TurnstileConfig struct {
@@ -1394,18 +1430,41 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		cfg.Gateway.UserMessageQueue.Mode = ""
 	}
 
-	// Auto-generate TOTP encryption key if not set (32 bytes = 64 hex chars for AES-256)
+	// TOTP_ENCRYPTION_KEY is migration-only. Never synthesize a replacement:
+	// random fallback cannot decrypt legacy data and obscures key retirement.
 	cfg.Totp.EncryptionKey = strings.TrimSpace(cfg.Totp.EncryptionKey)
 	if cfg.Totp.EncryptionKey == "" {
-		key, err := generateJWTSecret(32) // Reuse the same random generation function
-		if err != nil {
-			return nil, fmt.Errorf("generate totp encryption key error: %w", err)
-		}
-		cfg.Totp.EncryptionKey = key
 		cfg.Totp.EncryptionKeyConfigured = false
-		slog.Warn("TOTP encryption key auto-generated. Consider setting a fixed key for production.")
 	} else {
 		cfg.Totp.EncryptionKeyConfigured = true
+	}
+	cfg.SecretEncryption.TOTPSecretKey = strings.TrimSpace(cfg.SecretEncryption.TOTPSecretKey)
+	cfg.SecretEncryption.TOTPCacheKey = strings.TrimSpace(cfg.SecretEncryption.TOTPCacheKey)
+	cfg.SecretEncryption.AccountCredentialKey = strings.TrimSpace(cfg.SecretEncryption.AccountCredentialKey)
+	cfg.SecretEncryption.BackupS3Key = strings.TrimSpace(cfg.SecretEncryption.BackupS3Key)
+	cfg.SecretEncryption.ContentModerationKey = strings.TrimSpace(cfg.SecretEncryption.ContentModerationKey)
+	cfg.SecretEncryption.ChannelMonitorKey = strings.TrimSpace(cfg.SecretEncryption.ChannelMonitorKey)
+	cfg.SecretEncryption.PaymentProviderKey = strings.TrimSpace(cfg.SecretEncryption.PaymentProviderKey)
+	cfg.SecretEncryption.ProxyCredentialKey = strings.TrimSpace(cfg.SecretEncryption.ProxyCredentialKey)
+	cfg.SecretEncryption.SchedulerCacheKey = strings.TrimSpace(cfg.SecretEncryption.SchedulerCacheKey)
+	cfg.SecretEncryption.OAuthTokenCacheKey = strings.TrimSpace(cfg.SecretEncryption.OAuthTokenCacheKey)
+	cfg.SecretEncryption.JWTHMACKey = strings.TrimSpace(cfg.SecretEncryption.JWTHMACKey)
+	cfg.SecretEncryption.SettingSecretKey = strings.TrimSpace(cfg.SecretEncryption.SettingSecretKey)
+
+	// Keep API-key protection independent from TOTP/payment/JWT secrets. A
+	// generated value lets configuration inspection and setup mode proceed, but
+	// the production protector rejects it unless the operator explicitly sets
+	// API_KEY_ENCRYPTION_KEY.
+	cfg.APIKey.EncryptionKey = strings.TrimSpace(cfg.APIKey.EncryptionKey)
+	if cfg.APIKey.EncryptionKey == "" {
+		key, err := generateJWTSecret(32)
+		if err != nil {
+			return nil, fmt.Errorf("generate API key encryption key error: %w", err)
+		}
+		cfg.APIKey.EncryptionKey = key
+		cfg.APIKey.EncryptionKeyConfigured = false
+	} else {
+		cfg.APIKey.EncryptionKeyConfigured = true
 	}
 
 	originalJWTSecret := cfg.JWT.Secret
@@ -1423,7 +1482,13 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 
 	if !cfg.Security.URLAllowlist.Enabled {
-		slog.Warn("security.url_allowlist.enabled=false; pricing/CRS allowlist checks disabled. Upstream account base_url uses minimal format validation.")
+		slog.Warn("security.url_allowlist.enabled=false; pricing/CRS host allowlist checks disabled. Public-address and DNS-rebinding checks remain active unless private hosts are explicitly enabled.")
+	}
+	if cfg.Security.URLAllowlist.AllowPrivateHosts {
+		slog.Warn("security.url_allowlist.allow_private_hosts=true; outbound credential-bearing requests may reach private networks")
+	}
+	if cfg.Security.URLAllowlist.AllowInsecureHTTP {
+		slog.Warn("security.url_allowlist.allow_insecure_http=true; upstream credentials may be sent over plaintext HTTP")
 	}
 	if !cfg.Security.ResponseHeaders.Enabled {
 		slog.Warn("security.response_headers.enabled=false; configurable header filtering disabled (default allowlist only).")
@@ -1501,8 +1566,8 @@ func setDefaults() {
 		"raw.githubusercontent.com",
 	})
 	viper.SetDefault("security.url_allowlist.crs_hosts", []string{})
-	viper.SetDefault("security.url_allowlist.allow_private_hosts", true)
-	viper.SetDefault("security.url_allowlist.allow_insecure_http", true)
+	viper.SetDefault("security.url_allowlist.allow_private_hosts", false)
+	viper.SetDefault("security.url_allowlist.allow_insecure_http", false)
 	viper.SetDefault("security.response_headers.enabled", true)
 	viper.SetDefault("security.response_headers.additional_allowed", []string{})
 	viper.SetDefault("security.response_headers.force_remove", []string{})
@@ -1627,6 +1692,22 @@ func setDefaults() {
 
 	// TOTP
 	viper.SetDefault("totp.encryption_key", "")
+	// Independent application secret roots. There are intentionally no random
+	// defaults: the server-side encryptor fails closed until all are explicit.
+	viper.SetDefault("secret_encryption.totp_secret_key", "")
+	viper.SetDefault("secret_encryption.totp_cache_key", "")
+	viper.SetDefault("secret_encryption.account_credential_key", "")
+	viper.SetDefault("secret_encryption.backup_s3_key", "")
+	viper.SetDefault("secret_encryption.content_moderation_key", "")
+	viper.SetDefault("secret_encryption.channel_monitor_key", "")
+	viper.SetDefault("secret_encryption.payment_provider_key", "")
+	viper.SetDefault("secret_encryption.proxy_credential_key", "")
+	viper.SetDefault("secret_encryption.scheduler_cache_key", "")
+	viper.SetDefault("secret_encryption.oauth_token_cache_key", "")
+	viper.SetDefault("secret_encryption.jwt_hmac_key", "")
+	viper.SetDefault("secret_encryption.setting_secret_key", "")
+	// Customer API keys (independent from TOTP/JWT/payment secrets)
+	viper.SetDefault("api_key.encryption_key", "")
 
 	// Default
 	// Admin credentials are created via the setup flow (web wizard / CLI / AUTO_SETUP).
@@ -1642,9 +1723,12 @@ func setDefaults() {
 	viper.SetDefault("rate_limit.overload_cooldown_minutes", 10)
 	viper.SetDefault("rate_limit.oauth_401_cooldown_minutes", 10)
 
-	// Pricing - 从 model-price-repo 同步模型定价和上下文窗口数据（固定到 commit，避免分支漂移）
-	viper.SetDefault("pricing.remote_url", "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json")
-	viper.SetDefault("pricing.hash_url", "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256")
+	// Pricing - defaults are pinned to one reviewed model-price-repo commit so
+	// billing cannot drift when the upstream branch changes. Bump both URLs
+	// together only after validating the SHA-256 manifest.
+	const defaultPricingRepositoryRevision = "2eaf5efd588b52cd9fd435e809a5b58267259553"
+	viper.SetDefault("pricing.remote_url", fmt.Sprintf("https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/%s/model_prices_and_context_window.json", defaultPricingRepositoryRevision))
+	viper.SetDefault("pricing.hash_url", fmt.Sprintf("https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/%s/model_prices_and_context_window.sha256", defaultPricingRepositoryRevision))
 	viper.SetDefault("pricing.data_dir", "./data")
 	viper.SetDefault("pricing.fallback_file", "./resources/model-pricing/model_prices_and_context_window.json")
 	viper.SetDefault("pricing.update_interval_hours", 24)
@@ -1783,7 +1867,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.stream_keepalive_interval", 10)
 	viper.SetDefault("gateway.image_stream_data_interval_timeout", 900)
 	viper.SetDefault("gateway.image_stream_keepalive_interval", 10)
-	viper.SetDefault("gateway.max_line_size", 500*1024*1024)
+	viper.SetDefault("gateway.max_line_size", DefaultGatewayMaxLineSize)
 	viper.SetDefault("gateway.scheduling.sticky_session_max_waiting", 3)
 	viper.SetDefault("gateway.scheduling.sticky_session_wait_timeout", 120*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", 30*time.Second)
@@ -1805,7 +1889,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.usage_record.worker_count", 128)
 	viper.SetDefault("gateway.usage_record.queue_size", 16384)
 	viper.SetDefault("gateway.usage_record.task_timeout_seconds", 5)
-	viper.SetDefault("gateway.usage_record.overflow_policy", UsageRecordOverflowPolicySample)
+	// Queue pressure must not make successful customer usage free. The runtime
+	// also hardens explicit legacy sample/drop values to synchronous fallback.
+	viper.SetDefault("gateway.usage_record.overflow_policy", UsageRecordOverflowPolicySync)
 	viper.SetDefault("gateway.usage_record.overflow_sample_percent", 10)
 	viper.SetDefault("gateway.usage_record.auto_scale_enabled", true)
 	viper.SetDefault("gateway.usage_record.auto_scale_min_workers", 128)
@@ -1874,6 +1960,17 @@ func (c *Config) Validate() error {
 	// 选择 bytes 而不是 rune 计数，确保二进制/随机串的长度语义更接近“熵”而非“字符数”。
 	if len([]byte(jwtSecret)) < 32 {
 		return fmt.Errorf("jwt.secret must be at least 32 bytes")
+	}
+	if c.Server.H2C.Enabled {
+		if c.Server.H2C.MaxReadFrameSize < 1<<14 || c.Server.H2C.MaxReadFrameSize > 1<<24-1 {
+			return fmt.Errorf("server.h2c.max_read_frame_size must be between 16384 and 16777215")
+		}
+		if c.Server.H2C.MaxUploadBufferPerConnection < 0 || c.Server.H2C.MaxUploadBufferPerConnection > math.MaxInt32 {
+			return fmt.Errorf("server.h2c.max_upload_buffer_per_connection must fit int32 and be non-negative")
+		}
+		if c.Server.H2C.MaxUploadBufferPerStream < 0 || c.Server.H2C.MaxUploadBufferPerStream > math.MaxInt32 {
+			return fmt.Errorf("server.h2c.max_upload_buffer_per_stream must fit int32 and be non-negative")
+		}
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
@@ -2579,6 +2676,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.MaxLineSize != 0 && c.Gateway.MaxLineSize < 1024*1024 {
 		return fmt.Errorf("gateway.max_line_size must be at least 1MB")
+	}
+	if c.Gateway.MaxLineSize > MaxGatewayMaxLineSize {
+		return fmt.Errorf("gateway.max_line_size must be at most %d bytes", MaxGatewayMaxLineSize)
 	}
 	if c.Gateway.UsageRecord.WorkerCount <= 0 {
 		return fmt.Errorf("gateway.usage_record.worker_count must be positive")

@@ -250,6 +250,7 @@ import TextArea from '@/components/common/TextArea.vue'
 import { Icon } from '@/components/icons'
 import { useClipboard } from '@/composables/useClipboard'
 import { adminAPI } from '@/api/admin'
+import { getSessionAccessToken } from '@/auth/browserSession'
 import type { Account, ClaudeModel } from '@/types'
 
 const { t } = useI18n()
@@ -424,7 +425,7 @@ const startTest = async () => {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
+        Authorization: `Bearer ${getSessionAccessToken() || ''}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({

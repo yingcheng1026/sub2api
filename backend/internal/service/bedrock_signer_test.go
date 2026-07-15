@@ -23,6 +23,22 @@ func TestNewBedrockSignerFromAccount_DefaultRegion(t *testing.T) {
 	assert.Equal(t, defaultBedrockRegion, signer.region)
 }
 
+func TestNewBedrockSignerFromAccount_RejectsInvalidRegion(t *testing.T) {
+	account := &Account{
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeBedrock,
+		Credentials: map[string]any{
+			"aws_access_key_id":     "test-akid",
+			"aws_secret_access_key": "test-secret",
+			"aws_region":            "x@attacker.example/",
+		},
+	}
+
+	signer, err := NewBedrockSignerFromAccount(account)
+	require.Error(t, err)
+	assert.Nil(t, signer)
+}
+
 func TestFilterBetaTokens(t *testing.T) {
 	tokens := []string{"interleaved-thinking-2025-05-14", "tool-search-tool-2025-10-19"}
 	filterSet := map[string]struct{}{

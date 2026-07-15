@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,111 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPaymentProviderConfigsPersistEncryptedAndMigrateLegacyPlaintext(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	svc := &PaymentConfigService{entClient: client, encryptionKey: key}
+
+	created, err := svc.CreateProviderInstance(ctx, CreateProviderInstanceRequest{
+		ProviderKey:    payment.TypeStripe,
+		Name:           "encrypted-stripe",
+		Config:         map[string]string{"secretKey": "sk-live-do-not-store-plain", "publishableKey": "pk-live"},
+		SupportedTypes: []string{payment.TypeStripe},
+		Enabled:        false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, created)
+	saved, err := client.PaymentProviderInstance.Get(ctx, created.ID)
+	require.NoError(t, err)
+	require.False(t, json.Valid([]byte(saved.Config)))
+	require.NotContains(t, saved.Config, "sk-live-do-not-store-plain")
+	decoded, err := svc.decryptConfig(saved.Config)
+	require.NoError(t, err)
+	require.Equal(t, "sk-live-do-not-store-plain", decoded["secretKey"])
+
+	legacySecret := "legacy-provider-secret"
+	legacy, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeEasyPay).
+		SetName("legacy-plaintext").
+		SetConfig(`{"pid":"legacy","pkey":"` + legacySecret + `"}`).
+		SetSupportedTypes(payment.TypeAlipay).
+		Save(ctx)
+	require.NoError(t, err)
+
+	migrated, err := svc.MigrateProviderConfigsToEncrypted(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, migrated)
+	migratedSaved, err := client.PaymentProviderInstance.Get(ctx, legacy.ID)
+	require.NoError(t, err)
+	require.False(t, json.Valid([]byte(migratedSaved.Config)))
+	require.False(t, strings.Contains(migratedSaved.Config, legacySecret))
+	decoded, err = svc.decryptConfig(migratedSaved.Config)
+	require.NoError(t, err)
+	require.Equal(t, legacySecret, decoded["pkey"])
+
+	migrated, err = svc.MigrateProviderConfigsToEncrypted(ctx)
+	require.NoError(t, err)
+	require.Zero(t, migrated)
+}
+
+func TestPaymentProviderConfigMigrationFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	_, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeEasyPay).
+		SetName("corrupted-config").
+		SetConfig("not-json-or-valid-ciphertext").
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentConfigService{
+		entClient:     client,
+		encryptionKey: []byte("0123456789abcdef0123456789abcdef"),
+	}
+	_, err = svc.MigrateProviderConfigsToEncrypted(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "provider instance")
+}
+
+func TestPaymentProviderConfigMigrationRotatesSharedRootCiphertext(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	legacyKey := []byte("legacy-shared-root-32-byte-key!!")
+	currentKey := []byte("current-payment-root-32-byte-key")
+	legacyCiphertext, err := payment.EncryptProviderConfig(
+		map[string]string{"secretKey": "legacy-provider-secret"},
+		legacyKey,
+	)
+	require.NoError(t, err)
+	instance, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeStripe).
+		SetName("legacy-shared-root").
+		SetConfig(legacyCiphertext).
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentConfigService{entClient: client, encryptionKey: currentKey}
+	_, err = svc.MigrateProviderConfigsToEncrypted(ctx)
+	require.Error(t, err)
+	migrated, err := svc.MigrateProviderConfigsToEncrypted(ctx, legacyKey)
+	require.NoError(t, err)
+	require.Equal(t, 1, migrated)
+	refreshed, err := client.PaymentProviderInstance.Get(ctx, instance.ID)
+	require.NoError(t, err)
+	decoded, _, err := payment.DecryptProviderConfig(refreshed.Config, currentKey)
+	require.NoError(t, err)
+	require.Equal(t, "legacy-provider-secret", decoded["secretKey"])
+	_, _, err = payment.DecryptProviderConfig(refreshed.Config, legacyKey)
+	require.Error(t, err)
+}
 
 func TestValidateProviderRequest(t *testing.T) {
 	t.Parallel()
@@ -240,6 +347,43 @@ func TestCreateProviderInstanceAllowsVisibleMethodProvidersFromDifferentSources(
 		Enabled:        true,
 	})
 	require.NoError(t, err)
+}
+
+func TestCreateProviderInstanceRejectsMalformedOrUnsafeLimits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		limits string
+	}{
+		{name: "malformed json", limits: `{not-json}`},
+		{name: "negative limit", limits: `{"alipay":{"singleMax":-1}}`},
+		{name: "inverted range", limits: `{"alipay":{"singleMin":100,"singleMax":10}}`},
+		{name: "unknown field", limits: `{"alipay":{"singleMaximum":100}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			client := newPaymentConfigServiceTestClient(t)
+			svc := &PaymentConfigService{
+				entClient:     client,
+				encryptionKey: []byte("0123456789abcdef0123456789abcdef"),
+			}
+
+			created, err := svc.CreateProviderInstance(ctx, CreateProviderInstanceRequest{
+				ProviderKey:    payment.TypeEasyPay,
+				Name:           "invalid-limits",
+				Config:         validEasyPayProviderConfig(t),
+				SupportedTypes: []string{payment.TypeAlipay},
+				Enabled:        true,
+				Limits:         tt.limits,
+			})
+			require.Nil(t, created)
+			require.Equal(t, "INVALID_PAYMENT_LIMITS", infraerrors.Reason(err))
+		})
+	}
 }
 
 func TestUpdateProviderInstanceAllowsEnablingVisibleMethodProviderFromDifferentSource(t *testing.T) {
@@ -504,6 +648,52 @@ func TestUpdateProviderInstanceAllowsSafeConfigChangesWhilePendingOrders(t *test
 			require.Equal(t, tc.wantValue, cfg[tc.fieldName])
 		})
 	}
+}
+
+func TestUpdateEasyPayAPIBaseRequiresExplicitPKeyReentry(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	svc := &PaymentConfigService{
+		entClient:     client,
+		encryptionKey: []byte("0123456789abcdef0123456789abcdef"),
+	}
+	instance, err := svc.CreateProviderInstance(ctx, CreateProviderInstanceRequest{
+		ProviderKey:    payment.TypeEasyPay,
+		Name:           "bound-easypay",
+		Config:         validEasyPayProviderConfig(t),
+		SupportedTypes: []string{payment.TypeAlipay},
+		Enabled:        true,
+	})
+	require.NoError(t, err)
+
+	updated, err := svc.UpdateProviderInstance(ctx, instance.ID, UpdateProviderInstanceRequest{
+		Config: map[string]string{"apiBase": "https://attacker.example.com"},
+	})
+	require.Nil(t, updated)
+	require.Equal(t, "EASYPAY_PKEY_REENTRY_REQUIRED", infraerrors.Reason(err))
+	saved, err := client.PaymentProviderInstance.Get(ctx, instance.ID)
+	require.NoError(t, err)
+	savedConfig, err := svc.decryptConfig(saved.Config)
+	require.NoError(t, err)
+	require.Equal(t, "https://pay.example.com", savedConfig["apiBase"])
+	require.Equal(t, "pkey-test", savedConfig["pkey"])
+
+	updated, err = svc.UpdateProviderInstance(ctx, instance.ID, UpdateProviderInstanceRequest{
+		Config: map[string]string{
+			"apiBase": "https://payments-v2.example.com",
+			"pkey":    "pkey-v2",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	saved, err = client.PaymentProviderInstance.Get(ctx, instance.ID)
+	require.NoError(t, err)
+	savedConfig, err = svc.decryptConfig(saved.Config)
+	require.NoError(t, err)
+	require.Equal(t, "https://payments-v2.example.com", savedConfig["apiBase"])
+	require.Equal(t, "pkey-v2", savedConfig["pkey"])
 }
 
 func createPendingProviderConfigOrder(t *testing.T, ctx context.Context, client *dbent.Client, instance *dbent.PaymentProviderInstance) {

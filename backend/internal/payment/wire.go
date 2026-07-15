@@ -3,7 +3,6 @@ package payment
 import (
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -15,34 +14,41 @@ import (
 // Using a named type avoids Wire ambiguity with other []byte parameters.
 type EncryptionKey []byte
 
-// ProvideEncryptionKey derives the payment encryption key from the TOTP encryption key in config.
-// When the key is empty, nil is returned (payment features that need encryption will be disabled).
-// When the key is non-empty but invalid (bad hex or wrong length), an error is returned
-// to prevent startup with a misconfigured encryption key.
+// ProvideEncryptionKey returns the independent v3 payment-provider root.
 func ProvideEncryptionKey(cfg *config.Config) (EncryptionKey, error) {
 	if cfg == nil {
-		slog.Warn("payment encryption key not configured — encrypted payment config and resume signing will be unavailable")
+		return nil, fmt.Errorf("SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY must be explicitly configured and stable")
+	}
+	key, err := decodeConfiguredEncryptionKey(
+		"SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY",
+		cfg.SecretEncryption.PaymentProviderKey,
+	)
+	return EncryptionKey(key), err
+}
+
+// ProvideLegacyEncryptionKey returns the optional shared v1/v2 root used only
+// by the startup payment-provider migration.
+func ProvideLegacyEncryptionKey(cfg *config.Config) (EncryptionKey, error) {
+	if cfg == nil || !cfg.Totp.EncryptionKeyConfigured {
 		return nil, nil
 	}
-	keyHex := strings.TrimSpace(cfg.Totp.EncryptionKey)
+	key, err := decodeConfiguredEncryptionKey("TOTP_ENCRYPTION_KEY", cfg.Totp.EncryptionKey)
+	return EncryptionKey(key), err
+}
+
+func decodeConfiguredEncryptionKey(name, value string) ([]byte, error) {
+	keyHex := strings.TrimSpace(value)
 	if keyHex == "" {
-		slog.Warn("payment encryption key not configured — encrypted payment config will be unavailable")
-		return nil, nil
-	}
-	// Reject auto-generated TOTP keys for payment signing.
-	// They change across restarts/instances and can silently break resume-token flows.
-	if !cfg.Totp.EncryptionKeyConfigured {
-		slog.Warn("payment encryption/signing key is not explicitly configured; set TOTP_ENCRYPTION_KEY to enable payment resume tokens")
-		return nil, nil
+		return nil, fmt.Errorf("%s must be explicitly configured and stable", name)
 	}
 	key, err := hex.DecodeString(keyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid payment encryption key (hex decode): %w", err)
+		return nil, fmt.Errorf("invalid %s (hex decode): %w", name, err)
 	}
 	if len(key) != 32 {
-		return nil, fmt.Errorf("payment encryption key must be 32 bytes, got %d", len(key))
+		return nil, fmt.Errorf("%s must be 32 bytes, got %d", name, len(key))
 	}
-	return EncryptionKey(key), nil
+	return key, nil
 }
 
 // ProvideRegistry creates an empty payment provider registry.

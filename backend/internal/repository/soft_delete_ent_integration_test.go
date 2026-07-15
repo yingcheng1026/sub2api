@@ -41,7 +41,7 @@ func TestEntSoftDelete_ApiKey_DefaultFilterAndSkip(t *testing.T) {
 
 	u := createEntUser(t, ctx, client, uniqueSoftDeleteValue(t, "sd-user")+"@example.com")
 
-	repo := NewAPIKeyRepository(client, integrationDB)
+	repo := NewAPIKeyRepository(client, integrationDB, strictAPIKeyTestProtector{})
 	key := &service.APIKey{
 		UserID: u.ID,
 		Key:    uniqueSoftDeleteValue(t, "sk-soft-delete"),
@@ -73,7 +73,7 @@ func TestEntSoftDelete_ApiKey_DeleteIdempotent(t *testing.T) {
 
 	u := createEntUser(t, ctx, client, uniqueSoftDeleteValue(t, "sd-user2")+"@example.com")
 
-	repo := NewAPIKeyRepository(client, integrationDB)
+	repo := NewAPIKeyRepository(client, integrationDB, strictAPIKeyTestProtector{})
 	key := &service.APIKey{
 		UserID: u.ID,
 		Key:    uniqueSoftDeleteValue(t, "sk-soft-delete2"),
@@ -93,7 +93,7 @@ func TestEntSoftDelete_ApiKey_HardDeleteViaSkipSoftDelete(t *testing.T) {
 
 	u := createEntUser(t, ctx, client, uniqueSoftDeleteValue(t, "sd-user3")+"@example.com")
 
-	repo := NewAPIKeyRepository(client, integrationDB)
+	repo := NewAPIKeyRepository(client, integrationDB, strictAPIKeyTestProtector{})
 	key := &service.APIKey{
 		UserID: u.ID,
 		Key:    uniqueSoftDeleteValue(t, "sk-soft-delete3"),
@@ -122,6 +122,7 @@ func createEntGroup(t *testing.T, ctx context.Context, client *dbent.Client, nam
 	g, err := client.Group.Create().
 		SetName(name).
 		SetStatus(service.StatusActive).
+		SetSubscriptionType(service.SubscriptionTypeSubscription).
 		Save(ctx)
 	require.NoError(t, err, "create ent group")
 	return g

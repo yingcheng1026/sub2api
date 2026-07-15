@@ -187,42 +187,27 @@ func TestAPIContracts(t *testing.T) {
 			}`,
 		},
 		{
-			name:   "POST /api/v1/keys",
+			name: "POST /api/v1/keys",
+			setup: func(t *testing.T, deps *contractDeps) {
+				t.Helper()
+				deps.groupRepo.SetActive([]service.Group{{
+					ID:               10,
+					Name:             "Group One",
+					Status:           service.StatusActive,
+					SubscriptionType: service.SubscriptionTypeStandard,
+				}})
+			},
 			method: http.MethodPost,
 			path:   "/api/v1/keys",
-			body:   `{"name":"Key One","custom_key":"sk_custom_1234567890"}`,
+			body:   `{"name":"Key One","group_id":10,"custom_key":"sk_custom_1234567890","verification":"correct-password"}`,
 			headers: map[string]string{
 				"Content-Type": "application/json",
 			},
-			wantStatus: http.StatusOK,
+			wantStatus: http.StatusBadRequest,
 			wantJSON: `{
-				"code": 0,
-				"message": "success",
-				"data": {
-					"id": 100,
-					"user_id": 1,
-					"key": "sk_custom_1234567890",
-					"name": "Key One",
-					"group_id": null,
-					"status": "active",
-					"ip_whitelist": null,
-					"ip_blacklist": null,
-					"last_used_at": null,
-					"quota": 0,
-					"quota_used": 0,
-					"rate_limit_5h": 0,
-					"rate_limit_1d": 0,
-					"rate_limit_7d": 0,
-					"usage_5h": 0,
-					"usage_1d": 0,
-					"usage_7d": 0,
-					"window_5h_start": null,
-					"window_1d_start": null,
-					"window_7d_start": null,
-					"expires_at": null,
-					"created_at": "2025-01-02T03:04:05Z",
-					"updated_at": "2025-01-02T03:04:05Z"
-				}
+				"code": 400,
+				"message": "custom API keys are disabled; use a generated key",
+				"reason": "API_KEY_CUSTOM_KEY_DISABLED"
 			}`,
 		},
 		{
@@ -234,6 +219,8 @@ func TestAPIContracts(t *testing.T) {
 					UserID:    1,
 					Key:       "sk_custom_1234567890",
 					Name:      "Key One",
+					Purpose:   service.APIKeyPurposeStandard,
+					GroupID:   ptr(int64(10)),
 					Status:    service.StatusActive,
 					CreatedAt: deps.now,
 					UpdatedAt: deps.now,
@@ -250,9 +237,10 @@ func TestAPIContracts(t *testing.T) {
 						{
 							"id": 100,
 							"user_id": 1,
-							"key": "sk_custom_1234567890",
+							"key": "sk_custo••••",
 							"name": "Key One",
-							"group_id": null,
+							"purpose": "standard",
+							"group_id": 10,
 							"status": "active",
 							"ip_whitelist": null,
 							"ip_blacklist": null,
@@ -517,7 +505,7 @@ func TestAPIContracts(t *testing.T) {
 				})
 			},
 			method:     http.MethodGet,
-			path:       "/api/v1/usage?page=1&page_size=10",
+			path:       "/api/v1/usage?page=1&page_size=10&start_date=2025-01-01&end_date=2025-01-03",
 			wantStatus: http.StatusOK,
 			wantJSON: `{
 				"code": 0,
@@ -1158,6 +1146,7 @@ func newContractDeps(t *testing.T) *contractDeps {
 			},
 		},
 	}
+	require.NoError(t, userRepo.users[1].SetPassword("correct-password"))
 
 	apiKeyRepo := newStubApiKeyRepo(now)
 	apiKeyCache := stubApiKeyCache{}
@@ -1419,6 +1408,14 @@ func (stubApiKeyCache) DeleteCreateAttemptCount(ctx context.Context, userID int6
 	return nil
 }
 
+func (stubApiKeyCache) IncrementAPIKeyStepUpAttempt(context.Context, string, int64) (int, error) {
+	return 1, nil
+}
+
+func (stubApiKeyCache) DeleteAPIKeyStepUpAttempts(context.Context, string, int64) error {
+	return nil
+}
+
 func (stubApiKeyCache) IncrementDailyUsage(ctx context.Context, apiKey string) error {
 	return nil
 }
@@ -1459,12 +1456,18 @@ func (stubGroupRepo) Create(ctx context.Context, group *service.Group) error {
 	return errors.New("not implemented")
 }
 
-func (stubGroupRepo) GetByID(ctx context.Context, id int64) (*service.Group, error) {
+func (r *stubGroupRepo) GetByID(ctx context.Context, id int64) (*service.Group, error) {
+	for i := range r.active {
+		if r.active[i].ID == id {
+			group := r.active[i]
+			return &group, nil
+		}
+	}
 	return nil, service.ErrGroupNotFound
 }
 
-func (stubGroupRepo) GetByIDLite(ctx context.Context, id int64) (*service.Group, error) {
-	return nil, service.ErrGroupNotFound
+func (r *stubGroupRepo) GetByIDLite(ctx context.Context, id int64) (*service.Group, error) {
+	return r.GetByID(ctx, id)
 }
 
 func (stubGroupRepo) Update(ctx context.Context, group *service.Group) error {
@@ -1788,6 +1791,14 @@ func (stubRedeemCodeRepo) Delete(ctx context.Context, id int64) error {
 	return errors.New("not implemented")
 }
 
+func (stubRedeemCodeRepo) DeleteIfUnused(ctx context.Context, id int64) (bool, error) {
+	return false, errors.New("not implemented")
+}
+
+func (stubRedeemCodeRepo) ExpireIfUnused(ctx context.Context, id int64) (bool, error) {
+	return false, errors.New("not implemented")
+}
+
 func (stubRedeemCodeRepo) Use(ctx context.Context, id, userID int64) error {
 	return errors.New("not implemented")
 }
@@ -1853,6 +1864,9 @@ func (stubUserSubscriptionRepo) GetActiveByUserIDAndGroupID(ctx context.Context,
 func (stubUserSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
 	return nil, service.ErrSubscriptionNotFound
 }
+func (s stubUserSubscriptionRepo) GetActiveCreditsWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
+	return s.GetActiveWalletByUserID(ctx, userID)
+}
 func (stubUserSubscriptionRepo) GetActiveByPlanCoveringGroup(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
 	return nil, service.ErrSubscriptionNotFound
 }
@@ -1906,6 +1920,9 @@ func (stubUserSubscriptionRepo) ResetWeeklyUsage(ctx context.Context, id int64, 
 }
 func (stubUserSubscriptionRepo) ResetMonthlyUsage(ctx context.Context, id int64, newWindowStart time.Time) error {
 	return errors.New("not implemented")
+}
+func (stubUserSubscriptionRepo) AdvanceUsageWindow(ctx context.Context, id int64, advance service.SubscriptionUsageWindowAdvance) (bool, error) {
+	return false, errors.New("not implemented")
 }
 func (stubUserSubscriptionRepo) IncrementUsage(ctx context.Context, id int64, costUSD float64) error {
 	return errors.New("not implemented")
@@ -2120,11 +2137,11 @@ func (r *stubApiKeyRepo) CountByGroupID(ctx context.Context, groupID int64) (int
 	return 0, errors.New("not implemented")
 }
 
-func (r *stubApiKeyRepo) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
+func (r *stubApiKeyRepo) ListAuthCacheLocatorsByUserID(ctx context.Context, userID int64) ([]string, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (r *stubApiKeyRepo) ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error) {
+func (r *stubApiKeyRepo) ListAuthCacheLocatorsByGroupID(ctx context.Context, groupID int64) ([]string, error) {
 	return nil, errors.New("not implemented")
 }
 

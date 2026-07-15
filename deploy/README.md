@@ -31,24 +31,21 @@ This directory contains files for deploying Sub2API on Linux servers.
 
 ### Method 1: One-Click Deployment (Recommended)
 
-Use the automated preparation script for the easiest setup:
+Run the preparation script from a reviewed clone or release archive. Remote
+`curl | bash` from a mutable branch is intentionally unsupported.
 
 ```bash
-# Download and run the preparation script
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
-
-# Or download first, then run
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh -o docker-deploy.sh
-chmod +x docker-deploy.sh
-./docker-deploy.sh
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api/deploy
+bash docker-deploy.sh
 ```
 
 **What the script does:**
-- Downloads `docker-compose.local.yml` and `.env.example`
-- Automatically generates secure secrets (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD)
+- Copies the reviewed `docker-compose.local.yml` and `.env.example` shipped beside it
+- Generates independent JWT, TOTP, payment-resume, PostgreSQL, Redis, and admin secrets
 - Creates `.env` file with generated secrets
 - Creates necessary data directories (data/, postgres_data/, redis_data/)
-- **Displays generated credentials** (POSTGRES_PASSWORD, JWT_SECRET, etc.)
+- Restricts `.env` to mode `0600` and does not print credentials
 
 **After running the script:**
 ```bash
@@ -57,9 +54,6 @@ docker compose -f docker-compose.local.yml up -d
 
 # View logs
 docker compose -f docker-compose.local.yml logs -f sub2api
-
-# If admin password was auto-generated, find it in logs:
-docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
 
 # Access Web UI
 # http://localhost:8080
@@ -76,13 +70,8 @@ cd sub2api/deploy
 
 # Configure environment
 cp .env.example .env
-nano .env  # Set POSTGRES_PASSWORD and other required variables
-
-# Generate secure secrets (recommended)
-JWT_SECRET=$(openssl rand -hex 32)
-TOTP_ENCRYPTION_KEY=$(openssl rand -hex 32)
-echo "JWT_SECRET=${JWT_SECRET}" >> .env
-echo "TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}" >> .env
+chmod 600 .env
+nano .env  # Set every required secret; use a distinct `openssl rand -hex 32` value for each
 
 # Create data directories
 mkdir -p data postgres_data redis_data
@@ -90,7 +79,7 @@ mkdir -p data postgres_data redis_data
 # Start all services using local directory version
 docker compose -f docker-compose.local.yml up -d
 
-# View logs (check for auto-generated admin password)
+# View logs
 docker compose -f docker-compose.local.yml logs -f sub2api
 
 # Access Web UI
@@ -114,21 +103,43 @@ When using Docker Compose with `AUTO_SETUP=true`:
    - Connects to PostgreSQL and Redis
    - Applies database migrations (SQL files in `backend/migrations/*.sql`) and records them in `schema_migrations`
    - Generates JWT secret (if not provided)
-   - Creates admin account (password auto-generated if not provided)
+   - Creates the admin account using the explicitly configured password
    - Writes config.yaml
 
 2. No manual Setup Wizard needed - just configure `.env` and start
 
-3. If `ADMIN_PASSWORD` is not set, check logs for the generated password:
-   ```bash
-   docker compose logs sub2api | grep "admin password"
-   ```
+3. Production deployments must set `ADMIN_PASSWORD`; `docker-deploy.sh` writes
+   a generated value only to the owner-readable `.env` file.
 
 ### Database Migration Notes (PostgreSQL)
 
 - Migrations are applied in lexicographic order (e.g. `001_...sql`, `002_...sql`).
 - `schema_migrations` tracks applied migrations (filename + checksum).
 - Migrations are forward-only; rollback requires a DB backup restore or a manual compensating SQL script.
+
+**Application-secret cutover:** on startup, the application rewrites legacy
+unbound/v2 shared-root ciphertext to v3 AES-256-GCM before opening workers or the
+HTTP listener. Configure all seven distinct `SECRET_ENCRYPTION_*` roots and retain
+`TOTP_ENCRYPTION_KEY` only while the migration may still need to read legacy data.
+An unreadable row, missing/reused root, or concurrent edit aborts startup and rolls
+back the persistent rewrite. Drain every old binary first and deploy one new node to
+complete the migration before scaling out. After all persistent values are v3 and
+old binaries are retired, remove the legacy TOTP root. Historical backups still
+require their original key and may contain old plaintext, so protect/expire them and
+rotate high-value provider, backup and moderation credentials after cutover.
+
+**Customer API-key cutover:** `API_KEY_ENCRYPTION_KEY` is an independent
+32-byte hex master key. Startup derives separate AES-GCM and HMAC lookup
+subkeys, migrates legacy plaintext rows in bounded compare-and-swap batches,
+and aborts before listening if any ciphertext/hash is unreadable. Deploy all
+nodes together; old binaries must not run after this migration. List/admin
+responses are masked and individual user reveal requires fresh password or
+TOTP verification. Historical backups may still contain old plaintext keys,
+so rotate live keys after the cutover and protect/expire old backup copies.
+
+When rotating from the former TOTP-based payment token key, set
+`PAYMENT_RESUME_LEGACY_VERIFY_UNTIL` only to a fixed RFC3339 deadline no more than
+24 hours ahead. Remove it and restart after the deadline; it is disabled by default.
 
 **Verify `users.allowed_groups` → `user_allowed_groups` backfill**
 
@@ -210,11 +221,28 @@ docker compose down -v
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `POSTGRES_PASSWORD` | **Yes** | - | PostgreSQL password |
-| `JWT_SECRET` | **Recommended** | *(auto-generated)* | JWT secret (fixed for persistent sessions) |
-| `TOTP_ENCRYPTION_KEY` | **Recommended** | *(auto-generated)* | TOTP encryption key (fixed for persistent 2FA) |
+| `REDIS_PASSWORD` | **Yes** | - | Redis authentication password; keep private and distinct |
+| `JWT_SECRET` | **Yes for production** | - | Stable JWT secret; keep distinct from every encryption/signing key |
+| `TOTP_ENCRYPTION_KEY` | Migration only | empty | Legacy v1/v2 decrypt root; keep during cutover, then remove after every persistent secret is v3 and old binaries are retired |
+| `SECRET_ENCRYPTION_TOTP_SECRET_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for stored TOTP seeds |
+| `SECRET_ENCRYPTION_TOTP_CACHE_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for short-lived TOTP cache sessions |
+| `SECRET_ENCRYPTION_ACCOUNT_CREDENTIAL_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for upstream/provider account credentials |
+| `SECRET_ENCRYPTION_BACKUP_S3_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for backup S3 credentials |
+| `SECRET_ENCRYPTION_CONTENT_MODERATION_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for content-moderation credentials |
+| `SECRET_ENCRYPTION_CHANNEL_MONITOR_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for channel-monitor credentials |
+| `SECRET_ENCRYPTION_PAYMENT_PROVIDER_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for payment-provider credentials |
+| `SECRET_ENCRYPTION_PROXY_CREDENTIAL_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for stored proxy credentials |
+| `SECRET_ENCRYPTION_SCHEDULER_CACHE_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for encrypted scheduler account and metadata cache payloads |
+| `SECRET_ENCRYPTION_OAUTH_TOKEN_CACHE_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for encrypted OAuth access-token cache payloads |
+| `SECRET_ENCRYPTION_JWT_HMAC_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for the persisted JWT HMAC signing secret; never reuse `JWT_SECRET` |
+| `SECRET_ENCRYPTION_SETTING_SECRET_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent v3 root for allowlisted sensitive settings, including the admin API key |
+| `API_KEY_ENCRYPTION_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent master key for customer API-key AES-GCM storage and HMAC lookup; never reuse JWT/TOTP/payment keys |
+| `PAYMENT_RESUME_SIGNING_KEY` | **Yes** | *(generated by `docker-deploy.sh`; otherwise none)* | Independent HMAC key for payment resume and WeChat OAuth subject tokens |
+| `PAYMENT_RESUME_LEGACY_VERIFY_UNTIL` | No | empty | One-time RFC3339 legacy-token deadline, at most 24 hours in the future; remove after migration |
+| `SUB2API_OFFICIAL_UPDATE_APPLY_ENABLED` | No | `false` | Keep disabled for the custom build; enable only after an upstream compatibility gate and controlled backup/rollback rehearsal |
 | `SERVER_PORT` | No | `8080` | Server port |
 | `ADMIN_EMAIL` | No | `admin@sub2api.local` | Admin email |
-| `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password |
+| `ADMIN_PASSWORD` | **Yes for production** | *(generated by `docker-deploy.sh`)* | Admin password; never recover it from logs |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
 | `GEMINI_OAUTH_CLIENT_ID` | No | *(builtin)* | Google OAuth client ID (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_CLIENT_SECRET` | No | *(builtin)* | Google OAuth client secret (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
@@ -223,7 +251,23 @@ docker compose down -v
 
 See `.env.example` for all available options.
 
-> **Note:** The `docker-deploy.sh` script automatically generates `JWT_SECRET`, `TOTP_ENCRYPTION_KEY`, and `POSTGRES_PASSWORD` for you.
+> **Note:** `docker-deploy.sh` generates every required independent secret listed
+> above and writes them only to `.env` with mode `0600`. It does not reuse JWT,
+> Redis, payment, API-key, or application-domain roots.
+
+### OAuth token cache encryption cutover
+
+The encrypted `oauth:v2:token:*` namespace is intentionally incompatible with
+the former plaintext `oauth:token:*` namespace. Drain every old application
+binary before starting the new fleet; mixed versions can recreate plaintext
+keys after the startup purge. Treat a failed OAuth token-cache preflight as a
+deployment blocker.
+
+Deleting live Redis keys does not erase historical plaintext from AOF/RDB files
+or backups. After the new fleet is verified and legacy keys remain absent,
+perform an explicitly authorized AOF rewrite and fresh snapshot, then retire old
+Redis backups according to the incident-retention policy. Do not claim storage
+sanitization from the startup purge alone.
 
 ### Easy Migration (Local Directory Version)
 
@@ -350,10 +394,13 @@ GEMINI_OAUTH_CLIENT_SECRET=GOCSPX-your-client-secret
 
 For production servers using systemd.
 
-### One-Line Installation
+### Reviewed-checkout installation
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+git clone https://github.com/Wei-Shaw/sub2api.git
+cd sub2api
+git checkout <reviewed-tag-or-commit>
+sudo bash deploy/install.sh
 ```
 
 ### Manual Installation

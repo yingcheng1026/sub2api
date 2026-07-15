@@ -65,7 +65,15 @@ func (p *GeminiTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	// 1) Try cache first.
 	if p.tokenCache != nil {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
-			return token, nil
+			latestAccount, cacheHitIsCurrent, validationErr := validateOAuthTokenCacheHit(ctx, account, p.accountRepo)
+			if validationErr != nil {
+				return "", validationErr
+			}
+			if cacheHitIsCurrent {
+				return token, nil
+			}
+			account = latestAccount
+			cacheKey = GeminiTokenCacheKey(account)
 		}
 	}
 
@@ -82,7 +90,16 @@ func (p *GeminiTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		} else if result.LockHeld {
 			if p.refreshPolicy.OnLockHeld == ProviderLockHeldWaitForCache && p.tokenCache != nil {
 				if token, cacheErr := p.tokenCache.GetAccessToken(ctx, cacheKey); cacheErr == nil && strings.TrimSpace(token) != "" {
-					return token, nil
+					latestAccount, cacheHitIsCurrent, validationErr := validateOAuthTokenCacheHit(ctx, account, p.accountRepo)
+					if validationErr != nil {
+						return "", validationErr
+					}
+					if cacheHitIsCurrent {
+						return token, nil
+					}
+					account = latestAccount
+					cacheKey = GeminiTokenCacheKey(account)
+					expiresAt = account.GetCredentialAsTime("expires_at")
 				}
 			}
 			slog.Debug("gemini_token_lock_held_use_old", "account_id", account.ID)
@@ -92,9 +109,9 @@ func (p *GeminiTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		}
 	} else if needsRefresh && p.tokenCache != nil {
 		// Backward-compatible test path when refreshAPI is not injected.
-		locked, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
+		locked, ownershipToken, lockErr := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
 		if lockErr == nil && locked {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey, ownershipToken) }()
 		} else if lockErr != nil {
 			slog.Warn("gemini_token_lock_failed", "account_id", account.ID, "error", lockErr)
 		}
@@ -144,8 +161,10 @@ func (p *GeminiTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 	// 3) Populate cache with TTL.
 	if p.tokenCache != nil {
-		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
-		if isStale && latestAccount != nil {
+		latestAccount, isStale, versionErr := CheckTokenVersion(ctx, account, p.accountRepo)
+		if versionErr != nil {
+			slog.Warn("gemini_token_version_check_unavailable", "account_id", account.ID, "error", versionErr)
+		} else if isStale && latestAccount != nil {
 			slog.Debug("gemini_token_version_stale_use_latest", "account_id", account.ID)
 			accessToken = latestAccount.GetCredential("access_token")
 			if strings.TrimSpace(accessToken) == "" {
@@ -181,6 +200,10 @@ func GeminiTokenCacheKey(account *Account) string {
 			return vertexServiceAccountCacheKey(account, key)
 		}
 	}
+	return credentialBoundOAuthTokenCacheKey(geminiTokenCacheBaseKey(account), account)
+}
+
+func geminiTokenCacheBaseKey(account *Account) string {
 	projectID := strings.TrimSpace(account.GetCredential("project_id"))
 	if projectID != "" {
 		return "gemini:" + projectID

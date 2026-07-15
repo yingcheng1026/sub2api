@@ -24,7 +24,7 @@ func (s *ProxyRepoSuite) SetupTest() {
 	s.ctx = context.Background()
 	tx := testEntTx(s.T())
 	s.tx = tx
-	s.repo = newProxyRepositoryWithSQL(tx.Client(), tx)
+	s.repo = newProxyRepositoryWithSQL(tx.Client(), tx, newDomainMigrationTestEncryptor(s.T()))
 }
 
 func TestProxyRepoSuite(t *testing.T) {

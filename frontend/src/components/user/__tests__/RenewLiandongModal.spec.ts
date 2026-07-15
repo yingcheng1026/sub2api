@@ -25,12 +25,17 @@ function mountRenewModal() {
 }
 
 describe('RenewLiandongModal', () => {
-  it('marks the 29.9 trial monthly package as limited to one purchase', () => {
+  it('only presents credit top-up tiers and the redeem flow', () => {
     const wrapper = mountRenewModal()
     const text = wrapper.get('[data-hfc-liandong-renew-modal="wallet"]').text()
 
-    expect(text).toContain('体验版')
-    expect(text).toContain('¥29.9')
-    expect(text).toContain('限购一次')
+    expect(text).toContain('$30')
+    expect(text).toContain('$100')
+    expect(text).toContain('$500')
+    expect(text).toContain('兑换码')
+    expect(text).toContain('联系管理员或客服人工自定义充值')
+    expect(text).not.toContain('月卡')
+    expect(text).not.toContain('自动到账')
+    expect(text).not.toContain('联系管理员微信')
   })
 })

@@ -24,13 +24,17 @@ type fakeAPIKeyRepo struct {
 }
 
 type fakeGoogleSubscriptionRepo struct {
+	getByID         func(ctx context.Context, id int64) (*service.UserSubscription, error)
 	getActive       func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
 	getActiveWallet func(ctx context.Context, userID int64) (*service.UserSubscription, error)
+	getCovering     func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
+	hasAny          func(ctx context.Context, userID int64) (bool, error)
 	updateStatus    func(ctx context.Context, subscriptionID int64, status string) error
 	activateWindow  func(ctx context.Context, id int64, start time.Time) error
 	resetDaily      func(ctx context.Context, id int64, start time.Time) error
 	resetWeekly     func(ctx context.Context, id int64, start time.Time) error
 	resetMonthly    func(ctx context.Context, id int64, start time.Time) error
+	advanceWindow   func(ctx context.Context, id int64, advance service.SubscriptionUsageWindowAdvance) (bool, error)
 }
 
 func (f fakeAPIKeyRepo) Create(ctx context.Context, key *service.APIKey) error {
@@ -81,10 +85,10 @@ func (f fakeAPIKeyRepo) ClearGroupIDByGroupID(ctx context.Context, groupID int64
 func (f fakeAPIKeyRepo) CountByGroupID(ctx context.Context, groupID int64) (int64, error) {
 	return 0, errors.New("not implemented")
 }
-func (f fakeAPIKeyRepo) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
+func (f fakeAPIKeyRepo) ListAuthCacheLocatorsByUserID(ctx context.Context, userID int64) ([]string, error) {
 	return nil, errors.New("not implemented")
 }
-func (f fakeAPIKeyRepo) ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error) {
+func (f fakeAPIKeyRepo) ListAuthCacheLocatorsByGroupID(ctx context.Context, groupID int64) ([]string, error) {
 	return nil, errors.New("not implemented")
 }
 func (f fakeAPIKeyRepo) IncrementQuotaUsed(ctx context.Context, id int64, amount float64) (float64, error) {
@@ -113,6 +117,9 @@ func (f fakeGoogleSubscriptionRepo) Create(ctx context.Context, sub *service.Use
 	return errors.New("not implemented")
 }
 func (f fakeGoogleSubscriptionRepo) GetByID(ctx context.Context, id int64) (*service.UserSubscription, error) {
+	if f.getByID != nil {
+		return f.getByID(ctx, id)
+	}
 	return nil, errors.New("not implemented")
 }
 func (f fakeGoogleSubscriptionRepo) GetByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
@@ -130,10 +137,26 @@ func (f fakeGoogleSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context,
 	}
 	return nil, service.ErrSubscriptionNotFound
 }
+func (f fakeGoogleSubscriptionRepo) GetActiveCreditsWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
+	sub, err := f.GetActiveWalletByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if sub == nil || !sub.IsUniversalWalletMode() {
+		return nil, service.ErrSubscriptionNotFound
+	}
+	return sub, nil
+}
 func (f fakeGoogleSubscriptionRepo) GetActiveByPlanCoveringGroup(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
+	if f.getCovering != nil {
+		return f.getCovering(ctx, userID, groupID)
+	}
 	return nil, service.ErrSubscriptionNotFound
 }
 func (f fakeGoogleSubscriptionRepo) HasAnyActiveSubscription(ctx context.Context, userID int64) (bool, error) {
+	if f.hasAny != nil {
+		return f.hasAny(ctx, userID)
+	}
 	return false, nil
 }
 func (f fakeGoogleSubscriptionRepo) Update(ctx context.Context, sub *service.UserSubscription) error {
@@ -192,6 +215,12 @@ func (f fakeGoogleSubscriptionRepo) ResetMonthlyUsage(ctx context.Context, id in
 		return f.resetMonthly(ctx, id, start)
 	}
 	return errors.New("not implemented")
+}
+func (f fakeGoogleSubscriptionRepo) AdvanceUsageWindow(ctx context.Context, id int64, advance service.SubscriptionUsageWindowAdvance) (bool, error) {
+	if f.advanceWindow != nil {
+		return f.advanceWindow(ctx, id, advance)
+	}
+	return false, errors.New("not implemented")
 }
 func (f fakeGoogleSubscriptionRepo) IncrementUsage(ctx context.Context, id int64, costUSD float64) error {
 	return errors.New("not implemented")
@@ -264,7 +293,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_QueryApiKeyRejected(t *testing.T) {
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, http.StatusBadRequest, resp.Error.Code)
-	require.Equal(t, "Query parameter api_key is deprecated. Use Authorization header or key instead.", resp.Error.Message)
+	require.Equal(t, "API keys in query parameters are not supported. Use an authentication header instead.", resp.Error.Message)
 	require.Equal(t, "INVALID_ARGUMENT", resp.Error.Status)
 }
 
@@ -333,21 +362,55 @@ func TestApiKeyAuthWithSubscriptionGoogleSetsGroupContext(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestApiKeyAuthWithSubscriptionGoogle_QueryKeyAllowedOnV1Beta(t *testing.T) {
+func TestAPIKeyAuthWithSubscriptionGoogleRejectsUngroupedAndWalletPurposeKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	group := &service.Group{ID: 88, Name: "gemini-fixed", Platform: service.PlatformGemini, Status: service.StatusActive, Hydrated: true}
+
+	for _, tt := range []struct {
+		name    string
+		purpose string
+		groupID *int64
+		group   *service.Group
+	}{
+		{name: "ordinary ungrouped key", purpose: service.APIKeyPurposeStandard},
+		{name: "wallet universal key", purpose: service.APIKeyPurposeWalletUniversal},
+		{name: "malformed grouped wallet key", purpose: service.APIKeyPurposeWalletUniversal, groupID: &group.ID, group: group},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			apiKey := &service.APIKey{
+				ID: 700, UserID: 71, Key: "google-wallet-rejected", Name: service.WalletUniversalAPIKeyName,
+				Purpose: tt.purpose, GroupID: tt.groupID, Group: tt.group, Status: service.StatusActive,
+				User: &service.User{ID: 71, Status: service.StatusActive, Balance: 100},
+			}
+			apiKeyService := newTestAPIKeyService(fakeAPIKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) {
+				clone := *apiKey
+				return &clone, nil
+			}})
+
+			for _, runMode := range []string{config.RunModeSimple, config.RunModeStandard} {
+				router := gin.New()
+				router.Use(APIKeyAuthWithSubscriptionGoogle(apiKeyService, nil, &config.Config{RunMode: runMode}))
+				router.GET("/v1beta/test", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+				req := httptest.NewRequest(http.MethodGet, "/v1beta/test", nil)
+				req.Header.Set("x-goog-api-key", apiKey.Key)
+				rec := httptest.NewRecorder()
+
+				router.ServeHTTP(rec, req)
+
+				require.Equal(t, http.StatusForbidden, rec.Code, "run mode %s", runMode)
+				require.Contains(t, rec.Body.String(), "not supported on Gemini native endpoints")
+			}
+		})
+	}
+}
+
+func TestApiKeyAuthWithSubscriptionGoogle_QueryKeyRejectedOnV1Beta(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	r := gin.New()
 	apiKeyService := newTestAPIKeyService(fakeAPIKeyRepo{
 		getByKey: func(ctx context.Context, key string) (*service.APIKey, error) {
-			return &service.APIKey{
-				ID:     1,
-				Key:    key,
-				Status: service.StatusActive,
-				User: &service.User{
-					ID:     123,
-					Status: service.StatusActive,
-				},
-			}, nil
+			return nil, errors.New("query key must be rejected before repository lookup")
 		},
 	})
 	cfg := &config.Config{RunMode: config.RunModeSimple}
@@ -358,7 +421,10 @@ func TestApiKeyAuthWithSubscriptionGoogle_QueryKeyAllowedOnV1Beta(t *testing.T) 
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp googleErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, "API keys in query parameters are not supported. Use an authentication header instead.", resp.Error.Message)
 }
 
 func TestApiKeyAuthWithSubscriptionGoogle_InvalidKey(t *testing.T) {
@@ -444,16 +510,92 @@ func TestApiKeyAuthWithSubscriptionGoogle_DisabledKey(t *testing.T) {
 	require.Equal(t, "UNAUTHENTICATED", resp.Error.Status)
 }
 
+func TestAPIKeyAuthWithSubscriptionGoogleEnforcesKeyAndGroupSecurityBoundaries(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	expiredAt := time.Now().Add(-time.Minute)
+
+	tests := []struct {
+		name        string
+		mutateKey   func(*service.APIKey)
+		mutateUser  func(*service.User)
+		mutateGroup func(*service.Group)
+		wantStatus  int
+	}{
+		{
+			name:       "expired active key",
+			mutateKey:  func(key *service.APIKey) { key.ExpiresAt = &expiredAt },
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "quota exhausted active key",
+			mutateKey:  func(key *service.APIKey) { key.Quota, key.QuotaUsed = 1, 1 },
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name:        "inactive group",
+			mutateGroup: func(group *service.Group) { group.Status = service.StatusDisabled },
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:       "missing hydrated group",
+			mutateKey:  func(key *service.APIKey) { key.Group = nil },
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:        "exclusive group authorization revoked",
+			mutateGroup: func(group *service.Group) { group.IsExclusive = true },
+			wantStatus:  http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, runMode := range []string{config.RunModeSimple, config.RunModeStandard} {
+				group := &service.Group{ID: 401, Name: "gemini-secure", Platform: service.PlatformGemini, Status: service.StatusActive, Hydrated: true}
+				user := &service.User{ID: 402, Status: service.StatusActive, Balance: 10}
+				key := &service.APIKey{ID: 403, UserID: user.ID, Key: "gemini-secure-key", Status: service.StatusActive, User: user, GroupID: &group.ID, Group: group}
+				if tt.mutateKey != nil {
+					tt.mutateKey(key)
+				}
+				if tt.mutateUser != nil {
+					tt.mutateUser(user)
+				}
+				if tt.mutateGroup != nil {
+					tt.mutateGroup(group)
+				}
+
+				apiKeyService := newTestAPIKeyService(fakeAPIKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) {
+					clone := *key
+					return &clone, nil
+				}})
+				router := gin.New()
+				router.Use(APIKeyAuthWithSubscriptionGoogle(apiKeyService, nil, &config.Config{RunMode: runMode}))
+				router.GET("/v1beta/test", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+				req := httptest.NewRequest(http.MethodGet, "/v1beta/test", nil)
+				req.Header.Set("x-goog-api-key", key.Key)
+				rec := httptest.NewRecorder()
+
+				router.ServeHTTP(rec, req)
+
+				require.Equal(t, tt.wantStatus, rec.Code, "run mode %s", runMode)
+			}
+		})
+	}
+}
+
 func TestApiKeyAuthWithSubscriptionGoogle_InsufficientBalance(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	group := &service.Group{ID: 32, Name: "gemini-balance", Platform: service.PlatformGemini, Status: service.StatusActive, Hydrated: true}
 	r := gin.New()
 	apiKeyService := newTestAPIKeyService(fakeAPIKeyRepo{
 		getByKey: func(ctx context.Context, key string) (*service.APIKey, error) {
 			return &service.APIKey{
-				ID:     1,
-				Key:    key,
-				Status: service.StatusActive,
+				ID:      1,
+				Key:     key,
+				GroupID: &group.ID,
+				Group:   group,
+				Status:  service.StatusActive,
 				User: &service.User{
 					ID:      123,
 					Status:  service.StatusActive,
@@ -488,12 +630,15 @@ func TestApiKeyAuthWithSubscriptionGoogle_TouchesLastUsedOnSuccess(t *testing.T)
 		Balance:     10,
 		Concurrency: 3,
 	}
+	group := &service.Group{ID: 33, Name: "gemini-touch", Platform: service.PlatformGemini, Status: service.StatusActive, Hydrated: true}
 	apiKey := &service.APIKey{
-		ID:     201,
-		UserID: user.ID,
-		Key:    "google-touch-ok",
-		Status: service.StatusActive,
-		User:   user,
+		ID:      201,
+		UserID:  user.ID,
+		Key:     "google-touch-ok",
+		GroupID: &group.ID,
+		Group:   group,
+		Status:  service.StatusActive,
+		User:    user,
 	}
 
 	var touchedID int64
@@ -537,12 +682,15 @@ func TestApiKeyAuthWithSubscriptionGoogle_TouchFailureDoesNotBlock(t *testing.T)
 		Balance:     10,
 		Concurrency: 3,
 	}
+	group := &service.Group{ID: 34, Name: "gemini-touch-failure", Platform: service.PlatformGemini, Status: service.StatusActive, Hydrated: true}
 	apiKey := &service.APIKey{
-		ID:     202,
-		UserID: user.ID,
-		Key:    "google-touch-fail",
-		Status: service.StatusActive,
-		User:   user,
+		ID:      202,
+		UserID:  user.ID,
+		Key:     "google-touch-fail",
+		GroupID: &group.ID,
+		Group:   group,
+		Status:  service.StatusActive,
+		User:    user,
 	}
 
 	touchCalls := 0
@@ -583,12 +731,15 @@ func TestApiKeyAuthWithSubscriptionGoogle_TouchesLastUsedInStandardMode(t *testi
 		Balance:     10,
 		Concurrency: 3,
 	}
+	group := &service.Group{ID: 35, Name: "gemini-touch-standard", Platform: service.PlatformGemini, Status: service.StatusActive, Hydrated: true}
 	apiKey := &service.APIKey{
-		ID:     203,
-		UserID: user.ID,
-		Key:    "google-touch-standard",
-		Status: service.StatusActive,
-		User:   user,
+		ID:      203,
+		UserID:  user.ID,
+		Key:     "google-touch-standard",
+		GroupID: &group.ID,
+		Group:   group,
+		Status:  service.StatusActive,
+		User:    user,
 	}
 
 	touchCalls := 0
@@ -636,7 +787,7 @@ func TestApiKeyAuthWithSubscriptionGoogle_SubscriptionLimitExceededReturns429(t 
 		ID:          999,
 		Role:        service.RoleUser,
 		Status:      service.StatusActive,
-		Balance:     0,
+		Balance:     10,
 		Concurrency: 3,
 	}
 	apiKey := &service.APIKey{

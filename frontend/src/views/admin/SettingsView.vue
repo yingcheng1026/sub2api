@@ -3831,11 +3831,17 @@
                   class="mt-2 border-t border-gray-200 pt-2 first:mt-0 first:border-0 first:pt-0 dark:border-dark-600"
                 >
                   <a
-                    :href="r.url"
+                    v-if="safeWebSearchResultUrl(r.url)"
+                    :href="safeWebSearchResultUrl(r.url)"
                     target="_blank"
+                    rel="noopener noreferrer"
                     class="text-sm font-medium text-blue-600 hover:underline dark:text-blue-400"
                     >{{ r.title }}</a
                   >
+                  <span
+                    v-else
+                    class="text-sm font-medium text-gray-600 dark:text-gray-300"
+                  >{{ r.title }}</span>
                   <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
                     {{ r.snippet }}
                   </p>
@@ -4194,20 +4200,6 @@
                 </p>
               </div>
 
-              <!-- Hide CCS Import Button -->
-              <div
-                class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
-              >
-                <div>
-                  <label class="font-medium text-gray-900 dark:text-white">{{
-                    t("admin.settings.site.hideCcsImportButton")
-                  }}</label>
-                  <p class="text-sm text-gray-500 dark:text-gray-400">
-                    {{ t("admin.settings.site.hideCcsImportButtonHint") }}
-                  </p>
-                </div>
-                <Toggle v-model="form.hide_ccs_import_button" />
-              </div>
             </div>
           </div>
 
@@ -6102,6 +6094,7 @@ import { extractApiErrorMessage, extractI18nErrorMessage } from "@/utils/apiErro
 import { useAppStore } from "@/stores";
 import { useAdminSettingsStore } from "@/stores/adminSettings";
 import { normalizeVisibleMethod } from "@/components/payment/paymentFlow";
+import { sanitizeUrl } from "@/utils/url";
 import {
   isRegistrationEmailSuffixDomainValid,
   normalizeRegistrationEmailSuffixDomain,
@@ -6116,6 +6109,10 @@ const isZhLocale = computed(() => locale.value.startsWith("zh"));
 
 function localText(zh: string, en: string): string {
   return isZhLocale.value ? zh : en;
+}
+
+function safeWebSearchResultUrl(value: string): string {
+  return sanitizeUrl(value, { httpsOnly: true });
 }
 
 const paymentGuideHref = computed(() =>

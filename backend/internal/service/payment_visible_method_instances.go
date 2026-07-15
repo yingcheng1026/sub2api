@@ -177,6 +177,60 @@ func (s *PaymentConfigService) resolveVisibleMethodSourceProviderKey(ctx context
 	return providerKey, nil
 }
 
+func (s *PaymentConfigService) visibleMethodEnabled(ctx context.Context, method string) (bool, error) {
+	key := visibleMethodEnabledSettingKey(method)
+	if key == "" {
+		return true, nil
+	}
+	if s == nil || s.settingRepo == nil {
+		return false, nil
+	}
+	value, err := s.settingRepo.GetValue(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get %s: %w", key, err)
+	}
+	return strings.EqualFold(strings.TrimSpace(value), "true"), nil
+}
+
+func (s *PaymentConfigService) validateCreateOrderPaymentMethodEnabled(
+	ctx context.Context,
+	cfg *PaymentConfig,
+	method string,
+) error {
+	method = NormalizeVisibleMethod(method)
+	if cfg == nil || method == "" {
+		return infraerrors.Forbidden("PAYMENT_METHOD_DISABLED", "payment method is disabled")
+	}
+
+	allowed := false
+	for _, enabledType := range cfg.EnabledTypes {
+		if NormalizeVisibleMethod(enabledType) == method {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return infraerrors.Forbidden("PAYMENT_METHOD_DISABLED", "payment method is disabled").
+			WithMetadata(map[string]string{"payment_type": method})
+	}
+
+	visibleEnabled, err := s.visibleMethodEnabled(ctx, method)
+	if err != nil {
+		return infraerrors.ServiceUnavailable(
+			"PAYMENT_METHOD_POLICY_UNAVAILABLE",
+			"payment method policy is unavailable",
+		).WithCause(err)
+	}
+	if !visibleEnabled {
+		return infraerrors.Forbidden("PAYMENT_METHOD_DISABLED", "payment method is disabled").
+			WithMetadata(map[string]string{"payment_type": method})
+	}
+	return nil
+}
+
 func (s *PaymentConfigService) resolveVisibleMethodProviderKey(
 	ctx context.Context,
 	method string,
@@ -216,6 +270,13 @@ func (s *PaymentConfigService) resolveEnabledVisibleMethodInstance(
 
 	method = NormalizeVisibleMethod(method)
 	if method != payment.TypeAlipay && method != payment.TypeWxpay {
+		return nil, nil
+	}
+	methodEnabled, err := s.visibleMethodEnabled(ctx, method)
+	if err != nil {
+		return nil, err
+	}
+	if !methodEnabled {
 		return nil, nil
 	}
 

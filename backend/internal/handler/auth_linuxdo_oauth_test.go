@@ -34,6 +34,24 @@ func TestSanitizeFrontendRedirectPath(t *testing.T) {
 	require.Equal(t, "", sanitizeFrontendRedirectPath(long))
 }
 
+func TestOAuthCookiesFailClosedToSecureInReleaseMode(t *testing.T) {
+	previousMode := gin.Mode()
+	gin.SetMode(gin.ReleaseMode)
+	t.Cleanup(func() { gin.SetMode(previousMode) })
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "http://relay.example/api/v1/auth/linuxdo", nil)
+
+	require.True(t, isRequestHTTPS(c), "release-mode OAuth cookies must remain Secure even on a misconfigured HTTP hop")
+	setCookie(c, linuxDoOAuthStateCookieName, "state", linuxDoOAuthCookieMaxAgeSec, isRequestHTTPS(c))
+	cookies := recorder.Result().Cookies()
+	require.Len(t, cookies, 1)
+	require.True(t, cookies[0].Secure)
+	require.True(t, cookies[0].HttpOnly)
+	require.Equal(t, http.SameSiteLaxMode, cookies[0].SameSite)
+}
+
 func TestBuildBearerAuthorization(t *testing.T) {
 	auth, err := buildBearerAuthorization("", "token123")
 	require.NoError(t, err)

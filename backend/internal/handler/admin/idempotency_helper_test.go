@@ -283,3 +283,65 @@ func TestExecuteAdminIdempotentJSONConcurrentRetryOnlyOneSideEffect(t *testing.T
 	require.Equal(t, "true", headers3.Get("X-Idempotency-Replayed"))
 	require.Equal(t, int32(1), executed.Load())
 }
+
+func TestExecuteAdminStrictIdempotentJSONPostCommitRunsAfterCommitAndOnReplay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newMemoryIdempotencyRepoStub()
+	service.SetDefaultIdempotencyCoordinator(service.NewIdempotencyCoordinator(repo, service.DefaultIdempotencyConfig()))
+	t.Cleanup(func() { service.SetDefaultIdempotencyCoordinator(nil) })
+
+	var events []string
+	router := gin.New()
+	router.POST("/strict", func(c *gin.Context) {
+		runInTransaction := func(ctx context.Context, execute func(context.Context) error) error {
+			events = append(events, "transaction_started")
+			if err := execute(ctx); err != nil {
+				return err
+			}
+			events = append(events, "transaction_committed")
+			return nil
+		}
+		executeAdminStrictIdempotentJSONWithPostCommit(
+			c,
+			"admin.subscriptions.extend",
+			map[string]any{"subscription_id": 7, "days": 1},
+			time.Hour,
+			runInTransaction,
+			func(context.Context) error {
+				events = append(events, "cache_invalidated")
+				return nil
+			},
+			func(context.Context) (any, error) {
+				events = append(events, "business_mutated")
+				return gin.H{"ok": true}, nil
+			},
+		)
+	})
+
+	call := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/strict", nil)
+		req.Header.Set("Idempotency-Key", "extend-post-commit")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := call()
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, []string{
+		"transaction_started",
+		"business_mutated",
+		"transaction_committed",
+		"cache_invalidated",
+	}, events)
+
+	events = nil
+	replay := call()
+	require.Equal(t, http.StatusOK, replay.Code)
+	require.Equal(t, "true", replay.Header().Get("X-Idempotency-Replayed"))
+	require.Equal(t, []string{
+		"transaction_started",
+		"transaction_committed",
+		"cache_invalidated",
+	}, events, "a replay must heal an interrupted post-commit cache eviction without re-running the mutation")
+}

@@ -168,7 +168,7 @@
                       type="button"
                       class="btn btn-secondary btn-xs"
                       :disabled="restoringId === record.id"
-                      @click="restoreBackup(record.id)"
+                      @click="openRestoreDialog(record.id)"
                     >
                       {{ restoringId === record.id ? t('common.loading') : t('admin.backup.actions.restore') }}
                     </button>
@@ -192,6 +192,50 @@
         </div>
       </div>
     </div>
+
+    <BaseDialog
+      :show="showRestoreDialog"
+      :title="t('admin.backup.actions.restore')"
+      width="narrow"
+      :close-on-escape="!restoreSubmitting"
+      @close="closeRestoreDialog"
+    >
+      <form class="space-y-4" @submit.prevent="submitRestore">
+        <p class="text-sm text-amber-700 dark:text-amber-300">
+          {{ t('admin.backup.actions.restoreConfirm') }}
+        </p>
+        <div>
+          <label for="backup-restore-password" class="input-label">
+            {{ t('admin.backup.actions.restorePasswordPrompt') }}
+          </label>
+          <input
+            id="backup-restore-password"
+            v-model="restorePassword"
+            data-test="backup-restore-password"
+            type="password"
+            autocomplete="current-password"
+            maxlength="256"
+            class="input w-full"
+            :disabled="restoreSubmitting"
+          />
+        </div>
+      </form>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <button type="button" class="btn btn-secondary" :disabled="restoreSubmitting" @click="closeRestoreDialog()">
+            {{ t('common.cancel') }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-danger"
+            :disabled="restoreSubmitting || !restorePassword"
+            @click="submitRestore"
+          >
+            {{ restoreSubmitting ? t('common.loading') : t('admin.backup.actions.restore') }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
 
     <!-- Cloudflare R2 Setup Guide Modal -->
     <teleport to="body">
@@ -283,6 +327,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api'
 import { useAppStore } from '@/stores'
+import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { BackupS3Config, BackupScheduleConfig, BackupRecord } from '@/api/admin/backup'
 
 const { t } = useI18n()
@@ -317,6 +362,10 @@ const loadingBackups = ref(false)
 const creatingBackup = ref(false)
 const restoringId = ref('')
 const manualExpireDays = ref(14)
+const showRestoreDialog = ref(false)
+const pendingRestoreId = ref('')
+const restorePassword = ref('')
+const restoreSubmitting = ref(false)
 
 // Polling
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null)
@@ -406,6 +455,7 @@ function handleVisibilityChange() {
   if (document.hidden) {
     stopPolling()
     stopRestorePolling()
+    closeRestoreDialog(true)
   } else {
     // 标签页恢复时刷新列表，检查是否仍有活跃操作
     loadBackups().then(() => {
@@ -546,11 +596,27 @@ async function downloadBackup(id: string) {
   }
 }
 
-async function restoreBackup(id: string) {
-  if (!window.confirm(t('admin.backup.actions.restoreConfirm'))) return
-  const password = window.prompt(t('admin.backup.actions.restorePasswordPrompt'))
-  if (!password) return
+function openRestoreDialog(id: string) {
+  pendingRestoreId.value = id
+  restorePassword.value = ''
+  showRestoreDialog.value = true
+}
+
+function closeRestoreDialog(force = false) {
+  if (restoreSubmitting.value && !force) return
+  showRestoreDialog.value = false
+  pendingRestoreId.value = ''
+  restorePassword.value = ''
+}
+
+async function submitRestore() {
+  const id = pendingRestoreId.value
+  const password = restorePassword.value
+  if (!id || !password || restoreSubmitting.value) return
+
+  restoreSubmitting.value = true
   restoringId.value = id
+  restorePassword.value = ''
   try {
     const record = await adminAPI.backup.restoreBackup(id, password)
     updateRecordInList(record)
@@ -562,6 +628,9 @@ async function restoreBackup(id: string) {
       appStore.showError(error?.message || t('errors.networkError'))
     }
     restoringId.value = ''
+  } finally {
+    restoreSubmitting.value = false
+    closeRestoreDialog(true)
   }
 }
 
@@ -623,6 +692,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopPolling()
   stopRestorePolling()
+  closeRestoreDialog(true)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>

@@ -20,7 +20,8 @@ var claudeCodeValidator = service.NewClaudeCodeValidator()
 
 const claudeCodeParsedRequestContextKey = "claude_code_parsed_request"
 
-// SetClaudeCodeClientContext 检查请求是否来自 Claude Code 客户端，并设置到 context 中
+// SetClaudeCodeClientContext records a downstream-controlled compatibility
+// shape for routing/UX only. It is not provider-client authentication.
 // 返回更新后的 context
 func SetClaudeCodeClientContext(c *gin.Context, body []byte, parsedReq *service.ParsedRequest) {
 	if c == nil || c.Request == nil {

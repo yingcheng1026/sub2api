@@ -105,6 +105,21 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestUsageLogRepositoryGetByIDForUserBindsOwnerInSQL(t *testing.T) {
+	db, mock := newSQLMock(t)
+	repo := &usageLogRepository{sql: db}
+
+	mock.ExpectQuery(`SELECT .* FROM usage_logs WHERE id = \$1 AND user_id = \$2`).
+		WithArgs(int64(41), int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	record, err := repo.GetByIDForUser(context.Background(), 41, 7)
+
+	require.Nil(t, record)
+	require.ErrorIs(t, err, service.ErrUsageLogNotFound)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUsageLogRepositoryCreate_PersistsServiceTier(t *testing.T) {
 	db, mock := newSQLMock(t)
 	repo := &usageLogRepository{sql: db}
@@ -276,6 +291,26 @@ func TestUsageLogRepositoryListWithFiltersRequestTypePriority(t *testing.T) {
 	require.Empty(t, logs)
 	require.NotNil(t, page)
 	require.Equal(t, int64(0), page.Total)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUsageLogRepositoryUserFilterDefaultsToFastPagination(t *testing.T) {
+	db, mock := newSQLMock(t)
+	repo := &usageLogRepository{sql: db}
+
+	mock.ExpectQuery("SELECT .* FROM usage_logs WHERE user_id = \\$1 ORDER BY id DESC LIMIT \\$2 OFFSET \\$3").
+		WithArgs(int64(42), 21, 0).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	logs, page, err := repo.ListWithFilters(
+		context.Background(),
+		pagination.PaginationParams{Page: 1, PageSize: 20},
+		usagestats.UsageLogFilters{UserID: 42},
+	)
+	require.NoError(t, err)
+	require.Empty(t, logs)
+	require.NotNil(t, page)
+	require.Zero(t, page.Total)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

@@ -9,6 +9,7 @@ type APIKeyAuthSnapshot struct {
 	UserID      int64                    `json:"user_id"`
 	GroupID     *int64                   `json:"group_id,omitempty"`
 	Name        string                   `json:"name"`
+	Purpose     string                   `json:"purpose"`
 	Status      string                   `json:"status"`
 	IPWhitelist []string                 `json:"ip_whitelist,omitempty"`
 	IPBlacklist []string                 `json:"ip_blacklist,omitempty"`
@@ -48,6 +49,11 @@ type APIKeyAuthUserSnapshot struct {
 	// RPMLimit 用户级每分钟请求数上限（0 = 不限制）；用于 billing_cache_service.checkRPM 兜底判断。
 	RPMLimit int `json:"rpm_limit"`
 
+	// AllowedGroups is required by wallet authorization. Keeping it in the
+	// snapshot lets operator grant/revoke invalidation take effect without
+	// falling back to trusting an API key's historical group_id.
+	AllowedGroups []int64 `json:"allowed_groups,omitempty"`
+
 	// UserGroupRPMOverride 该 API Key 对应的 (user, group) 专属 RPM 覆盖值。
 	// nil = 无 override（回退到 group/user 级）；0 = 不限流；>0 = 专属上限。
 	UserGroupRPMOverride *int `json:"user_group_rpm_override,omitempty"`
@@ -59,6 +65,7 @@ type APIKeyAuthGroupSnapshot struct {
 	Name                            string   `json:"name"`
 	Platform                        string   `json:"platform"`
 	Status                          string   `json:"status"`
+	IsExclusive                     bool     `json:"is_exclusive"`
 	SubscriptionType                string   `json:"subscription_type"`
 	RateMultiplier                  float64  `json:"rate_multiplier"`
 	DailyLimitUSD                   *float64 `json:"daily_limit_usd,omitempty"`
@@ -90,6 +97,11 @@ type APIKeyAuthGroupSnapshot struct {
 
 	// RPMLimit 分组级每分钟请求数上限（0 = 不限制）；用于 billing_cache_service.checkRPM 级联判断。
 	RPMLimit int `json:"rpm_limit"`
+
+	// UpdatedAt is the database-backed policy revision. Every admin group
+	// mutation advances it, so pricing, quota, routing, and authorization field
+	// changes cannot survive a failed Redis invalidation.
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // APIKeyAuthCacheEntry 缓存条目，支持负缓存

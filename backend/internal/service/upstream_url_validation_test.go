@@ -50,3 +50,24 @@ func TestValidateUpstreamBaseURLFormatHonorsHTTPPolicy(t *testing.T) {
 		t.Fatalf("expected http URL to pass when allow_insecure_http is true, got %v", err)
 	}
 }
+
+func TestValidateUpstreamBaseURLFormatRejectsPrivateHostsWithoutAllowlistMode(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{
+				Enabled:           false,
+				AllowPrivateHosts: false,
+			},
+		},
+	}
+	for _, raw := range []string{"https://localhost", "https://127.0.0.1", "https://169.254.169.254"} {
+		if _, err := validateUpstreamBaseURLFormat(raw, cfg); err == nil {
+			t.Fatalf("private upstream %q was accepted", raw)
+		}
+	}
+
+	cfg.Security.URLAllowlist.AllowPrivateHosts = true
+	if _, err := validateUpstreamBaseURLFormat("https://127.0.0.1", cfg); err != nil {
+		t.Fatalf("explicit private-host opt-in was not honored: %v", err)
+	}
+}

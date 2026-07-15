@@ -34,12 +34,14 @@ func TestApplyWeChatPaymentResumeClaims(t *testing.T) {
 	}
 
 	err := applyWeChatPaymentResumeClaims(&req, &service.WeChatPaymentResumeClaims{
+		UserID:      17,
+		JTI:         "nonce-17",
 		OpenID:      "openid-123",
 		PaymentType: payment.TypeWxpay,
 		Amount:      "12.50",
 		OrderType:   payment.OrderTypeSubscription,
 		PlanID:      7,
-	})
+	}, 17)
 	if err != nil {
 		t.Fatalf("applyWeChatPaymentResumeClaims returned error: %v", err)
 	}
@@ -55,6 +57,9 @@ func TestApplyWeChatPaymentResumeClaims(t *testing.T) {
 	if req.PlanID != 7 {
 		t.Fatalf("plan_id = %d, want 7", req.PlanID)
 	}
+	if req.ResumeTokenJTI != "nonce-17" || req.ResumeTokenUserID != 17 {
+		t.Fatalf("resume binding was not propagated: %+v", req)
+	}
 }
 
 func TestApplyWeChatPaymentResumeClaimsRejectsPaymentTypeMismatch(t *testing.T) {
@@ -65,20 +70,36 @@ func TestApplyWeChatPaymentResumeClaimsRejectsPaymentTypeMismatch(t *testing.T) 
 	}
 
 	err := applyWeChatPaymentResumeClaims(&req, &service.WeChatPaymentResumeClaims{
+		UserID:      17,
+		JTI:         "nonce-17",
 		OpenID:      "openid-123",
 		PaymentType: payment.TypeWxpay,
 		Amount:      "12.50",
 		OrderType:   payment.OrderTypeBalance,
-	})
+	}, 17)
 	if err == nil {
 		t.Fatal("applyWeChatPaymentResumeClaims should reject mismatched payment types")
 	}
 }
 
-func TestVerifyOrderPublicReturnsLegacyOrderState(t *testing.T) {
+func TestApplyWeChatPaymentResumeClaimsRejectsCrossUserReplay(t *testing.T) {
 	t.Parallel()
 
+	req := CreateOrderRequest{PaymentType: payment.TypeWxpay}
+	err := applyWeChatPaymentResumeClaims(&req, &service.WeChatPaymentResumeClaims{
+		UserID:      17,
+		JTI:         "nonce-17",
+		OpenID:      "openid-123",
+		PaymentType: payment.TypeWxpay,
+		Amount:      "12.50",
+		OrderType:   payment.OrderTypeBalance,
+	}, 18)
+	require.Error(t, err)
+}
+
+func TestVerifyOrderPublicRequiresSignedResumeTokenAndMinimizesResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", "0123456789abcdef0123456789abcdef")
 
 	db, err := sql.Open("sqlite", "file:payment_handler_public_verify?mode=memory&cache=shared")
 	require.NoError(t, err)
@@ -111,56 +132,80 @@ func TestVerifyOrderPublicReturnsLegacyOrderState(t *testing.T) {
 		SetPaymentTradeNo("trade-public-verify").
 		SetOrderType(payment.OrderTypeBalance).
 		SetStatus(service.OrderStatusPending).
+		SetRefundAmount(12.34).
+		SetRefundReason("sensitive-refund-reason").
 		SetExpiresAt(time.Now().Add(time.Hour)).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
 		Save(context.Background())
 	require.NoError(t, err)
 
-	paymentSvc := service.NewPaymentService(client, payment.NewRegistry(), nil, nil, nil, nil, nil, nil, nil)
-	h := NewPaymentHandler(paymentSvc, nil, nil)
+	resumeSvc := service.NewPaymentResumeService([]byte("0123456789abcdef0123456789abcdef"))
+	token, err := resumeSvc.CreateToken(service.ResumeTokenClaims{
+		OrderID:            order.ID,
+		UserID:             user.ID,
+		PaymentType:        payment.TypeAlipay,
+		CanonicalReturnURL: "https://app.example.com/payment/result",
+	})
+	require.NoError(t, err)
 
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(
+	configSvc := service.NewPaymentConfigService(client, nil, []byte("0123456789abcdef0123456789abcdef"))
+	paymentSvc := service.NewPaymentService(client, payment.NewRegistry(), nil, nil, nil, configSvc, nil, nil, nil)
+	h := NewPaymentHandler(paymentSvc, nil, nil, nil)
+
+	unsignedRecorder := httptest.NewRecorder()
+	unsignedCtx, _ := gin.CreateTestContext(unsignedRecorder)
+	unsignedCtx.Request = httptest.NewRequest(
 		http.MethodPost,
 		"/api/v1/payment/public/orders/verify",
 		bytes.NewBufferString(`{"out_trade_no":"legacy-order-no"}`),
 	)
-	ctx.Request.Header.Set("Content-Type", "application/json")
+	unsignedCtx.Request.Header.Set("Content-Type", "application/json")
 
-	h.VerifyOrderPublic(ctx)
+	h.VerifyOrderPublic(unsignedCtx)
+	require.Equal(t, http.StatusBadRequest, unsignedRecorder.Code)
+	require.NotContains(t, unsignedRecorder.Body.String(), "legacy-order-no")
+	require.NotContains(t, unsignedRecorder.Body.String(), "90.64")
+	require.NotContains(t, unsignedRecorder.Body.String(), "sensitive-refund-reason")
 
-	require.Equal(t, http.StatusOK, recorder.Code)
+	signedRecorder := httptest.NewRecorder()
+	signedCtx, _ := gin.CreateTestContext(signedRecorder)
+	signedCtx.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/payment/public/orders/verify",
+		bytes.NewBufferString(`{"resume_token":"`+token+`"}`),
+	)
+	signedCtx.Request.Header.Set("Content-Type", "application/json")
+
+	h.VerifyOrderPublic(signedCtx)
+	require.Equal(t, http.StatusOK, signedRecorder.Code)
 
 	var resp struct {
-		Code int `json:"code"`
-		Data struct {
-			ID           int64   `json:"id"`
-			OutTradeNo   string  `json:"out_trade_no"`
-			Amount       float64 `json:"amount"`
-			PayAmount    float64 `json:"pay_amount"`
-			FeeRate      float64 `json:"fee_rate"`
-			PaymentType  string  `json:"payment_type"`
-			OrderType    string  `json:"order_type"`
-			Status       string  `json:"status"`
-			RefundAmount float64 `json:"refund_amount"`
-			CreatedAt    string  `json:"created_at"`
-			ExpiresAt    string  `json:"expires_at"`
-		} `json:"data"`
+		Code int            `json:"code"`
+		Data map[string]any `json:"data"`
 	}
-	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.NoError(t, json.Unmarshal(signedRecorder.Body.Bytes(), &resp))
 	require.Equal(t, 0, resp.Code)
-	require.Equal(t, order.ID, resp.Data.ID)
-	require.Equal(t, "legacy-order-no", resp.Data.OutTradeNo)
-	require.Equal(t, 90.64, resp.Data.PayAmount)
-	require.Equal(t, 0.03, resp.Data.FeeRate)
-	require.Equal(t, payment.TypeAlipay, resp.Data.PaymentType)
-	require.Equal(t, payment.OrderTypeBalance, resp.Data.OrderType)
-	require.Equal(t, service.OrderStatusPending, resp.Data.Status)
-	require.Equal(t, 0.0, resp.Data.RefundAmount)
-	require.NotEmpty(t, resp.Data.CreatedAt)
-	require.NotEmpty(t, resp.Data.ExpiresAt)
+	require.Equal(t, float64(order.ID), resp.Data["id"])
+	require.Equal(t, "legacy-order-no", resp.Data["out_trade_no"])
+	require.Equal(t, 90.64, resp.Data["pay_amount"])
+	require.Equal(t, 0.03, resp.Data["fee_rate"])
+	require.Equal(t, payment.TypeAlipay, resp.Data["payment_type"])
+	require.Equal(t, payment.OrderTypeBalance, resp.Data["order_type"])
+	require.Equal(t, service.OrderStatusPending, resp.Data["status"])
+	require.Contains(t, resp.Data, "expires_at")
+	for _, forbidden := range []string{
+		"created_at",
+		"completed_at",
+		"refund_amount",
+		"refund_reason",
+		"refund_requested_at",
+		"refund_requested_by",
+		"refund_request_reason",
+		"plan_id",
+	} {
+		require.NotContains(t, resp.Data, forbidden)
+	}
 }
 
 func TestResolveOrderPublicByResumeTokenReturnsFrontendContractFields(t *testing.T) {
@@ -216,7 +261,7 @@ func TestResolveOrderPublicByResumeTokenReturnsFrontendContractFields(t *testing
 
 	configSvc := service.NewPaymentConfigService(client, nil, []byte("0123456789abcdef0123456789abcdef"))
 	paymentSvc := service.NewPaymentService(client, payment.NewRegistry(), nil, nil, nil, configSvc, nil, nil, nil)
-	h := NewPaymentHandler(paymentSvc, nil, nil)
+	h := NewPaymentHandler(paymentSvc, nil, nil, nil)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -245,9 +290,11 @@ func TestResolveOrderPublicByResumeTokenReturnsFrontendContractFields(t *testing
 	require.Equal(t, payment.TypeAlipay, resp.Data["payment_type"])
 	require.Equal(t, payment.OrderTypeBalance, resp.Data["order_type"])
 	require.Equal(t, service.OrderStatusPaid, resp.Data["status"])
-	require.Contains(t, resp.Data, "created_at")
 	require.Contains(t, resp.Data, "expires_at")
-	require.Contains(t, resp.Data, "refund_amount")
+	require.NotContains(t, resp.Data, "created_at")
+	require.NotContains(t, resp.Data, "refund_amount")
+	require.NotContains(t, resp.Data, "refund_reason")
+	require.NotContains(t, resp.Data, "plan_id")
 }
 
 func TestResolveOrderPublicByResumeTokenReturnsBadRequestForMismatchedToken(t *testing.T) {
@@ -303,7 +350,7 @@ func TestResolveOrderPublicByResumeTokenReturnsBadRequestForMismatchedToken(t *t
 
 	configSvc := service.NewPaymentConfigService(client, nil, []byte("0123456789abcdef0123456789abcdef"))
 	paymentSvc := service.NewPaymentService(client, payment.NewRegistry(), nil, nil, nil, configSvc, nil, nil, nil)
-	h := NewPaymentHandler(paymentSvc, nil, nil)
+	h := NewPaymentHandler(paymentSvc, nil, nil, nil)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -328,7 +375,7 @@ func TestResolveOrderPublicByResumeTokenReturnsBadRequestForMismatchedToken(t *t
 	require.Equal(t, "INVALID_RESUME_TOKEN", resp.Reason)
 }
 
-func TestVerifyOrderPublicRejectsBlankOutTradeNo(t *testing.T) {
+func TestVerifyOrderPublicRejectsBlankResumeToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db, err := sql.Open("sqlite", "file:payment_handler_public_verify_blank?mode=memory&cache=shared")
@@ -343,14 +390,14 @@ func TestVerifyOrderPublicRejectsBlankOutTradeNo(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	paymentSvc := service.NewPaymentService(client, payment.NewRegistry(), nil, nil, nil, nil, nil, nil, nil)
-	h := NewPaymentHandler(paymentSvc, nil, nil)
+	h := NewPaymentHandler(paymentSvc, nil, nil, nil)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(
 		http.MethodPost,
 		"/api/v1/payment/public/orders/verify",
-		bytes.NewBufferString(`{"out_trade_no":"   "}`),
+		bytes.NewBufferString(`{"resume_token":"   "}`),
 	)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 
@@ -364,5 +411,5 @@ func TestVerifyOrderPublicRejectsBlankOutTradeNo(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
 	require.Equal(t, http.StatusBadRequest, resp.Code)
-	require.Equal(t, "INVALID_OUT_TRADE_NO", resp.Reason)
+	require.Equal(t, "INVALID_RESUME_TOKEN", resp.Reason)
 }

@@ -148,6 +148,9 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 	if err := validateCursorAccountType(req.Platform, req.Type); err != nil {
 		return nil, err
 	}
+	if err := validateBedrockAccountCredentials(req.Type, req.Credentials); err != nil {
+		return nil, err
+	}
 
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
@@ -262,6 +265,9 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 
 	if req.Credentials != nil {
 		account.Credentials = *req.Credentials
+	}
+	if err := validateBedrockAccountCredentials(account.Type, account.Credentials); err != nil {
+		return nil, err
 	}
 
 	if req.Extra != nil {

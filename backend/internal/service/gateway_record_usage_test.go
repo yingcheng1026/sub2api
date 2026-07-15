@@ -17,7 +17,7 @@ import (
 func newGatewayRecordUsageServiceForTest(usageRepo UsageLogRepository, userRepo UserRepository, subRepo UserSubscriptionRepository) *GatewayService {
 	cfg := &config.Config{}
 	cfg.Default.RateMultiplier = 1.1
-	return NewGatewayService(
+	svc := NewGatewayService(
 		nil,
 		nil,
 		usageRepo,
@@ -34,7 +34,6 @@ func newGatewayRecordUsageServiceForTest(usageRepo UsageLogRepository, userRepo 
 		nil,
 		&BillingCacheService{},
 		nil,
-		nil,
 		&DeferredService{},
 		nil,
 		nil,
@@ -45,7 +44,12 @@ func newGatewayRecordUsageServiceForTest(usageRepo UsageLogRepository, userRepo 
 		nil,
 		nil,
 		nil,
+		nil,
+		nil,
+		nil,
 	)
+	svc.requireUsageBillingOutbox = false
+	return svc
 }
 
 func newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo UsageLogRepository, billingRepo UsageBillingRepository, userRepo UserRepository, subRepo UserSubscriptionRepository) *GatewayService {
@@ -436,7 +440,7 @@ func TestGatewayServiceRecordUsage_GeneratesRequestIDWhenAllSourcesMissing(t *te
 	require.Equal(t, billingRepo.lastCmd.RequestID, usageRepo.lastLog.RequestID)
 }
 
-func TestGatewayServiceRecordUsage_DroppedUsageLogDoesNotSyncFallback(t *testing.T) {
+func TestGatewayServiceRecordUsage_DroppedUsageLogFallsBackToSyncCreate(t *testing.T) {
 	usageRepo := &openAIRecordUsageBestEffortLogRepoStub{
 		bestEffortErr: MarkUsageLogCreateDropped(errors.New("usage log best-effort queue full")),
 	}
@@ -460,7 +464,8 @@ func TestGatewayServiceRecordUsage_DroppedUsageLogDoesNotSyncFallback(t *testing
 
 	require.NoError(t, err)
 	require.Equal(t, 1, usageRepo.bestEffortCalls)
-	require.Equal(t, 0, usageRepo.createCalls)
+	require.Equal(t, 1, usageRepo.createCalls)
+	require.NoError(t, usageRepo.lastCtxErr, "sync fallback must receive a live detached context")
 }
 
 func TestGatewayServiceRecordUsage_BillingErrorSkipsUsageLogWrite(t *testing.T) {
@@ -539,4 +544,85 @@ func TestGatewayServiceRecordUsage_ReasoningEffortNil(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, usageRepo.lastLog)
 	require.Nil(t, usageRepo.lastLog.ReasoningEffort)
+}
+
+func TestGatewayUsageBillingProducer_PersistsAllProviderSnapshotsBeforeWake(t *testing.T) {
+	tests := []struct {
+		name            string
+		inboundEndpoint string
+		model           string
+		longContext     bool
+		imageCount      int
+		imageSize       string
+	}{
+		{name: "anthropic messages", inboundEndpoint: "/v1/messages", model: "claude-sonnet-4"},
+		{name: "chat completions", inboundEndpoint: "/v1/chat/completions", model: "claude-sonnet-4"},
+		{name: "responses", inboundEndpoint: "/v1/responses", model: "claude-sonnet-4"},
+		{name: "gemini long context", inboundEndpoint: "/v1beta/models/gemini-3.1-pro:streamGenerateContent", model: "gemini-3.1-pro", longContext: true},
+		{name: "gemini image", inboundEndpoint: "/v1beta/models/gemini-3-pro-image-preview:generateContent", model: "gemini-3-pro-image-preview", imageCount: 1, imageSize: "2K"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usageRepo := &openAIRecordUsageLogRepoStub{}
+			billingRepo := &openAIRecordUsageBillingRepoStub{}
+			svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+			outbox := &openAIUsageOutboxRepoStub{}
+			wake := &openAIUsageOutboxWakeStub{}
+			svc.requireUsageBillingOutbox = true
+			svc.usageBillingOutboxRepo = outbox
+			svc.usageBillingOutboxWake = wake
+			svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+			groupID := int64(44)
+			result := &ForwardResult{
+				RequestID: "gateway-producer-" + tt.name,
+				Model:     tt.model, UpstreamModel: tt.model,
+				Usage: ClaudeUsage{InputTokens: 10, OutputTokens: 2}, Duration: time.Second,
+				ImageCount: tt.imageCount, ImageSize: tt.imageSize,
+			}
+			apiKey := &APIKey{ID: 11, Key: "sk-gateway-producer", GroupID: &groupID, Group: &Group{ID: groupID, RateMultiplier: 1}}
+			var err error
+			if tt.longContext {
+				err = svc.RecordUsageWithLongContext(context.Background(), &RecordUsageLongContextInput{
+					Result: result, APIKey: apiKey, User: &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeOAuth},
+					RequestPayloadHash: strings.Repeat("b", 64),
+					InboundEndpoint:    tt.inboundEndpoint, UpstreamEndpoint: tt.inboundEndpoint,
+					LongContextThreshold: 200000, LongContextMultiplier: 2,
+				})
+			} else {
+				err = svc.RecordUsage(context.Background(), &RecordUsageInput{
+					Result: result, APIKey: apiKey, User: &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeOAuth},
+					RequestPayloadHash: strings.Repeat("b", 64),
+					InboundEndpoint:    tt.inboundEndpoint, UpstreamEndpoint: tt.inboundEndpoint,
+				})
+			}
+
+			require.NoError(t, err)
+			require.Len(t, outbox.envelopes, 1)
+			require.Equal(t, 1, wake.calls)
+			require.Zero(t, billingRepo.calls, "producer must not apply billing before durable replay")
+			require.Zero(t, usageRepo.calls, "producer must not write usage before billing replay")
+			log := outbox.envelopes[0].UsageLog()
+			require.Equal(t, tt.model, *log.BillingModel)
+			require.NotEmpty(t, *log.PricingSource)
+			require.NotEmpty(t, *log.PricingRevision)
+			require.Len(t, *log.PricingHash, 64)
+			require.Equal(t, tt.inboundEndpoint, *log.InboundEndpoint)
+		})
+	}
+}
+
+func TestGatewayUsageBillingProducer_FailsClosedWithoutDurableOutbox(t *testing.T) {
+	svc := newGatewayRecordUsageServiceForTest(&openAIRecordUsageLogRepoStub{}, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+	svc.requireUsageBillingOutbox = true
+	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
+	groupID := int64(44)
+
+	err := svc.RecordUsage(context.Background(), &RecordUsageInput{
+		Result: &ForwardResult{RequestID: "gateway-no-outbox", Model: "claude-sonnet-4", Usage: ClaudeUsage{InputTokens: 1, OutputTokens: 1}, Duration: time.Second},
+		APIKey: &APIKey{ID: 11, Key: "sk-no-outbox", GroupID: &groupID, Group: &Group{ID: groupID, RateMultiplier: 1}},
+		User:   &User{ID: 22}, Account: &Account{ID: 33, Type: AccountTypeOAuth},
+	})
+
+	require.ErrorIs(t, err, ErrUsageBillingOutboxUnavailable)
 }

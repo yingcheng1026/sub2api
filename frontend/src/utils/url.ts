@@ -7,6 +7,7 @@
 type SanitizeOptions = {
   allowRelative?: boolean
   allowDataUrl?: boolean
+  httpsOnly?: boolean
 }
 
 export function sanitizeUrl(value: string, options: SanitizeOptions = {}): string {
@@ -34,6 +35,12 @@ export function sanitizeUrl(value: string, options: SanitizeOptions = {}): strin
     const parsed = new URL(trimmed)
     const protocol = parsed.protocol.toLowerCase()
     if (protocol !== 'http:' && protocol !== 'https:') {
+      return ''
+    }
+    if (options.httpsOnly && protocol !== 'https:') {
+      return ''
+    }
+    if (parsed.username || parsed.password) {
       return ''
     }
     return parsed.toString()

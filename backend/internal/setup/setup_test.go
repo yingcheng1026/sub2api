@@ -70,6 +70,19 @@ func TestSetupDefaultAdminConcurrency(t *testing.T) {
 	})
 }
 
+func TestAutoSetupRejectsMissingOrWeakAdminPasswordBeforeConnections(t *testing.T) {
+	for _, password := range []string{"", "short"} {
+		t.Run(password, func(t *testing.T) {
+			t.Setenv("ADMIN_PASSWORD", password)
+			t.Setenv("DATA_DIR", t.TempDir())
+			err := AutoSetupFromEnv()
+			if err == nil || !strings.Contains(err.Error(), "ADMIN_PASSWORD is required") {
+				t.Fatalf("AutoSetupFromEnv() error = %v, want ADMIN_PASSWORD validation error", err)
+			}
+		})
+	}
+}
+
 func TestWriteConfigFileKeepsDefaultUserConcurrency(t *testing.T) {
 	t.Setenv("RUN_MODE", "simple")
 	t.Setenv("DATA_DIR", t.TempDir())

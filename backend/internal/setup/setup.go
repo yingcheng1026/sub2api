@@ -385,14 +385,8 @@ func createAdminUser(cfg *SetupConfig) (bool, string, error) {
 		return false, decision.reason, nil
 	}
 
-	if strings.TrimSpace(cfg.Admin.Password) == "" {
-		password, genErr := generateSecret(16)
-		if genErr != nil {
-			return false, "", fmt.Errorf("failed to generate admin password: %w", genErr)
-		}
-		cfg.Admin.Password = password
-		fmt.Printf("Generated admin password (one-time): %s\n", cfg.Admin.Password)
-		fmt.Println("IMPORTANT: Save this password! It will not be shown again.")
+	if err := validatePassword(cfg.Admin.Password); err != nil {
+		return false, "", fmt.Errorf("invalid admin bootstrap password: %w", err)
 	}
 
 	admin := &service.User{
@@ -574,6 +568,9 @@ func AutoSetupFromEnv() error {
 			ExpireHour: getEnvIntOrDefault("JWT_EXPIRE_HOUR", 24),
 		},
 		Timezone: tz,
+	}
+	if err := validatePassword(cfg.Admin.Password); err != nil {
+		return fmt.Errorf("ADMIN_PASSWORD is required for auto setup: %w", err)
 	}
 
 	// Generate JWT secret if not provided

@@ -20,9 +20,9 @@ func TestYuanToFen(t *testing.T) {
 		{name: "one fen", input: "0.01", want: 1},
 		{name: "large amount", input: "99999.99", want: 9999999},
 
-		// Edge: zero
-		{name: "zero no decimal", input: "0", want: 0},
-		{name: "zero with decimal", input: "0.00", want: 0},
+		// Provider create/refund amounts must be strictly positive.
+		{name: "zero no decimal", input: "0", wantErr: true},
+		{name: "zero with decimal", input: "0.00", wantErr: true},
 
 		// IEEE 754 precision edge case: 1.15 * 100 = 114.99999... in float64
 		{name: "ieee754 precision 1.15", input: "1.15", want: 115},
@@ -42,9 +42,14 @@ func TestYuanToFen(t *testing.T) {
 		// Single decimal place
 		{name: "single decimal 1.5", input: "1.5", want: 150},
 
-		// Negative values
-		{name: "negative one yuan", input: "-1.00", want: -100},
-		{name: "negative with fen", input: "-10.50", want: -1050},
+		// Unsafe sign, scale and range inputs
+		{name: "negative one yuan", input: "-1.00", wantErr: true},
+		{name: "negative with fen", input: "-10.50", wantErr: true},
+		{name: "fractional fen", input: "0.009", wantErr: true},
+		{name: "three decimal places", input: "1.001", wantErr: true},
+		{name: "scientific notation", input: "1e2", wantErr: true},
+		{name: "int64 maximum fen", input: "92233720368547758.07", want: 9223372036854775807},
+		{name: "int64 overflow fen", input: "92233720368547758.08", wantErr: true},
 
 		// Invalid inputs
 		{name: "empty string", input: "", wantErr: true},

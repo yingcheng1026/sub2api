@@ -12,7 +12,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 9 // v9: added API Key name for audit logs
+const apiKeyAuthSnapshotVersion = 12 // v12: immutable API-key purpose is part of authorization
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -103,6 +103,9 @@ func (s *APIKeyService) StartAuthCacheInvalidationSubscriber(ctx context.Context
 }
 
 func (s *APIKeyService) authCacheKey(key string) string {
+	if s != nil && s.authCacheLocatorProvider != nil {
+		return s.authCacheLocatorProvider.APIKeyAuthCacheLocator(key)
+	}
 	return APIKeyAuthCacheLocator(key)
 }
 
@@ -211,6 +214,21 @@ func (s *APIKeyService) applyAuthCacheEntry(key string, entry *APIKeyAuthCacheEn
 	return s.snapshotToAPIKey(key, entry.Snapshot), true, nil
 }
 
+// validateCachedAuthSnapshot makes Redis/L1 invalidation an optimization rather
+// than an authorization boundary. A missing validator means the positive cache
+// entry is not trusted and the caller must reload it from the repository. A
+// database error is propagated so authentication fails closed.
+func (s *APIKeyService) validateCachedAuthSnapshot(ctx context.Context, cacheLocator string, snapshot *APIKeyAuthSnapshot) (bool, error) {
+	if snapshot == nil || s.authCacheSecurityValidator == nil {
+		return false, nil
+	}
+	valid, err := s.authCacheSecurityValidator.ValidateAuthCacheSnapshot(ctx, cacheLocator, snapshot)
+	if err != nil {
+		return false, fmt.Errorf("validate cached authorization state: %w", err)
+	}
+	return valid, nil
+}
+
 func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) *APIKeyAuthSnapshot {
 	if apiKey == nil || apiKey.User == nil {
 		return nil
@@ -221,6 +239,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 		UserID:      apiKey.UserID,
 		GroupID:     apiKey.GroupID,
 		Name:        apiKey.Name,
+		Purpose:     apiKey.Purpose,
 		Status:      apiKey.Status,
 		IPWhitelist: apiKey.IPWhitelist,
 		IPBlacklist: apiKey.IPBlacklist,
@@ -244,6 +263,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			BalanceNotifyExtraEmails:   apiKey.User.BalanceNotifyExtraEmails,
 			TotalRecharged:             apiKey.User.TotalRecharged,
 			RPMLimit:                   apiKey.User.RPMLimit,
+			AllowedGroups:              append([]int64(nil), apiKey.User.AllowedGroups...),
 		},
 	}
 
@@ -261,6 +281,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			Name:                            apiKey.Group.Name,
 			Platform:                        apiKey.Group.Platform,
 			Status:                          apiKey.Group.Status,
+			IsExclusive:                     apiKey.Group.IsExclusive,
 			SubscriptionType:                apiKey.Group.SubscriptionType,
 			RateMultiplier:                  apiKey.Group.RateMultiplier,
 			DailyLimitUSD:                   apiKey.Group.DailyLimitUSD,
@@ -283,6 +304,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			DefaultMappedModel:              apiKey.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     apiKey.Group.MessagesDispatchModelConfig,
 			RPMLimit:                        apiKey.Group.RPMLimit,
+			UpdatedAt:                       apiKey.Group.UpdatedAt,
 		}
 	}
 	return snapshot
@@ -297,7 +319,9 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 		UserID:      snapshot.UserID,
 		GroupID:     snapshot.GroupID,
 		Key:         key,
+		KeyHash:     s.authCacheKey(key),
 		Name:        snapshot.Name,
+		Purpose:     snapshot.Purpose,
 		Status:      snapshot.Status,
 		IPWhitelist: snapshot.IPWhitelist,
 		IPBlacklist: snapshot.IPBlacklist,
@@ -321,6 +345,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			BalanceNotifyExtraEmails:   snapshot.User.BalanceNotifyExtraEmails,
 			TotalRecharged:             snapshot.User.TotalRecharged,
 			RPMLimit:                   snapshot.User.RPMLimit,
+			AllowedGroups:              append([]int64(nil), snapshot.User.AllowedGroups...),
 			UserGroupRPMOverride:       snapshot.User.UserGroupRPMOverride,
 		},
 	}
@@ -331,6 +356,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			Platform:                        snapshot.Group.Platform,
 			Status:                          snapshot.Group.Status,
 			Hydrated:                        true,
+			IsExclusive:                     snapshot.Group.IsExclusive,
 			SubscriptionType:                snapshot.Group.SubscriptionType,
 			RateMultiplier:                  snapshot.Group.RateMultiplier,
 			DailyLimitUSD:                   snapshot.Group.DailyLimitUSD,
@@ -353,6 +379,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			DefaultMappedModel:              snapshot.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     snapshot.Group.MessagesDispatchModelConfig,
 			RPMLimit:                        snapshot.Group.RPMLimit,
+			UpdatedAt:                       snapshot.Group.UpdatedAt,
 		}
 	}
 	s.compileAPIKeyIPRules(apiKey)

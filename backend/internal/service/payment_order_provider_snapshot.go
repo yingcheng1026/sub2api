@@ -127,7 +127,7 @@ func expectedNotificationProviderKeyForOrder(registry *payment.Registry, order *
 }
 
 func validateProviderSnapshotMetadata(order *dbent.PaymentOrder, providerKey string, metadata map[string]string) error {
-	if order == nil || len(metadata) == 0 {
+	if order == nil {
 		return nil
 	}
 
@@ -186,6 +186,16 @@ func validateProviderSnapshotMetadata(order *dbent.PaymentOrder, providerKey str
 			}
 			if !strings.EqualFold(expected, actual) {
 				return fmt.Errorf("easypay pid mismatch: expected %s, got %s", expected, actual)
+			}
+		}
+	case payment.TypeStripe:
+		if expected := strings.ToUpper(strings.TrimSpace(snapshot.Currency)); expected != "" {
+			actual := strings.ToUpper(strings.TrimSpace(metadata["currency"]))
+			if actual == "" {
+				return fmt.Errorf("stripe currency missing")
+			}
+			if expected != actual {
+				return fmt.Errorf("stripe currency mismatch: expected %s, got %s", expected, actual)
 			}
 		}
 	}

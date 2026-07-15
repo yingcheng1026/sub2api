@@ -3,10 +3,15 @@ package service
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -30,12 +35,14 @@ const (
 )
 
 var (
-	ErrBackupS3NotConfigured = infraerrors.BadRequest("BACKUP_S3_NOT_CONFIGURED", "backup S3 storage is not configured")
-	ErrBackupNotFound        = infraerrors.NotFound("BACKUP_NOT_FOUND", "backup record not found")
-	ErrBackupInProgress      = infraerrors.Conflict("BACKUP_IN_PROGRESS", "a backup is already in progress")
-	ErrRestoreInProgress     = infraerrors.Conflict("RESTORE_IN_PROGRESS", "a restore is already in progress")
-	ErrBackupRecordsCorrupt  = infraerrors.InternalServer("BACKUP_RECORDS_CORRUPT", "backup records data is corrupted")
-	ErrBackupS3ConfigCorrupt = infraerrors.InternalServer("BACKUP_S3_CONFIG_CORRUPT", "backup S3 config data is corrupted")
+	ErrBackupS3NotConfigured          = infraerrors.BadRequest("BACKUP_S3_NOT_CONFIGURED", "backup S3 storage is not configured")
+	ErrBackupNotFound                 = infraerrors.NotFound("BACKUP_NOT_FOUND", "backup record not found")
+	ErrBackupInProgress               = infraerrors.Conflict("BACKUP_IN_PROGRESS", "a backup is already in progress")
+	ErrRestoreInProgress              = infraerrors.Conflict("RESTORE_IN_PROGRESS", "a restore is already in progress")
+	ErrBackupRecordsCorrupt           = infraerrors.InternalServer("BACKUP_RECORDS_CORRUPT", "backup records data is corrupted")
+	ErrBackupS3ConfigCorrupt          = infraerrors.InternalServer("BACKUP_S3_CONFIG_CORRUPT", "backup S3 config data is corrupted")
+	ErrBackupIntegrityMetadataMissing = infraerrors.BadRequest("BACKUP_INTEGRITY_METADATA_MISSING", "backup cannot be restored because integrity metadata is missing")
+	ErrBackupIntegrityMismatch        = infraerrors.BadRequest("BACKUP_INTEGRITY_MISMATCH", "backup integrity verification failed")
 )
 
 // ─── 接口定义 ───
@@ -92,6 +99,7 @@ type BackupRecord struct {
 	FileName      string `json:"file_name"`
 	S3Key         string `json:"s3_key"`
 	SizeBytes     int64  `json:"size_bytes"`
+	SHA256        string `json:"sha256,omitempty"`
 	TriggeredBy   string `json:"triggered_by"` // manual, scheduled
 	ErrorMsg      string `json:"error_message,omitempty"`
 	StartedAt     string `json:"started_at"`
@@ -252,13 +260,17 @@ func (s *BackupService) GetS3Config(ctx context.Context) (*BackupS3Config, error
 func (s *BackupService) UpdateS3Config(ctx context.Context, cfg BackupS3Config) (*BackupS3Config, error) {
 	// 如果没提供 secret，保留原有值
 	if cfg.SecretAccessKey == "" {
-		old, _ := s.loadS3Config(ctx)
+		old, err := s.loadS3Config(ctx)
+		if err != nil {
+			return nil, err
+		}
 		if old != nil {
 			cfg.SecretAccessKey = old.SecretAccessKey
 		}
-	} else {
-		// 加密 SecretAccessKey
-		encrypted, err := s.encryptor.Encrypt(cfg.SecretAccessKey)
+	}
+	if cfg.SecretAccessKey != "" {
+		// 新密钥和从旧配置解密出的保留密钥都必须在持久化前重新加密。
+		encrypted, err := EncryptForSecretDomain(s.encryptor, SecretDomainBackupS3, cfg.SecretAccessKey)
 		if err != nil {
 			return nil, fmt.Errorf("encrypt secret: %w", err)
 		}
@@ -286,8 +298,17 @@ func (s *BackupService) UpdateS3Config(ctx context.Context, cfg BackupS3Config) 
 func (s *BackupService) TestS3Connection(ctx context.Context, cfg BackupS3Config) error {
 	// 如果没提供 secret，用已保存的
 	if cfg.SecretAccessKey == "" {
-		old, _ := s.loadS3Config(ctx)
+		old, err := s.loadS3Config(ctx)
+		if err != nil {
+			return err
+		}
 		if old != nil {
+			if strings.TrimSpace(cfg.Endpoint) != strings.TrimSpace(old.Endpoint) || cfg.AccessKeyID != old.AccessKeyID {
+				return infraerrors.BadRequest(
+					"BACKUP_S3_SECRET_REENTRY_REQUIRED",
+					"secret_access_key must be provided when endpoint or access_key_id changes",
+				)
+			}
 			cfg.SecretAccessKey = old.SecretAccessKey
 		}
 	}
@@ -513,7 +534,8 @@ func (s *BackupService) CreateBackup(ctx context.Context, triggeredBy string, ex
 	}()
 
 	contentType := "application/gzip"
-	sizeBytes, err := objectStore.Upload(ctx, s3Key, pr, contentType)
+	compressedHash := sha256.New()
+	sizeBytes, err := objectStore.Upload(ctx, s3Key, io.TeeReader(pr, compressedHash), contentType)
 	if err != nil {
 		_ = pr.CloseWithError(err) // 确保 gzip goroutine 不会悬挂
 		gzErr := <-gzipDone        // 安全等待 gzip goroutine 完成
@@ -530,6 +552,7 @@ func (s *BackupService) CreateBackup(ctx context.Context, triggeredBy string, ex
 	<-gzipDone // 确保 gzip goroutine 已退出
 
 	record.SizeBytes = sizeBytes
+	record.SHA256 = hex.EncodeToString(compressedHash.Sum(nil))
 	record.Status = "completed"
 	record.FinishedAt = time.Now().Format(time.RFC3339)
 	if err := s.saveRecord(ctx, record); err != nil {
@@ -681,7 +704,8 @@ func (s *BackupService) executeBackup(record *BackupRecord, objectStore BackupOb
 	}()
 
 	contentType := "application/gzip"
-	sizeBytes, err := objectStore.Upload(ctx, record.S3Key, pr, contentType)
+	compressedHash := sha256.New()
+	sizeBytes, err := objectStore.Upload(ctx, record.S3Key, io.TeeReader(pr, compressedHash), contentType)
 	if err != nil {
 		_ = pr.CloseWithError(err) // 确保 gzip goroutine 不会悬挂
 		gzErr := <-gzipDone        // 安全等待 gzip goroutine 完成
@@ -699,6 +723,7 @@ func (s *BackupService) executeBackup(record *BackupRecord, objectStore BackupOb
 	<-gzipDone // 确保 gzip goroutine 已退出
 
 	record.SizeBytes = sizeBytes
+	record.SHA256 = hex.EncodeToString(compressedHash.Sum(nil))
 	record.Status = "completed"
 	record.Progress = ""
 	record.FinishedAt = time.Now().Format(time.RFC3339)
@@ -746,8 +771,14 @@ func (s *BackupService) RestoreBackup(ctx context.Context, backupID string) erro
 	}
 	defer func() { _ = body.Close() }()
 
-	// 流式解压 gzip -> psql（不将全部数据加载到内存）
-	gzReader, err := gzip.NewReader(body)
+	verified, err := stageVerifiedBackupObject(body, record)
+	if err != nil {
+		return err
+	}
+	defer closeAndRemoveVerifiedBackup(verified)
+
+	// 校验完成后再解压并启动 psql，避免在发现篡改前执行任何 SQL。
+	gzReader, err := gzip.NewReader(verified)
 	if err != nil {
 		return fmt.Errorf("gzip reader: %w", err)
 	}
@@ -844,7 +875,16 @@ func (s *BackupService) executeRestore(record *BackupRecord, objectStore BackupO
 	}
 	defer func() { _ = body.Close() }()
 
-	gzReader, err := gzip.NewReader(body)
+	verified, err := stageVerifiedBackupObject(body, record)
+	if err != nil {
+		record.RestoreStatus = "failed"
+		record.RestoreError = err.Error()
+		_ = s.saveRecord(context.Background(), record)
+		return
+	}
+	defer closeAndRemoveVerifiedBackup(verified)
+
+	gzReader, err := gzip.NewReader(verified)
 	if err != nil {
 		record.RestoreStatus = "failed"
 		record.RestoreError = fmt.Sprintf("gzip reader: %v", err)
@@ -865,6 +905,50 @@ func (s *BackupService) executeRestore(record *BackupRecord, objectStore BackupO
 	if err := s.saveRecord(context.Background(), record); err != nil {
 		logger.LegacyPrintf("service.backup", "[Backup] 保存恢复记录失败: %v", err)
 	}
+}
+
+func stageVerifiedBackupObject(body io.Reader, record *BackupRecord) (*os.File, error) {
+	if record == nil || record.SizeBytes <= 0 || record.SizeBytes == math.MaxInt64 || strings.TrimSpace(record.SHA256) == "" {
+		return nil, ErrBackupIntegrityMetadataMissing
+	}
+	expectedHash, err := hex.DecodeString(strings.TrimSpace(record.SHA256))
+	if err != nil || len(expectedHash) != sha256.Size {
+		return nil, ErrBackupIntegrityMetadataMissing
+	}
+
+	tmp, err := os.CreateTemp("", "sub2api-verified-backup-*.sql.gz")
+	if err != nil {
+		return nil, fmt.Errorf("create verified backup staging file: %w", err)
+	}
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}
+
+	hasher := sha256.New()
+	written, err := io.Copy(io.MultiWriter(tmp, hasher), io.LimitReader(body, record.SizeBytes+1))
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("stage backup for integrity verification: %w", err)
+	}
+	if written != record.SizeBytes || subtle.ConstantTimeCompare(hasher.Sum(nil), expectedHash) != 1 {
+		cleanup()
+		return nil, ErrBackupIntegrityMismatch
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("rewind verified backup: %w", err)
+	}
+	return tmp, nil
+}
+
+func closeAndRemoveVerifiedBackup(file *os.File) {
+	if file == nil {
+		return
+	}
+	name := file.Name()
+	_ = file.Close()
+	_ = os.Remove(name)
 }
 
 // ─── 备份记录管理 ───
@@ -969,13 +1053,11 @@ func (s *BackupService) loadS3Config(ctx context.Context) (*BackupS3Config, erro
 	}
 	// 解密 SecretAccessKey
 	if cfg.SecretAccessKey != "" {
-		decrypted, err := s.encryptor.Decrypt(cfg.SecretAccessKey)
+		decrypted, err := DecryptForSecretDomain(s.encryptor, SecretDomainBackupS3, cfg.SecretAccessKey)
 		if err != nil {
-			// 兼容未加密的旧数据：如果解密失败，保持原值
-			logger.LegacyPrintf("service.backup", "[Backup] S3 SecretAccessKey 解密失败（可能是旧的未加密数据）: %v", err)
-		} else {
-			cfg.SecretAccessKey = decrypted
+			return nil, fmt.Errorf("decrypt S3 secret after security migration: %w", err)
 		}
+		cfg.SecretAccessKey = decrypted
 	}
 	return &cfg, nil
 }

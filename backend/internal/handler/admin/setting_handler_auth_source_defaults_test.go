@@ -17,8 +17,9 @@ import (
 )
 
 type settingHandlerRepoStub struct {
-	values      map[string]string
-	lastUpdates map[string]string
+	values           map[string]string
+	lastUpdates      map[string]string
+	setMultipleCalls int
 }
 
 func (s *settingHandlerRepoStub) Get(ctx context.Context, key string) (*service.Setting, error) {
@@ -49,6 +50,7 @@ func (s *settingHandlerRepoStub) GetMultiple(ctx context.Context, keys []string)
 }
 
 func (s *settingHandlerRepoStub) SetMultiple(ctx context.Context, settings map[string]string) error {
+	s.setMultipleCalls++
 	s.lastUpdates = make(map[string]string, len(settings))
 	for key, value := range settings {
 		s.lastUpdates[key] = value
@@ -470,6 +472,95 @@ func TestSettingHandler_UpdateSettings_DoesNotPersistPartialSystemSettingsWhenAu
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Equal(t, "false", repo.values[service.SettingKeyRegistrationEnabled])
 	require.Equal(t, "9.5", repo.values[service.SettingKeyAuthSourceDefaultEmailBalance])
+}
+
+func TestSettingHandler_UpdateSettings_DoesNotPersistSystemSettingsWhenPaymentValidationFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &settingHandlerRepoStub{values: map[string]string{
+		service.SettingKeyRegistrationEnabled: "false",
+		service.SettingKeyPromoCodeEnabled:    "true",
+	}}
+	settingSvc := service.NewSettingService(repo, &config.Config{Default: config.DefaultConfig{UserConcurrency: 5}})
+	paymentSvc := service.NewPaymentConfigService(nil, repo, nil)
+	handler := NewSettingHandler(settingSvc, nil, nil, nil, paymentSvc, nil)
+
+	body := map[string]any{
+		"registration_enabled":                true,
+		"promo_code_enabled":                  true,
+		"payment_balance_recharge_multiplier": -1,
+	}
+	rawBody, err := json.Marshal(body)
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewReader(rawBody))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateSettings(ctx)
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Equal(t, "false", repo.values[service.SettingKeyRegistrationEnabled])
+	require.Zero(t, repo.setMultipleCalls)
+}
+
+func TestSettingHandler_UpdateSettings_DoesNotPersistSystemSettingsWhenFastPolicyValidationFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &settingHandlerRepoStub{values: map[string]string{
+		service.SettingKeyRegistrationEnabled: "false",
+		service.SettingKeyPromoCodeEnabled:    "true",
+	}}
+	settingSvc := service.NewSettingService(repo, &config.Config{Default: config.DefaultConfig{UserConcurrency: 5}})
+	handler := NewSettingHandler(settingSvc, nil, nil, nil, nil, nil)
+	body := map[string]any{
+		"registration_enabled": true,
+		"promo_code_enabled":   true,
+		"openai_fast_policy_settings": map[string]any{
+			"rules": []map[string]any{{"service_tier": "invalid", "action": "pass", "scope": "all"}},
+		},
+	}
+	rawBody, err := json.Marshal(body)
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewReader(rawBody))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateSettings(ctx)
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Equal(t, "false", repo.values[service.SettingKeyRegistrationEnabled])
+	require.Zero(t, repo.setMultipleCalls)
+}
+
+func TestSettingHandler_UpdateSettings_PersistsAllDomainsInOneBulkWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &settingHandlerRepoStub{values: map[string]string{
+		service.SettingKeyRegistrationEnabled: "false",
+		service.SettingKeyPromoCodeEnabled:    "true",
+	}}
+	settingSvc := service.NewSettingService(repo, &config.Config{Default: config.DefaultConfig{UserConcurrency: 5}})
+	paymentSvc := service.NewPaymentConfigService(nil, repo, nil)
+	handler := NewSettingHandler(settingSvc, nil, nil, nil, paymentSvc, nil)
+	body := map[string]any{
+		"registration_enabled":                true,
+		"promo_code_enabled":                  true,
+		"payment_balance_recharge_multiplier": 1.25,
+		"openai_fast_policy_settings":         map[string]any{"rules": []any{}},
+	}
+	rawBody, err := json.Marshal(body)
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewReader(rawBody))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateSettings(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, 1, repo.setMultipleCalls)
+	require.Equal(t, "true", repo.values[service.SettingKeyRegistrationEnabled])
+	require.Equal(t, "1.25", repo.values[service.SettingBalanceRechargeMult])
+	require.NotEmpty(t, repo.values[service.SettingKeyOpenAIFastPolicySettings])
 }
 
 func TestDiffSettings_IncludesAuthSourceDefaultsAndForceEmail(t *testing.T) {

@@ -21,8 +21,32 @@
           </div>
         </div>
 
+        <!-- Provider payment captured; fulfillment must finish before success. -->
+        <template v-if="fulfillmentPending">
+          <div class="card p-6 text-center">
+            <div class="flex flex-col items-center gap-3 py-4">
+              <div
+                v-if="fulfillmentFailed"
+                class="flex h-16 w-16 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30"
+              >
+                <Icon name="exclamationCircle" size="lg" class="text-amber-500" />
+              </div>
+              <div v-else class="h-10 w-10 animate-spin rounded-full border-4 border-primary-500 border-t-transparent"></div>
+              <p class="text-lg font-bold text-gray-900 dark:text-white">
+                {{ fulfillmentFailed ? t('payment.result.fulfillmentFailed') : t('payment.result.processing') }}
+              </p>
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                {{ fulfillmentFailed ? t('payment.result.fulfillmentFailedHint') : t('payment.result.processingHint') }}
+              </p>
+              <p class="text-xs text-gray-400 dark:text-gray-500">
+                {{ t('payment.orders.orderId') }} #{{ order?.id }}
+              </p>
+            </div>
+          </div>
+        </template>
+
         <!-- WeChat QR Code display -->
-        <template v-if="wechatQrUrl">
+        <template v-else-if="wechatQrUrl">
           <div class="card p-6">
             <div class="flex flex-col items-center space-y-4">
               <p class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('payment.qr.scanWxpay') }}</p>
@@ -101,6 +125,15 @@ import { usePaymentStore } from '@/stores/payment'
 import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { isMobileDevice } from '@/utils/device'
+import {
+  PAYMENT_RECOVERY_SESSION_STORAGE_KEY,
+  isPaymentCompleted,
+  isPaymentFulfillmentFailed,
+  isPaymentFulfillmentPending,
+  isPaymentLateSettlementRecoverable,
+  isPaymentTerminalFailure,
+  readPaymentRecoverySnapshot,
+} from '@/components/payment/paymentFlow'
 import type { PaymentOrder } from '@/types/payment'
 import type { Stripe, StripeElements } from '@stripe/stripe-js'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -124,25 +157,80 @@ const order = ref<PaymentOrder | null>(null)
 const wechatQrUrl = ref('')
 const redirecting = ref(false)
 const showPaymentElement = ref(false)
+const latestOrderStatus = ref<string | null>(null)
+const latestOrderPaidAt = ref<string | null>(null)
+
+const fulfillmentPending = computed(() => isPaymentFulfillmentPending(
+  latestOrderStatus.value,
+  latestOrderPaidAt.value
+))
+const fulfillmentFailed = computed(() => isPaymentFulfillmentFailed(
+  latestOrderStatus.value,
+  latestOrderPaidAt.value
+))
 
 let stripeInstance: Stripe | null = null
 let elementsInstance: StripeElements | null = null
 let redirectTimer: ReturnType<typeof setTimeout> | null = null
+let pollRequest: Promise<void> | null = null
+let pollingSettled = false
+let disposed = false
 
 onMounted(async () => {
   const orderId = Number(route.query.order_id)
-  const clientSecret = String(route.query.client_secret || '')
   const method = String(route.query.method || '')
 
-  if (!orderId || !clientSecret) {
+  if (!orderId) {
     loading.value = false
     initError.value = t('payment.stripeMissingParams')
     return
   }
 
+  const recovery = readPaymentRecoverySnapshot(
+    window.sessionStorage.getItem(PAYMENT_RECOVERY_SESSION_STORAGE_KEY),
+    { orderId },
+  )
+  if (!recovery || recovery.orderId !== orderId || !recovery.clientSecret) {
+    loading.value = false
+    initError.value = t('payment.stripeInvalidSession')
+    return
+  }
+  const clientSecret = recovery.clientSecret
+
+  // Strip legacy links that may still carry a secret. New launch URLs contain
+  // only the order identifier and method; the secret is recovered in-memory
+  // from the order-bound session snapshot above.
+  if (route.query.client_secret) {
+    const query = { ...route.query }
+    delete query.client_secret
+    await router.replace({ query })
+  }
+
   try {
     const res = await paymentAPI.getOrder(orderId)
     order.value = res.data
+    latestOrderStatus.value = res.data.status
+    latestOrderPaidAt.value = res.data.paid_at || null
+
+    if (isPaymentCompleted(res.data.status)) {
+      stripeSuccess.value = true
+      return
+    }
+    if (
+      isPaymentFulfillmentPending(res.data.status, res.data.paid_at)
+      || isPaymentLateSettlementRecoverable(
+        res.data.status,
+        res.data.paid_at,
+        res.data.expires_at,
+      )
+    ) {
+      startPolling()
+      return
+    }
+    if (isPaymentTerminalFailure(res.data.status, res.data.paid_at)) {
+      stripeError.value = t('payment.result.failed')
+      return
+    }
 
     await paymentStore.fetchConfig()
     const publishableKey = paymentStore.config?.stripe_publishable_key
@@ -174,6 +262,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
   if (redirectTimer) clearTimeout(redirectTimer)
 })
 
@@ -207,8 +296,7 @@ async function confirmWechatPay(stripe: Stripe, clientSecret: string) {
     // Poll for completion
     startPolling()
   } else if (paymentIntent?.status === 'succeeded') {
-    stripeSuccess.value = true
-    scheduleClose()
+    startPolling()
   } else {
     stripeError.value = t('payment.result.failed')
   }
@@ -244,8 +332,9 @@ async function handleGenericPay() {
     if (error) {
       stripeError.value = error.message || t('payment.result.failed')
     } else {
-      stripeSuccess.value = true
-      scheduleClose()
+      showPaymentElement.value = false
+      redirecting.value = true
+      startPolling()
     }
   } catch (err: unknown) {
     stripeError.value = extractI18nErrorMessage(err, t, 'payment.errors', t('payment.result.failed'))
@@ -258,17 +347,47 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function startPolling() {
   const orderId = Number(route.query.order_id)
-  if (!orderId) return
-  pollTimer = setInterval(async () => {
-    const o = await paymentStore.pollOrderStatus(orderId)
-    if (!o) return
-    if (o.status === 'COMPLETED' || o.status === 'PAID') {
+  if (!orderId || pollTimer || pollingSettled) return
+  if (!wechatQrUrl.value) redirecting.value = true
+  pollTimer = setInterval(() => { void pollStatusOnce(orderId) }, 3000)
+}
+
+async function pollStatusOnce(orderId: number): Promise<void> {
+  if (pollRequest || pollingSettled || disposed) return pollRequest ?? Promise.resolve()
+
+  pollRequest = (async () => {
+    const nextOrder = await paymentStore.pollOrderStatus(orderId)
+    if (!nextOrder || disposed || pollingSettled) return
+    latestOrderStatus.value = nextOrder.status
+    latestOrderPaidAt.value = nextOrder.paid_at || null
+    if (isPaymentCompleted(nextOrder.status)) {
+      pollingSettled = true
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+      redirecting.value = false
       stripeSuccess.value = true
       wechatQrUrl.value = ''
       scheduleClose()
+    } else if (
+      isPaymentTerminalFailure(nextOrder.status, nextOrder.paid_at)
+      && !isPaymentLateSettlementRecoverable(
+        nextOrder.status,
+        nextOrder.paid_at,
+        nextOrder.expires_at,
+      )
+    ) {
+      pollingSettled = true
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+      redirecting.value = false
+      wechatQrUrl.value = ''
+      stripeError.value = t('payment.result.failed')
     }
-  }, 3000)
+  })()
+
+  try {
+    await pollRequest
+  } finally {
+    pollRequest = null
+  }
 }
 
 function scheduleClose() {

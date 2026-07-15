@@ -44,8 +44,9 @@ func TestDeductUsageBillingWallet_HappyPath(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestDeductUsageBillingWallet_Insufficient 余额不足时不扣款也不落 ledger，
-// 仅返回 insufficient=true 由调用方决定后续动作。
+// TestDeductUsageBillingWallet_Insufficient 余额不足发生在上游响应之后时，
+// 仍须完整记账并让余额进入负数债务；否则原余额保持正数会让后续请求反复
+// 通过预检，形成无限免费调用。
 func TestDeductUsageBillingWallet_Insufficient(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
@@ -55,6 +56,12 @@ func TestDeductUsageBillingWallet_Insufficient(t *testing.T) {
 	mock.ExpectQuery("SELECT wallet_balance_usd FROM user_subscriptions").
 		WithArgs(int64(42), false).
 		WillReturnRows(sqlmock.NewRows([]string{"wallet_balance_usd"}).AddRow(0.5))
+	mock.ExpectExec("UPDATE user_subscriptions").
+		WithArgs(-0.5, int64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO subscription_wallet_ledger").
+		WithArgs(int64(42), -1.0, -0.5, sql.NullString{}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -63,7 +70,7 @@ func TestDeductUsageBillingWallet_Insufficient(t *testing.T) {
 	balance, insufficient, err := deductUsageBillingWallet(context.Background(), tx, 42, 1.0, false)
 	require.NoError(t, err)
 	require.True(t, insufficient)
-	require.InDelta(t, 0.5, balance, 0.0001)
+	require.InDelta(t, -0.5, balance, 0.0001)
 
 	require.NoError(t, tx.Commit())
 	require.NoError(t, mock.ExpectationsWereMet())

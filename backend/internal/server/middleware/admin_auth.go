@@ -30,13 +30,12 @@ func adminAuth(
 	settingService *service.SettingService,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// WebSocket upgrade requests cannot set Authorization headers in browsers.
-		// For admin WebSocket endpoints (e.g. Ops realtime), allow passing the JWT via
-		// Sec-WebSocket-Protocol (subprotocol list) using a prefixed token item:
-		//   Sec-WebSocket-Protocol: sub2api-admin, jwt.<token>
+		// Browser WebSocket APIs cannot set Authorization headers. Accept only a
+		// short-lived, purpose-bound ticket here; ordinary admin JWTs are explicitly
+		// not valid WebSocket subprotocol credentials.
 		if isWebSocketUpgradeRequest(c) {
-			if token := extractJWTFromWebSocketSubprotocol(c); token != "" {
-				if !validateJWTForAdmin(c, token, authService, userService) {
+			if ticket := extractAdminWSTicketFromSubprotocol(c); ticket != "" {
+				if !validateAdminWSTicketForAdmin(c, ticket, authService, userService) {
 					return
 				}
 				c.Next()
@@ -92,7 +91,7 @@ func isWebSocketUpgradeRequest(c *gin.Context) bool {
 	return strings.Contains(connection, "upgrade")
 }
 
-func extractJWTFromWebSocketSubprotocol(c *gin.Context) string {
+func extractAdminWSTicketFromSubprotocol(c *gin.Context) string {
 	if c == nil {
 		return ""
 	}
@@ -101,18 +100,58 @@ func extractJWTFromWebSocketSubprotocol(c *gin.Context) string {
 		return ""
 	}
 
-	// The header is a comma-separated list of tokens. We reserve the prefix "jwt."
-	// for carrying the admin JWT.
+	// Only the domain-specific ticket prefix is accepted. Legacy
+	// jwt.<access-token> values are deliberately ignored.
 	for _, part := range strings.Split(raw, ",") {
 		p := strings.TrimSpace(part)
-		if strings.HasPrefix(p, "jwt.") {
-			token := strings.TrimSpace(strings.TrimPrefix(p, "jwt."))
+		if strings.HasPrefix(p, "ticket.") {
+			token := strings.TrimSpace(strings.TrimPrefix(p, "ticket."))
 			if token != "" {
 				return token
 			}
 		}
 	}
 	return ""
+}
+
+func validateAdminWSTicketForAdmin(
+	c *gin.Context,
+	ticket string,
+	authService *service.AuthService,
+	userService *service.UserService,
+) bool {
+	claims, err := authService.ValidateAdminOpsWSTicket(ticket)
+	if err != nil {
+		if errors.Is(err, service.ErrTokenExpired) {
+			AbortWithError(c, 401, "TICKET_EXPIRED", "WebSocket ticket has expired")
+			return false
+		}
+		AbortWithError(c, 401, "INVALID_TICKET", "Invalid WebSocket ticket")
+		return false
+	}
+
+	user, err := userService.GetByID(c.Request.Context(), claims.UserID)
+	if err != nil {
+		AbortWithError(c, 401, "USER_NOT_FOUND", "User not found")
+		return false
+	}
+	if !user.IsActive() {
+		AbortWithError(c, 401, "USER_INACTIVE", "User account is not active")
+		return false
+	}
+	if claims.TokenVersion != user.TokenVersion {
+		AbortWithError(c, 401, "TOKEN_REVOKED", "Token has been revoked (password changed)")
+		return false
+	}
+	if !user.IsAdmin() {
+		AbortWithError(c, 403, "FORBIDDEN", "Admin access required")
+		return false
+	}
+
+	c.Set(string(ContextKeyUser), AuthSubject{UserID: user.ID, Concurrency: user.Concurrency})
+	c.Set(string(ContextKeyUserRole), user.Role)
+	c.Set("auth_method", "admin_ws_ticket")
+	return true
 }
 
 // validateAdminAPIKey 验证管理员 API Key

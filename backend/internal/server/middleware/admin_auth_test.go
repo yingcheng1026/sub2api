@@ -23,12 +23,13 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 	authService := service.NewAuthService(nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, nil, nil)
 
 	admin := &service.User{
-		ID:           1,
-		Email:        "admin@example.com",
-		Role:         service.RoleAdmin,
-		Status:       service.StatusActive,
-		TokenVersion: 2,
-		Concurrency:  1,
+		ID:                   1,
+		Email:                "admin@example.com",
+		Role:                 service.RoleAdmin,
+		Status:               service.StatusActive,
+		TokenVersion:         2,
+		TokenVersionResolved: true,
+		Concurrency:          1,
 	}
 
 	userRepo := &stubUserRepo{
@@ -50,10 +51,11 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 
 	t.Run("token_version_mismatch_rejected", func(t *testing.T) {
 		token, err := authService.GenerateToken(&service.User{
-			ID:           admin.ID,
-			Email:        admin.Email,
-			Role:         admin.Role,
-			TokenVersion: admin.TokenVersion - 1,
+			ID:                   admin.ID,
+			Email:                admin.Email,
+			Role:                 admin.Role,
+			TokenVersion:         admin.TokenVersion - 1,
+			TokenVersionResolved: true,
 		})
 		require.NoError(t, err)
 
@@ -68,10 +70,11 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 
 	t.Run("token_version_match_allows", func(t *testing.T) {
 		token, err := authService.GenerateToken(&service.User{
-			ID:           admin.ID,
-			Email:        admin.Email,
-			Role:         admin.Role,
-			TokenVersion: admin.TokenVersion,
+			ID:                   admin.ID,
+			Email:                admin.Email,
+			Role:                 admin.Role,
+			TokenVersion:         admin.TokenVersion,
+			TokenVersionResolved: true,
 		})
 		require.NoError(t, err)
 
@@ -83,13 +86,8 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 		require.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("websocket_token_version_mismatch_rejected", func(t *testing.T) {
-		token, err := authService.GenerateToken(&service.User{
-			ID:           admin.ID,
-			Email:        admin.Email,
-			Role:         admin.Role,
-			TokenVersion: admin.TokenVersion - 1,
-		})
+	t.Run("websocket_legacy_access_token_subprotocol_rejected", func(t *testing.T) {
+		token, err := authService.GenerateToken(admin)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
@@ -100,15 +98,17 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		require.Equal(t, http.StatusUnauthorized, w.Code)
-		require.Contains(t, w.Body.String(), "TOKEN_REVOKED")
+		require.Contains(t, w.Body.String(), "UNAUTHORIZED")
 	})
 
-	t.Run("websocket_token_version_match_allows", func(t *testing.T) {
-		token, err := authService.GenerateToken(&service.User{
-			ID:           admin.ID,
-			Email:        admin.Email,
-			Role:         admin.Role,
-			TokenVersion: admin.TokenVersion,
+	t.Run("websocket_ticket_token_version_mismatch_rejected", func(t *testing.T) {
+		ticket, _, err := authService.GenerateAdminOpsWSTicket(&service.User{
+			ID:                   admin.ID,
+			Email:                admin.Email,
+			Role:                 admin.Role,
+			Status:               admin.Status,
+			TokenVersion:         admin.TokenVersion - 1,
+			TokenVersionResolved: true,
 		})
 		require.NoError(t, err)
 
@@ -116,7 +116,22 @@ func TestAdminAuthJWTValidatesTokenVersion(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/t", nil)
 		req.Header.Set("Upgrade", "websocket")
 		req.Header.Set("Connection", "Upgrade")
-		req.Header.Set("Sec-WebSocket-Protocol", "sub2api-admin, jwt."+token)
+		req.Header.Set("Sec-WebSocket-Protocol", "sub2api-admin, ticket."+ticket)
+		router.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusUnauthorized, w.Code)
+		require.Contains(t, w.Body.String(), "TOKEN_REVOKED")
+	})
+
+	t.Run("websocket_ticket_token_version_match_allows", func(t *testing.T) {
+		ticket, _, err := authService.GenerateAdminOpsWSTicket(admin)
+		require.NoError(t, err)
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/t", nil)
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Sec-WebSocket-Protocol", "sub2api-admin, ticket."+ticket)
 		router.ServeHTTP(w, req)
 
 		require.Equal(t, http.StatusOK, w.Code)

@@ -9,15 +9,21 @@ import (
 )
 
 type fakeWalletRepo struct {
-	deductCalls  []WalletDeductCommand
-	adjustCalls  []WalletAdjustCommand
-	topupCalls   []WalletTopupCommand
-	deductResult WalletLedgerEntry
-	deductErr    error
-	adjustResult WalletLedgerEntry
-	adjustErr    error
-	topupResult  WalletLedgerEntry
-	topupErr     error
+	deductCalls     []WalletDeductCommand
+	activationCalls []WalletActivationCommand
+	adjustCalls     []WalletAdjustCommand
+	topupCalls      []WalletTopupCommand
+	deductResult    WalletLedgerEntry
+	deductErr       error
+	adjustResult    WalletLedgerEntry
+	adjustErr       error
+	topupResult     WalletLedgerEntry
+	topupErr        error
+}
+
+func (f *fakeWalletRepo) RecordActivation(_ context.Context, cmd WalletActivationCommand) (WalletLedgerEntry, error) {
+	f.activationCalls = append(f.activationCalls, cmd)
+	return f.adjustResult, f.adjustErr
 }
 
 func (f *fakeWalletRepo) Deduct(_ context.Context, cmd WalletDeductCommand) (WalletLedgerEntry, error) {
@@ -86,10 +92,10 @@ func TestWalletService_Activate_WritesActivationReason(t *testing.T) {
 	entry, err := svc.Activate(context.Background(), 1, 1500, &op, "  initial recharge  ")
 	require.NoError(t, err)
 	require.Equal(t, int64(11), entry.ID)
-	require.Len(t, repo.adjustCalls, 1)
-	got := repo.adjustCalls[0]
-	require.Equal(t, "activation", got.Reason)
-	require.Equal(t, 1500.0, got.DeltaUSD)
+	require.Empty(t, repo.adjustCalls, "activation must not add the initial balance a second time")
+	require.Len(t, repo.activationCalls, 1)
+	got := repo.activationCalls[0]
+	require.Equal(t, 1500.0, got.InitialUSD)
 	require.Equal(t, "initial recharge", got.Notes, "notes must be trimmed")
 }
 
@@ -98,7 +104,7 @@ func TestWalletService_Activate_RejectsNonPositive(t *testing.T) {
 	svc := NewWalletService(repo)
 	_, err := svc.Activate(context.Background(), 1, 0, nil, "")
 	require.ErrorIs(t, err, ErrWalletNegativeDelta)
-	require.Empty(t, repo.adjustCalls)
+	require.Empty(t, repo.activationCalls)
 }
 
 func TestWalletService_Adjust_RejectsInvalidReason(t *testing.T) {
@@ -111,6 +117,26 @@ func TestWalletService_Adjust_RejectsInvalidReason(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrWalletNegativeDelta)
 	require.Empty(t, repo.adjustCalls)
+}
+
+func TestWalletService_Adjust_RejectsLifecycleOwnedReasons(t *testing.T) {
+	for _, reason := range []string{
+		WalletLedgerReasonActivation,
+		WalletLedgerReasonUsage,
+		WalletLedgerReasonTopup,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			repo := &fakeWalletRepo{}
+			svc := NewWalletService(repo)
+			_, err := svc.Adjust(context.Background(), WalletAdjustCommand{
+				SubscriptionID: 1,
+				DeltaUSD:       5,
+				Reason:         reason,
+			})
+			require.ErrorIs(t, err, ErrWalletNegativeDelta)
+			require.Empty(t, repo.adjustCalls)
+		})
+	}
 }
 
 func TestWalletService_Adjust_RejectsZeroDelta(t *testing.T) {

@@ -15,7 +15,8 @@ import (
 func TestSchedulerCacheSnapshotUsesSlimMetadataButKeepsFullAccount(t *testing.T) {
 	ctx := context.Background()
 	rdb := testRedis(t)
-	cache := NewSchedulerCache(rdb)
+	cache, err := NewSchedulerCache(rdb, newDomainMigrationTestEncryptor(t))
+	require.NoError(t, err)
 
 	bucket := service.SchedulerBucket{GroupID: 2, Platform: service.PlatformGemini, Mode: service.SchedulerModeSingle}
 	now := time.Now().UTC().Truncate(time.Second)
@@ -69,6 +70,16 @@ func TestSchedulerCacheSnapshotUsesSlimMetadataButKeepsFullAccount(t *testing.T)
 
 	require.NoError(t, cache.SetSnapshot(ctx, bucket, []service.Account{account}))
 
+	storedFull, err := rdb.Get(ctx, schedulerAccountKey("101")).Result()
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(storedFull, secretDomainCiphertextPrefix))
+	require.NotContains(t, storedFull, "secret-access-token")
+	require.NotContains(t, storedFull, "gemini-api-key")
+	storedMetadata, err := rdb.Get(ctx, schedulerAccountMetaKey("101")).Result()
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(storedMetadata, secretDomainCiphertextPrefix))
+	require.NotContains(t, storedMetadata, "gemini-api-key")
+
 	snapshot, hit, err := cache.GetSnapshot(ctx, bucket)
 	require.NoError(t, err)
 	require.True(t, hit)
@@ -76,7 +87,8 @@ func TestSchedulerCacheSnapshotUsesSlimMetadataButKeepsFullAccount(t *testing.T)
 
 	got := snapshot[0]
 	require.NotNil(t, got)
-	require.Equal(t, "gemini-api-key", got.GetCredential("api_key"))
+	require.Empty(t, got.GetCredential("api_key"))
+	require.Equal(t, true, got.Credentials[service.SchedulerMetadataAPIKeyConfigured])
 	require.Equal(t, "proj-1", got.GetCredential("project_id"))
 	require.Equal(t, "ai_studio", got.GetCredential("oauth_type"))
 	require.NotEmpty(t, got.GetModelMapping())
@@ -101,4 +113,37 @@ func TestSchedulerCacheSnapshotUsesSlimMetadataButKeepsFullAccount(t *testing.T)
 	require.Equal(t, strings.Repeat("x", 4096), full.GetCredential("huge_blob"))
 	require.Len(t, full.AccountGroups, 1)
 	require.NotNil(t, full.AccountGroups[0].Group)
+}
+
+func TestPurgeLegacySchedulerCacheSecretsRemovesOnlyPlaintextNamespace(t *testing.T) {
+	ctx := context.Background()
+	rdb := testRedis(t)
+
+	require.NoError(t, rdb.Set(ctx, "sched:acc:7", `{"Credentials":{"access_token":"legacy-secret"}}`, 0).Err())
+	require.NoError(t, rdb.Set(ctx, "sched:meta:7", `{"Credentials":{"api_key":"legacy-key"}}`, 0).Err())
+	require.NoError(t, rdb.Set(ctx, schedulerAccountKey("7"), "new-encrypted-namespace", 0).Err())
+
+	removed, err := PurgeLegacySchedulerCacheSecrets(ctx, rdb)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, removed)
+	require.EqualValues(t, 0, rdb.Exists(ctx, "sched:acc:7", "sched:meta:7").Val())
+	require.EqualValues(t, 1, rdb.Exists(ctx, schedulerAccountKey("7")).Val())
+}
+
+func TestSeedSchedulerCacheV2WatermarkCopiesLegacyOnlyOnce(t *testing.T) {
+	ctx := context.Background()
+	rdb := testRedis(t)
+	require.NoError(t, rdb.Del(ctx, schedulerOutboxWatermarkKey, schedulerLegacyWatermarkKey).Err())
+	require.NoError(t, rdb.Set(ctx, schedulerLegacyWatermarkKey, "123", 0).Err())
+
+	seeded, err := SeedSchedulerCacheV2Watermark(ctx, rdb)
+	require.NoError(t, err)
+	require.True(t, seeded)
+	require.Equal(t, "123", rdb.Get(ctx, schedulerOutboxWatermarkKey).Val())
+
+	require.NoError(t, rdb.Set(ctx, schedulerLegacyWatermarkKey, "456", 0).Err())
+	seeded, err = SeedSchedulerCacheV2Watermark(ctx, rdb)
+	require.NoError(t, err)
+	require.False(t, seeded)
+	require.Equal(t, "123", rdb.Get(ctx, schedulerOutboxWatermarkKey).Val())
 }

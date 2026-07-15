@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,9 @@ func (w *integrationUsageBillingReplayWriter) WriteUsageBillingReplay(ctx contex
 
 func integrationOutboxEnvelope(t *testing.T, input service.UsageBillingEnvelopeInput) service.UsageBillingEnvelope {
 	t.Helper()
+	if input.RequestPayloadHash == "" {
+		input.RequestPayloadHash = integrationUsageRequestPayloadHash
+	}
 	input.PricingSource = service.PricingSourceBuiltinGPT56
 	input.PricingRevision = service.GPT56PricingRevision
 	input.PricingHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -88,7 +92,7 @@ func TestUsageBillingOutboxProcessorIntegration_BalanceAckCrashReplayChargesAndL
 	envelope := integrationOutboxEnvelope(t, service.UsageBillingEnvelopeInput{
 		RequestID:           "outbox-ack-" + uuid.NewString(),
 		APIKeyID:            apiKey.ID,
-		AuthCacheLocator:    service.APIKeyAuthCacheLocator(apiKey.Key),
+		AuthCacheLocator:    apiKey.KeyHash,
 		UserID:              user.ID,
 		AccountID:           account.ID,
 		GroupID:             &group.ID,
@@ -170,8 +174,6 @@ func TestUsageBillingOutboxProcessorIntegration_MonthlyAndWalletPreserveFrozenSu
 		processIntegrationEnvelopeAfterEnqueue(t, ctx, envelope, func() {
 			_, err := integrationDB.ExecContext(ctx, "UPDATE user_subscriptions SET deleted_at = NOW() WHERE id = $1", subscription.ID)
 			require.NoError(t, err)
-			_, err = integrationDB.ExecContext(ctx, "UPDATE groups SET deleted_at = NOW() WHERE id = $1", group.ID)
-			require.NoError(t, err)
 		})
 
 		var daily, weekly, monthly float64
@@ -198,9 +200,10 @@ func TestUsageBillingOutboxProcessorIntegration_MonthlyAndWalletPreserveFrozenSu
 		plan, err := client.SubscriptionPlan.Create().
 			SetName("outbox-monthly-coverage-" + uuid.NewString()).
 			SetPrice(99).
-			SetWalletQuotaUsd(400).
+			SetGroupID(anchorGroup.ID).
 			SetValidityDays(30).
 			SetValidityUnit("day").
+			SetPlanType(service.PlanTypeSubscription).
 			Save(ctx)
 		require.NoError(t, err)
 		for _, groupID := range []int64{anchorGroup.ID, routingGroup.ID} {
@@ -240,38 +243,50 @@ func TestUsageBillingOutboxProcessorIntegration_MonthlyAndWalletPreserveFrozenSu
 	t.Run("wallet", func(t *testing.T) {
 		_, _ = integrationDB.ExecContext(ctx, "TRUNCATE usage_billing_outbox RESTART IDENTITY")
 		user := mustCreateUser(t, client, &service.User{Email: fmt.Sprintf("outbox-wallet-%s@example.com", uuid.NewString())})
-		group := mustCreateGroup(t, client, &service.Group{Name: "outbox-wallet-" + uuid.NewString()})
-		apiKey := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, Name: service.WalletUniversalAPIKeyName, Key: "sk-outbox-wallet-" + uuid.NewString()})
+		group := mustGetOrCreateWalletBusinessGroup(t, client,
+			service.WalletDefaultOpenAIGroupName, service.PlatformOpenAI, false, 1)
+		wallet := mustCreateCreditsWallet(t, client, user.ID, 10)
+		apiKey := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, Name: service.WalletUniversalAPIKeyName, Purpose: service.APIKeyPurposeWalletUniversal, Key: "sk-outbox-wallet-" + uuid.NewString()})
 		account := mustCreateAccount(t, client, &service.Account{Name: "outbox-wallet-account-" + uuid.NewString(), Type: service.AccountTypeOAuth})
 		mustBindAccountToGroup(t, client, account.ID, group.ID, 1)
-		now := time.Now().UTC()
-		wallet, err := client.UserSubscription.Create().
-			SetUserID(user.ID).
-			SetStartsAt(now.Add(-time.Hour)).
-			SetExpiresAt(now.Add(24 * time.Hour)).
-			SetStatus(service.SubscriptionStatusActive).
-			SetWalletBalanceUsd(10).
-			SetWalletInitialUsd(10).
-			SetAssignedAt(now).
-			Save(ctx)
-		require.NoError(t, err)
 		walletID := wallet.ID
+		requestID := "outbox-wallet-" + uuid.NewString()
+		ownerToken := strings.Repeat("a", 32)
+		attemptID := strings.Repeat("b", 32)
+		admission, err := service.NewUsageBillingAdmission(service.UsageBillingAdmissionInput{
+			RequestID: requestID, RequestPayloadHash: integrationUsageRequestPayloadHash,
+			APIKeyID: apiKey.ID, AuthCacheLocator: apiKey.KeyHash,
+			UserID: user.ID, AccountID: account.ID, SubscriptionID: &walletID,
+			GroupID: &group.ID, EffectiveBillingGroupID: &group.ID,
+			AccountType: account.Type, BillingType: service.BillingTypeSubscription,
+			OwnerToken: ownerToken, AttemptID: attemptID, BillingModel: "gpt-5.6-sol",
+			PricingSource: service.PricingSourceBuiltinGPT56, PricingRevision: service.GPT56PricingRevision,
+			PricingHash:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			RateMultiplier: 1, WorstCaseCostUSD: 2.5,
+		})
+		require.NoError(t, err)
+		admissionRepo := NewUsageBillingOutboxRepository(integrationDB)
+		require.NoError(t, admissionRepo.Admit(ctx, admission))
+		require.NoError(t, admissionRepo.MarkDispatched(ctx, service.UsageBillingAdmissionAttemptRef{
+			RequestID: admission.RequestID(), APIKeyID: admission.APIKeyID(),
+			OwnerToken: admission.OwnerToken(), AttemptID: admission.AttemptID(),
+		}))
 		envelope := integrationOutboxEnvelope(t, service.UsageBillingEnvelopeInput{
-			RequestID:      "outbox-wallet-" + uuid.NewString(),
-			APIKeyID:       apiKey.ID,
-			UserID:         user.ID,
-			AccountID:      account.ID,
-			SubscriptionID: &walletID,
-			GroupID:        &group.ID,
-			AccountType:    service.AccountTypeOAuth,
-			BillingModel:   "gpt-5.6-sol",
-			BillingType:    service.BillingTypeSubscription,
-			WalletCost:     2.5,
+			RequestID:          requestID,
+			RequestPayloadHash: integrationUsageRequestPayloadHash,
+			AdmissionAttemptID: attemptID,
+			APIKeyID:           apiKey.ID,
+			AuthCacheLocator:   apiKey.KeyHash,
+			UserID:             user.ID,
+			AccountID:          account.ID,
+			SubscriptionID:     &walletID,
+			GroupID:            &group.ID,
+			AccountType:        service.AccountTypeOAuth,
+			BillingModel:       "gpt-5.6-sol",
+			BillingType:        service.BillingTypeSubscription,
+			WalletCost:         2.5,
 		})
-		processIntegrationEnvelopeAfterEnqueue(t, ctx, envelope, func() {
-			_, err := integrationDB.ExecContext(ctx, "UPDATE user_subscriptions SET deleted_at = NOW() WHERE id = $1", walletID)
-			require.NoError(t, err)
-		})
+		processIntegrationEnvelopeAfterEnqueue(t, ctx, envelope, nil)
 
 		var balance float64
 		require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT wallet_balance_usd FROM user_subscriptions WHERE id = $1", walletID).Scan(&balance))
@@ -309,7 +324,8 @@ func TestUsageBillingOutboxProcessorIntegration_PendingEventSurvivesWorkerRestar
 	}
 	cmd := &service.UsageBillingCommand{
 		RequestID: requestID, APIKeyID: apiKey.ID, UserID: user.ID, AccountID: account.ID,
-		AccountType: service.AccountTypeAPIKey, Model: billingModel, BillingType: service.BillingTypeBalance,
+		RequestPayloadHash: integrationUsageRequestPayloadHash,
+		AccountType:        service.AccountTypeAPIKey, Model: billingModel, BillingType: service.BillingTypeBalance,
 		InputTokens: 100, OutputTokens: 10, BalanceCost: 1.25,
 	}
 	envelope, err := service.NewUsageBillingEnvelopeFromUsageLog(usageLog, cmd)

@@ -88,8 +88,9 @@ type channelCache struct {
 	groupPlatform           map[int64]string                                    // groupID → platform
 
 	// 冷路径（CRUD 操作）
-	byID     map[int64]*Channel
-	loadedAt time.Time
+	byID       map[int64]*Channel
+	loadedAt   time.Time
+	loadFailed bool
 }
 
 // ChannelMappingResult 渠道映射查找结果
@@ -260,6 +261,7 @@ func expandMappingToCache(cache *channelCache, ch *Channel, gid int64, platform 
 func (s *ChannelService) storeErrorCache() {
 	errorCache := newEmptyChannelCache()
 	errorCache.loadedAt = time.Now().Add(-(channelCacheTTL - channelErrorTTL))
+	errorCache.loadFailed = true
 	s.cache.Store(errorCache)
 }
 
@@ -460,6 +462,9 @@ func (s *ChannelService) lookupGroupChannel(ctx context.Context, groupID int64) 
 	if err != nil {
 		return nil, err
 	}
+	if cache.loadFailed {
+		return nil, fmt.Errorf("channel cache unavailable")
+	}
 	ch, ok := cache.channelByGroupID[groupID]
 	if !ok || !ch.IsActive() {
 		return nil, nil
@@ -530,6 +535,7 @@ func (s *ChannelService) IsModelRestricted(ctx context.Context, groupID int64, m
 	lk, err := s.lookupGroupChannel(ctx, groupID)
 	if err != nil {
 		slog.Warn("failed to load channel cache for model restriction check", "group_id", groupID, "error", err)
+		return true
 	}
 	if lk == nil {
 		return false

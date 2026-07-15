@@ -17,10 +17,10 @@ import (
 // 每次 activation/usage/refund/adjustment/expiration 写一行，永不更新永不删除。
 // user_subscriptions.wallet_balance_usd 是其聚合的缓存字段，对账以本表为准。
 //
-// 对账 cron 每 5 分钟跑：
+// 数据库提交时和对账任务共同校验：
 //
-//	wallet_initial_usd + SUM(ledger.delta_usd) ?= wallet_balance_usd
-//	偏差 > $0.01 → telegram 告警 + 用 ledger 重算修正字段值
+//	SUM(ledger.delta_usd) = wallet_balance_usd
+//	activation 已包含初始入账；偏差会阻断写入或进入对账告警。
 //
 // 详细设计：ai-relay-infra/docs/plans/2026-05-10-wallet-mode-design.md §1.2 §5.3
 type SubscriptionWalletLedger struct {
@@ -45,6 +45,10 @@ func (SubscriptionWalletLedger) Fields() []ent.Field {
 		field.String("reason").
 			MaxLen(32).
 			Comment("activation | usage | refund | adjustment | expiration"),
+		field.Int64("payment_order_id").
+			Optional().
+			Nillable().
+			Comment("immutable payment source for activation/topup and its refund reversal"),
 		field.Int64("usage_log_id").
 			Optional().
 			Nillable().
@@ -85,7 +89,10 @@ func (SubscriptionWalletLedger) Edges() []ent.Edge {
 func (SubscriptionWalletLedger) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("subscription_id", "created_at"),
-		index.Fields("usage_log_id"),
+		index.Fields("usage_log_id").
+			Unique().
+			Annotations(entsql.IndexWhere("usage_log_id IS NOT NULL AND reason = 'usage'")),
+		index.Fields("payment_order_id"),
 		index.Fields("reason"),
 	}
 }

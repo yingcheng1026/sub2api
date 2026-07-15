@@ -190,6 +190,42 @@ func TestIdempotencyCoordinator_RequireKey(t *testing.T) {
 	require.Equal(t, infraerrors.Code(err), infraerrors.Code(ErrIdempotencyKeyRequired))
 }
 
+func TestIdempotencyCoordinatorPersistsSafeReplayForSensitiveResponse(t *testing.T) {
+	resetIdempotencyMetricsForTest()
+	repo := newInMemoryIdempotencyRepo()
+	cfg := DefaultIdempotencyConfig()
+	cfg.ObserveOnly = false
+	coordinator := NewIdempotencyCoordinator(repo, cfg)
+	opts := IdempotencyExecuteOptions{
+		Scope: "user.api_keys.create", ActorScope: "user:7", Method: "POST",
+		Route: "/api/v1/keys", IdempotencyKey: "create-key-once", Payload: map[string]any{"name": "x"},
+		RequireKey: true,
+	}
+	raw := "sk-secret-must-not-persist"
+	result, err := coordinator.Execute(context.Background(), opts, func(context.Context) (any, error) {
+		return NewIdempotencySensitiveResponse(
+			map[string]any{"id": 1, "key": raw},
+			map[string]any{"id": 1, "key": "sk-sec••••"},
+		), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, raw, result.Data.(map[string]any)["key"])
+
+	stored, err := repo.GetByScopeAndKeyHash(context.Background(), opts.Scope, HashIdempotencyKey(opts.IdempotencyKey))
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.NotNil(t, stored.ResponseBody)
+	require.NotContains(t, *stored.ResponseBody, raw)
+
+	replayed, err := coordinator.Execute(context.Background(), opts, func(context.Context) (any, error) {
+		t.Fatal("replay must not execute side effect")
+		return nil, nil
+	})
+	require.NoError(t, err)
+	require.True(t, replayed.Replayed)
+	require.NotEqual(t, raw, replayed.Data.(map[string]any)["key"])
+}
+
 func TestIdempotencyCoordinator_ReplaySucceededResult(t *testing.T) {
 	resetIdempotencyMetricsForTest()
 	repo := newInMemoryIdempotencyRepo()

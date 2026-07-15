@@ -532,12 +532,7 @@ func (h *AuthHandler) CompleteLinuxDoOAuthRegistration(c *gin.Context) {
 	clearOAuthPendingSessionCookie(c, secureCookie)
 	clearOAuthPendingBrowserCookie(c, secureCookie)
 
-	c.JSON(http.StatusOK, gin.H{
-		"access_token":  tokenPair.AccessToken,
-		"refresh_token": tokenPair.RefreshToken,
-		"expires_in":    tokenPair.ExpiresIn,
-		"token_type":    "Bearer",
-	})
+	h.writeOAuthTokenPairResponse(c, tokenPair)
 }
 
 func (h *AuthHandler) getLinuxDoOAuthConfig(ctx context.Context) (config.LinuxDoConnectConfig, error) {
@@ -905,6 +900,13 @@ func sanitizeFrontendRedirectPath(path string) string {
 }
 
 func isRequestHTTPS(c *gin.Context) bool {
+	// In release mode, OAuth state/session cookies must fail closed to Secure.
+	// If a reverse proxy is misconfigured and the browser reaches this hop over
+	// plain HTTP, the flow fails instead of emitting reusable OAuth cookies over
+	// an unencrypted connection.
+	if gin.Mode() == gin.ReleaseMode {
+		return true
+	}
 	if c.Request.TLS != nil {
 		return true
 	}

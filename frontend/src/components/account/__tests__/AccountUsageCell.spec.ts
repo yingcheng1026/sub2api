@@ -655,4 +655,35 @@ describe('AccountUsageCell', () => {
 		expect(wrapper.text()).toContain('A $0.00')
 		expect(wrapper.text()).toContain('U $0.00')
   })
+
+  it('不会把上游提供的不安全验证地址渲染为管理员链接', async () => {
+    getUsage.mockResolvedValue({
+      is_forbidden: true,
+      forbidden_type: 'validation',
+      validation_url: 'javascript:alert(document.domain)'
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 4901,
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.forbiddenValidation')
+    expect(wrapper.find('a').exists()).toBe(false)
+    expect(wrapper.html()).not.toContain('javascript:')
+  })
 })

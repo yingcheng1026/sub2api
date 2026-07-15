@@ -34,46 +34,52 @@ type channelMonitorTemplateCreateRequest struct {
 }
 
 type channelMonitorTemplateUpdateRequest struct {
-	Name             *string            `json:"name" binding:"omitempty,max=100"`
-	Description      *string            `json:"description" binding:"omitempty,max=500"`
-	ExtraHeaders     *map[string]string `json:"extra_headers"`
-	BodyOverrideMode *string            `json:"body_override_mode" binding:"omitempty,oneof=off merge replace"`
-	BodyOverride     *map[string]any    `json:"body_override"`
+	Name                        *string            `json:"name" binding:"omitempty,max=100"`
+	Description                 *string            `json:"description" binding:"omitempty,max=500"`
+	ExtraHeaders                *map[string]string `json:"extra_headers"`
+	BodyOverrideMode            *string            `json:"body_override_mode" binding:"omitempty,oneof=off merge replace"`
+	BodyOverride                *map[string]any    `json:"body_override"`
+	ReplaceRequestCustomization bool               `json:"replace_request_customization"`
 }
 
 type channelMonitorTemplateResponse struct {
-	ID                 int64             `json:"id"`
-	Name               string            `json:"name"`
-	Provider           string            `json:"provider"`
-	Description        string            `json:"description"`
-	ExtraHeaders       map[string]string `json:"extra_headers"`
-	BodyOverrideMode   string            `json:"body_override_mode"`
-	BodyOverride       map[string]any    `json:"body_override"`
-	CreatedAt          string            `json:"created_at"`
-	UpdatedAt          string            `json:"updated_at"`
-	AssociatedMonitors int64             `json:"associated_monitors"`
+	ID                     int64  `json:"id"`
+	Name                   string `json:"name"`
+	Provider               string `json:"provider"`
+	Description            string `json:"description"`
+	ExtraHeadersConfigured bool   `json:"extra_headers_configured"`
+	ExtraHeaderCount       int    `json:"extra_header_count"`
+	BodyOverrideMode       string `json:"body_override_mode"`
+	BodyOverrideConfigured bool   `json:"body_override_configured"`
+	CreatedAt              string `json:"created_at"`
+	UpdatedAt              string `json:"updated_at"`
+	AssociatedMonitors     int64  `json:"associated_monitors"`
 }
 
 func (h *ChannelMonitorRequestTemplateHandler) toResponse(c *gin.Context, t *service.ChannelMonitorRequestTemplate) *channelMonitorTemplateResponse {
 	if t == nil {
 		return nil
 	}
-	headers := t.ExtraHeaders
-	if headers == nil {
-		headers = map[string]string{}
-	}
 	count, _ := h.templateService.CountAssociatedMonitors(c.Request.Context(), t.ID)
+	return channelMonitorTemplateToResponse(t, count)
+}
+
+func channelMonitorTemplateToResponse(t *service.ChannelMonitorRequestTemplate, count int64) *channelMonitorTemplateResponse {
+	if t == nil {
+		return nil
+	}
 	return &channelMonitorTemplateResponse{
-		ID:                 t.ID,
-		Name:               t.Name,
-		Provider:           t.Provider,
-		Description:        t.Description,
-		ExtraHeaders:       headers,
-		BodyOverrideMode:   t.BodyOverrideMode,
-		BodyOverride:       t.BodyOverride,
-		CreatedAt:          t.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:          t.UpdatedAt.UTC().Format(time.RFC3339),
-		AssociatedMonitors: count,
+		ID:                     t.ID,
+		Name:                   t.Name,
+		Provider:               t.Provider,
+		Description:            t.Description,
+		ExtraHeadersConfigured: len(t.ExtraHeaders) > 0,
+		ExtraHeaderCount:       len(t.ExtraHeaders),
+		BodyOverrideMode:       t.BodyOverrideMode,
+		BodyOverrideConfigured: len(t.BodyOverride) > 0,
+		CreatedAt:              t.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:              t.UpdatedAt.UTC().Format(time.RFC3339),
+		AssociatedMonitors:     count,
 	}
 }
 
@@ -152,6 +158,10 @@ func (h *ChannelMonitorRequestTemplateHandler) Update(c *gin.Context) {
 		response.ErrorFrom(c, infraerrors.BadRequest("VALIDATION_ERROR", err.Error()))
 		return
 	}
+	if err := prepareTemplateCustomizationUpdate(&req); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	t, err := h.templateService.Update(c.Request.Context(), id, service.ChannelMonitorRequestTemplateUpdateParams{
 		Name:             req.Name,
 		Description:      req.Description,
@@ -164,6 +174,32 @@ func (h *ChannelMonitorRequestTemplateHandler) Update(c *gin.Context) {
 		return
 	}
 	response.Success(c, h.toResponse(c, t))
+}
+
+func prepareTemplateCustomizationUpdate(req *channelMonitorTemplateUpdateRequest) error {
+	hasPayload := req.ExtraHeaders != nil || req.BodyOverrideMode != nil || req.BodyOverride != nil
+	if !req.ReplaceRequestCustomization {
+		if hasPayload {
+			return infraerrors.BadRequest(
+				"REQUEST_CUSTOMIZATION_REPLACEMENT_REQUIRED",
+				"set replace_request_customization=true to replace write-only request customization",
+			)
+		}
+		return nil
+	}
+	if req.ExtraHeaders == nil {
+		headers := map[string]string{}
+		req.ExtraHeaders = &headers
+	}
+	if req.BodyOverrideMode == nil {
+		mode := service.MonitorBodyOverrideModeOff
+		req.BodyOverrideMode = &mode
+	}
+	if req.BodyOverride == nil {
+		var body map[string]any
+		req.BodyOverride = &body
+	}
+	return nil
 }
 
 // Delete DELETE /api/v1/admin/channel-monitor-templates/:id

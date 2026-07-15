@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAuthStore } from '@/stores/auth'
+import { clearSessionAccessToken, getSessionAccessToken } from '@/auth/browserSession'
 
 // Mock authAPI
 const mockLogin = vi.fn()
@@ -55,6 +56,7 @@ describe('useAuthStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     localStorage.clear()
+    clearSessionAccessToken()
     vi.useFakeTimers()
     vi.clearAllMocks()
   })
@@ -75,8 +77,9 @@ describe('useAuthStore', () => {
       expect(store.token).toBe('test-token-123')
       expect(store.user).toEqual(fakeUser)
       expect(store.isAuthenticated).toBe(true)
-      expect(localStorage.getItem('auth_token')).toBe('test-token-123')
-      expect(localStorage.getItem('auth_user')).toBe(JSON.stringify(fakeUser))
+      expect(getSessionAccessToken()).toBe('test-token-123')
+      expect(localStorage.getItem('auth_token')).toBeNull()
+      expect(localStorage.getItem('auth_user')).toBeNull()
     })
 
     it('登录失败时清除状态并抛出错误', async () => {
@@ -161,55 +164,58 @@ describe('useAuthStore', () => {
   // --- checkAuth ---
 
   describe('checkAuth', () => {
-    it('从 localStorage 恢复持久化状态', () => {
-      localStorage.setItem('auth_token', 'saved-token')
-      localStorage.setItem('auth_user', JSON.stringify(fakeUser))
-
-      // Mock refreshUser (getCurrentUser) 防止后台刷新报错
+    it('通过 HttpOnly cookie 刷新接口恢复会话', async () => {
+      mockRefreshToken.mockResolvedValue({ access_token: 'restored-token', expires_in: 3600 })
       mockGetCurrentUser.mockResolvedValue({ data: fakeUser })
 
       const store = useAuthStore()
-      store.checkAuth()
+      await store.checkAuth()
 
-      expect(store.token).toBe('saved-token')
+      expect(store.token).toBe('restored-token')
       expect(store.user).toEqual(fakeUser)
       expect(store.isAuthenticated).toBe(true)
+      expect(localStorage.getItem('auth_token')).toBeNull()
     })
 
-    it('localStorage 无数据时保持未认证状态', () => {
+    it('没有服务端浏览器会话时保持未认证状态', async () => {
+      mockRefreshToken.mockRejectedValue({ status: 401 })
       const store = useAuthStore()
-      store.checkAuth()
+      await store.checkAuth()
 
       expect(store.token).toBeNull()
       expect(store.user).toBeNull()
       expect(store.isAuthenticated).toBe(false)
     })
 
-    it('localStorage 中用户数据损坏时清除状态', () => {
+    it('忽略并清除旧版 localStorage 凭据', async () => {
       localStorage.setItem('auth_token', 'saved-token')
       localStorage.setItem('auth_user', 'invalid-json{{{')
+      localStorage.setItem('refresh_token', 'saved-refresh')
+      localStorage.setItem('token_expires_at', '123')
+      mockRefreshToken.mockRejectedValue({ status: 401 })
 
       const store = useAuthStore()
-      store.checkAuth()
+      await store.checkAuth()
 
       expect(store.token).toBeNull()
       expect(store.user).toBeNull()
       expect(localStorage.getItem('auth_token')).toBeNull()
+      expect(localStorage.getItem('auth_user')).toBeNull()
+      expect(localStorage.getItem('refresh_token')).toBeNull()
+      expect(localStorage.getItem('token_expires_at')).toBeNull()
     })
 
-    it('恢复 refresh token 和过期时间', () => {
-      const futureTs = String(Date.now() + 3600_000)
-      localStorage.setItem('auth_token', 'saved-token')
-      localStorage.setItem('auth_user', JSON.stringify(fakeUser))
-      localStorage.setItem('refresh_token', 'saved-refresh')
-      localStorage.setItem('token_expires_at', futureTs)
-
+    it('恢复时不会把轮换后的凭据写回 localStorage', async () => {
+      mockRefreshToken.mockResolvedValue({ access_token: 'restored-token', expires_in: 3600 })
       mockGetCurrentUser.mockResolvedValue({ data: fakeUser })
 
       const store = useAuthStore()
-      store.checkAuth()
+      await store.checkAuth()
 
       expect(store.isAuthenticated).toBe(true)
+      expect(localStorage.getItem('auth_token')).toBeNull()
+      expect(localStorage.getItem('refresh_token')).toBeNull()
+      expect(localStorage.getItem('token_expires_at')).toBeNull()
     })
 
     it('恢复持久化 pending auth session', () => {
@@ -345,7 +351,7 @@ describe('useAuthStore', () => {
   // --- refreshUser ---
 
   describe('refreshUser', () => {
-    it('刷新用户数据并更新 localStorage', async () => {
+    it('刷新用户数据但不持久化认证状态', async () => {
       mockLogin.mockResolvedValue(fakeAuthResponse)
       const store = useAuthStore()
       await store.login({ email: 'test@example.com', password: '123456' })
@@ -357,7 +363,7 @@ describe('useAuthStore', () => {
 
       expect(result).toEqual(updatedUser)
       expect(store.user).toEqual(updatedUser)
-      expect(JSON.parse(localStorage.getItem('auth_user')!)).toEqual(updatedUser)
+      expect(localStorage.getItem('auth_user')).toBeNull()
     })
 
     it('未认证时抛出错误', async () => {

@@ -1,18 +1,25 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
+	"mime"
+	"net"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/sysutil"
-
 	"github.com/gin-gonic/gin"
+)
+
+const (
+	setupRequestBodyMaxBytes = 64 * 1024
+	setupRequestsPerMinute   = 30
 )
 
 // installMutex prevents concurrent installation attempts (TOCTOU protection)
@@ -27,13 +34,133 @@ func RegisterRoutes(r *gin.Engine) {
 
 		// All modification endpoints are protected by setupGuard
 		protected := setup.Group("")
-		protected.Use(setupGuard())
+		protected.Use(
+			setupGuard(),
+			setupRequestSecurity(),
+			setupRequestBodyLimit(setupRequestBodyMaxBytes),
+			newSetupRateLimiter(setupRequestsPerMinute, time.Minute).middleware(),
+		)
 		{
 			protected.POST("/test-db", testDatabase)
 			protected.POST("/test-redis", testRedis)
 			protected.POST("/install", install)
 		}
 	}
+}
+
+func setupRequestSecurity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !isSetupLoopbackHost(c.Request.Host) {
+			response.Error(c, http.StatusForbidden, "Setup Host must be loopback")
+			c.Abort()
+			return
+		}
+		mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+		if err != nil || !strings.EqualFold(mediaType, "application/json") {
+			response.Error(c, http.StatusUnsupportedMediaType, "Setup requests require application/json")
+			c.Abort()
+			return
+		}
+		if origin := strings.TrimSpace(c.GetHeader("Origin")); origin != "" && !isSameSetupOrigin(origin, c.Request.Host) {
+			response.Error(c, http.StatusForbidden, "Cross-origin setup request rejected")
+			c.Abort()
+			return
+		}
+		if c.GetHeader("Origin") == "" {
+			if referer := strings.TrimSpace(c.GetHeader("Referer")); referer != "" && !isSameSetupOrigin(referer, c.Request.Host) {
+				response.Error(c, http.StatusForbidden, "Cross-origin setup request rejected")
+				c.Abort()
+				return
+			}
+		}
+		c.Next()
+	}
+}
+
+func isSetupLoopbackHost(hostPort string) bool {
+	hostPort = strings.TrimSpace(hostPort)
+	if hostPort == "" {
+		return false
+	}
+	host := hostPort
+	if parsedHost, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isSameSetupOrigin(raw, requestHost string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.User != nil || parsed.Host == "" {
+		return false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, strings.TrimSpace(requestHost)) && isSetupLoopbackHost(parsed.Host)
+}
+
+type setupRateLimitEntry struct {
+	windowStart time.Time
+	count       int
+}
+
+type setupRateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]setupRateLimitEntry
+	limit   int
+	window  time.Duration
+}
+
+func newSetupRateLimiter(limit int, window time.Duration) *setupRateLimiter {
+	return &setupRateLimiter{entries: make(map[string]setupRateLimitEntry), limit: limit, window: window}
+}
+
+func (l *setupRateLimiter) middleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		now := time.Now()
+		key := c.ClientIP()
+		l.mu.Lock()
+		entry := l.entries[key]
+		if entry.windowStart.IsZero() || now.Sub(entry.windowStart) >= l.window {
+			entry = setupRateLimitEntry{windowStart: now}
+		}
+		if entry.count >= l.limit {
+			l.mu.Unlock()
+			response.Error(c, http.StatusTooManyRequests, "Too many setup requests")
+			c.Abort()
+			return
+		}
+		entry.count++
+		l.entries[key] = entry
+		l.mu.Unlock()
+		c.Next()
+	}
+}
+
+func setupRequestBodyLimit(maxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		c.Next()
+	}
+}
+
+func bindSetupJSON(c *gin.Context, dst any) bool {
+	if err := c.ShouldBindJSON(dst); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			response.Error(c, http.StatusRequestEntityTooLarge, "Setup request body is too large")
+			return false
+		}
+		response.Error(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return false
+	}
+	return true
 }
 
 // SetupStatus represents the current setup state
@@ -126,8 +253,7 @@ type TestDatabaseRequest struct {
 // testDatabase tests database connection
 func testDatabase(c *gin.Context) {
 	var req TestDatabaseRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+	if !bindSetupJSON(c, &req) {
 		return
 	}
 
@@ -186,8 +312,7 @@ type TestRedisRequest struct {
 // testRedis tests Redis connection
 func testRedis(c *gin.Context) {
 	var req TestRedisRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+	if !bindSetupJSON(c, &req) {
 		return
 	}
 
@@ -242,8 +367,7 @@ func install(c *gin.Context) {
 	}
 
 	var req InstallRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+	if !bindSetupJSON(c, &req) {
 		return
 	}
 
@@ -340,16 +464,8 @@ func install(c *gin.Context) {
 		return
 	}
 
-	// Schedule service restart in background after sending response
-	// This ensures the client receives the success response before the service restarts
-	go func() {
-		// Wait a moment to ensure the response is sent
-		time.Sleep(500 * time.Millisecond)
-		sysutil.RestartServiceAsync()
-	}()
-
 	response.Success(c, gin.H{
-		"message": "Installation completed successfully. Service will restart automatically.",
-		"restart": true,
+		"message": "Installation completed successfully. Restart the service manually when ready.",
+		"restart": false,
 	})
 }

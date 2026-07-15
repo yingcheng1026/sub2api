@@ -138,6 +138,21 @@ describe('OAuthCallbackView', () => {
     expect(wrapper.find('input[readonly]').exists()).toBe(false)
   })
 
+  it('rejects a fragment token that is not backed by a pending browser session', async () => {
+    routeState.path = '/auth/oauth/callback'
+    locationState.current.hash =
+      '#access_token=legacy-access-token&refresh_token=legacy-refresh-token&expires_in=3600&redirect=%2Flegacy-dashboard'
+    exchangePendingOAuthCompletionMock.mockRejectedValue(new Error('pending session not found'))
+
+    mount(OAuthCallbackView)
+    await vi.dynamicImportSettled()
+
+    expect(exchangePendingOAuthCompletionMock).toHaveBeenCalledTimes(1)
+    expect(setTokenMock).not.toHaveBeenCalled()
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(routerReplaceMock).not.toHaveBeenCalled()
+  })
+
   it('forwards frontend email oauth provider callbacks back to the backend callback endpoint', async () => {
     routeState.path = '/auth/oauth/callback'
     routeState.query = {
@@ -186,6 +201,86 @@ describe('OAuthCallbackView', () => {
       aff_code: 'AFF456',
     })
     expect(setTokenMock).toHaveBeenCalledWith('token-1')
+  })
+
+  it('requires the existing local password before binding a new provider subject', async () => {
+    routeState.path = '/auth/oauth/callback'
+    exchangePendingOAuthCompletionMock.mockResolvedValue({
+      error: 'existing_account_binding_required',
+      step: 'choose_account_action_required',
+      provider: 'google',
+      redirect: '/dashboard',
+      resolved_email: 'existing@example.com',
+      existing_account_bindable: true,
+    })
+    apiPostMock.mockResolvedValue({
+      data: {
+        access_token: 'bound-access-token',
+        refresh_token: 'bound-refresh-token',
+        expires_in: 3600,
+      },
+    })
+
+    const wrapper = mount(OAuthCallbackView)
+    await vi.dynamicImportSettled()
+
+    const passwordInput = wrapper.find('input[type="password"]')
+    expect(passwordInput.exists()).toBe(true)
+    expect(wrapper.find('input[type="email"]').element).toHaveProperty('value', 'existing@example.com')
+
+    await passwordInput.setValue('secret-123')
+    await wrapper.find('button[type="button"]').trigger('click')
+
+    expect(apiPostMock).toHaveBeenCalledWith('/auth/oauth/pending/bind-login', {
+      email: 'existing@example.com',
+      password: 'secret-123',
+    })
+    expect(setTokenMock).toHaveBeenCalledWith('bound-access-token')
+  })
+
+  it('completes the second factor before adopting a newly bound provider identity', async () => {
+    routeState.path = '/auth/oauth/callback'
+    exchangePendingOAuthCompletionMock.mockResolvedValue({
+      error: 'existing_account_binding_required',
+      provider: 'google',
+      redirect: '/dashboard',
+      resolved_email: 'existing@example.com',
+      existing_account_bindable: true,
+    })
+    apiPostMock
+      .mockResolvedValueOnce({
+        data: {
+          requires_2fa: true,
+          temp_token: 'pending-bind-temp-token',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          access_token: '2fa-access-token',
+          refresh_token: '2fa-refresh-token',
+          expires_in: 3600,
+        },
+      })
+
+    const wrapper = mount(OAuthCallbackView)
+    await vi.dynamicImportSettled()
+
+    await wrapper.get('input[type="password"]').setValue('secret-123')
+    await wrapper.get('button[type="button"]').trigger('click')
+
+    const totpInput = wrapper.get('input[inputmode="numeric"]')
+    await totpInput.setValue('123456')
+    await wrapper.get('button[type="button"]').trigger('click')
+
+    expect(apiPostMock).toHaveBeenNthCalledWith(1, '/auth/oauth/pending/bind-login', {
+      email: 'existing@example.com',
+      password: 'secret-123',
+    })
+    expect(apiPostMock).toHaveBeenNthCalledWith(2, '/auth/login/2fa', {
+      temp_token: 'pending-bind-temp-token',
+      totp_code: '123456',
+    })
+    expect(setTokenMock).toHaveBeenCalledWith('2fa-access-token')
   })
 
   it('completes email oauth registration with readonly email and without posting email', async () => {

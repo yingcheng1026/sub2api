@@ -38,6 +38,7 @@ var gatewayCompatibilityMetricsLogCounter atomic.Uint64
 // GatewayHandler handles API gateway requests
 type GatewayHandler struct {
 	gatewayService            *service.GatewayService
+	modelsProvider            gatewayModelsProvider
 	geminiCompatService       *service.GeminiMessagesCompatService
 	antigravityGatewayService *service.AntigravityGatewayService
 	userService               *service.UserService
@@ -93,6 +94,7 @@ func NewGatewayHandler(
 
 	return &GatewayHandler{
 		gatewayService:            gatewayService,
+		modelsProvider:            gatewayService,
 		geminiCompatService:       geminiCompatService,
 		antigravityGatewayService: antigravityGatewayService,
 		userService:               userService,
@@ -109,6 +111,10 @@ func NewGatewayHandler(
 		cfg:                       cfg,
 		settingService:            settingService,
 	}
+}
+
+type gatewayModelsProvider interface {
+	GetAvailableModels(ctx context.Context, groupID *int64, platform string) []string
 }
 
 // Messages handles Claude API compatible messages endpoint
@@ -162,6 +168,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			zap.Int("removed", removed),
 			zap.String("path", "anthropic_native"),
 		)
+	} else if errors.Is(sanErr, apicompat.ErrAnthropicSanitizeBodyTooLarge) {
+		h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "Request body exceeds the compatibility sanitization limit")
+		return
 	} else if sanErr != nil {
 		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
 			zap.Error(sanErr),
@@ -176,6 +185,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return
 	}
+	billingRequestCtx, err := service.PrepareUsageBillingRequestContext(c.Request.Context())
+	if err != nil {
+		h.errorResponse(c, http.StatusServiceUnavailable, "billing_service_error", "Billing service temporarily unavailable")
+		return
+	}
+	c.Request = c.Request.WithContext(billingRequestCtx)
 	reqModel := parsedReq.Model
 	reqStream := parsedReq.Stream
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
@@ -357,7 +372,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.String("platform", platform),
 						zap.Error(err),
 					)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts: "+err.Error(), streamStarted)
+					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 					return
 				}
 				action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -466,6 +481,40 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if fs.SwitchCount > 0 {
 				requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 			}
+			var usageBillingIdentity *service.GatewayUsageBillingIdentity
+			if subscription != nil && subscription.IsWalletMode() {
+				usageBillingIdentity, err = h.gatewayService.PrepareGatewayWalletUsageBillingAdmission(
+					requestCtx, apiKey, apiKey.User, account, subscription, parsedReq,
+				)
+				if err != nil {
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					status := http.StatusServiceUnavailable
+					code := "billing_service_error"
+					message := "Billing service temporarily unavailable"
+					if errors.Is(err, service.ErrWalletInsufficient) {
+						status, code, message, _ = billingErrorDetails(err)
+					}
+					h.handleStreamingAwareError(c, status, code, message, streamStarted)
+					return
+				}
+			}
+			markBillingAttemptFailed := func() {
+				if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingAttemptFailed(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gateway.billing_attempt_fail_mark_failed", zap.Error(lifecycleErr))
+				}
+			}
+			markBillingOrphaned := func() {
+				if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gateway.billing_attempt_orphan_mark_failed", zap.Error(lifecycleErr))
+				}
+			}
+			abandonBilling := func() {
+				if lifecycleErr := h.gatewayService.AbandonGatewayUsageBilling(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gateway.billing_attempt_abandon_failed", zap.Error(lifecycleErr))
+				}
+			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
 			if account.Platform == service.PlatformAntigravity {
@@ -481,20 +530,25 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if errors.As(err, &failoverErr) {
 					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化
 					if c.Writer.Size() != writerSizeBeforeForward {
+						markBillingOrphaned()
 						h.handleFailoverExhausted(c, failoverErr, service.PlatformGemini, true)
 						return
 					}
+					markBillingAttemptFailed()
 					action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, failoverErr)
 					switch action {
 					case FailoverContinue:
 						continue
 					case FailoverExhausted:
+						abandonBilling()
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformGemini, streamStarted)
 						return
 					case FailoverCanceled:
+						abandonBilling()
 						return
 					}
 				}
+				markBillingOrphaned()
 				wroteFallback := h.ensureForwardErrorResponse(c, streamStarted)
 				forwardFailedFields := []zap.Field{
 					zap.Int64("account_id", account.ID),
@@ -516,7 +570,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				reqLog.Error("gateway.forward_failed", forwardFailedFields...)
 				return
 			}
-
+			if result != nil {
+				result.UsageBillingIdentity = usageBillingIdentity
+			}
 			// RPM 计数递增（Forward 成功后）
 			// 注意：TOCTOU 竞态是已知且可接受的设计权衡，与 WindowCost 一致的 soft-limit 模式。
 			// 在高并发下可能短暂超出 RPM 限制，但不会导致请求失败。
@@ -538,7 +594,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 
 			// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
-			h.submitUsageRecordTask(func(ctx context.Context) {
+			h.submitGatewayUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 					Result:             result,
 					ParsedRequest:      parsedReq,
@@ -555,6 +611,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					APIKeyService:      h.apiKeyService,
 					ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 				}); err != nil {
+					if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(ctx, result.UsageBillingIdentity); lifecycleErr != nil {
+						reqLog.Error("gateway.billing_result_orphan_mark_failed", zap.Error(lifecycleErr))
+					}
 					logger.L().With(
 						zap.String("component", "handler.gateway.messages"),
 						zap.Int64("user_id", subject.UserID),
@@ -606,7 +665,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Bool("fallback_used", fallbackUsed),
 						zap.Error(err),
 					)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts: "+err.Error(), streamStarted)
+					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 					return
 				}
 				action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -789,6 +848,50 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if fs.SwitchCount > 0 {
 				requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 			}
+			var usageBillingIdentity *service.GatewayUsageBillingIdentity
+			if currentSubscription != nil && currentSubscription.IsWalletMode() {
+				usageBillingIdentity, err = h.gatewayService.PrepareGatewayWalletUsageBillingAdmission(
+					requestCtx, currentAPIKey, currentAPIKey.User, account, currentSubscription, parsedReq,
+				)
+				if err != nil {
+					if queueRelease != nil {
+						queueRelease()
+					}
+					parsedReq.OnUpstreamAccepted = nil
+					if accountReleaseFunc != nil {
+						accountReleaseFunc()
+					}
+					status := http.StatusServiceUnavailable
+					code := "billing_service_error"
+					message := "Billing service temporarily unavailable"
+					switch {
+					case errors.Is(err, service.ErrWalletInsufficient):
+						status, code, message, _ = billingErrorDetails(err)
+					case errors.Is(err, service.ErrUsageBillingRequestConflict),
+						errors.Is(err, service.ErrUsageBillingAdmissionFinalized):
+						status = http.StatusConflict
+						code = "billing_request_conflict"
+						message = "Billing request identity conflict"
+					}
+					h.handleStreamingAwareError(c, status, code, message, streamStarted)
+					return
+				}
+			}
+			markBillingAttemptFailed := func() {
+				if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingAttemptFailed(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gateway.billing_attempt_fail_mark_failed", zap.Error(lifecycleErr))
+				}
+			}
+			markBillingOrphaned := func() {
+				if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gateway.billing_attempt_orphan_mark_failed", zap.Error(lifecycleErr))
+				}
+			}
+			abandonBilling := func() {
+				if lifecycleErr := h.gatewayService.AbandonGatewayUsageBilling(requestCtx, usageBillingIdentity); lifecycleErr != nil {
+					reqLog.Error("gateway.billing_attempt_abandon_failed", zap.Error(lifecycleErr))
+				}
+			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
 			if account.Platform == service.PlatformKiro {
@@ -823,12 +926,15 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				// Beta policy block: return 400 immediately, no failover
 				var betaBlockedErr *service.BetaBlockedError
 				if errors.As(err, &betaBlockedErr) {
+					markBillingAttemptFailed()
+					abandonBilling()
 					h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", betaBlockedErr.Message)
 					return
 				}
 
 				var promptTooLongErr *service.PromptTooLongError
 				if errors.As(err, &promptTooLongErr) {
+					markBillingAttemptFailed()
 					reqLog.Warn("gateway.prompt_too_long_from_antigravity",
 						zap.Any("current_group_id", currentAPIKey.GroupID),
 						zap.Any("fallback_group_id", fallbackGroupID),
@@ -839,6 +945,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						if err != nil {
 							reqLog.Warn("gateway.resolve_fallback_group_failed", zap.Int64("fallback_group_id", *fallbackGroupID), zap.Error(err))
 							_ = h.antigravityGatewayService.WriteMappedClaudeError(c, account, promptTooLongErr.StatusCode, promptTooLongErr.RequestID, promptTooLongErr.Body)
+							abandonBilling()
 							return
 						}
 						if fallbackGroup.Platform != service.PlatformAnthropic ||
@@ -850,6 +957,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 								zap.String("fallback_subscription_type", fallbackGroup.SubscriptionType),
 							)
 							_ = h.antigravityGatewayService.WriteMappedClaudeError(c, account, promptTooLongErr.StatusCode, promptTooLongErr.RequestID, promptTooLongErr.Body)
+							abandonBilling()
 							return
 						}
 						fallbackAPIKey := cloneAPIKeyWithGroup(apiKey, fallbackGroup)
@@ -859,6 +967,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 								c.Header("Retry-After", strconv.Itoa(retryAfter))
 							}
 							h.handleStreamingAwareError(c, status, code, message, streamStarted)
+							abandonBilling()
 							return
 						}
 						// 兜底重试按"直接请求兜底分组"处理：清除强制平台，允许按分组平台调度
@@ -871,26 +980,32 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						break
 					}
 					_ = h.antigravityGatewayService.WriteMappedClaudeError(c, account, promptTooLongErr.StatusCode, promptTooLongErr.RequestID, promptTooLongErr.Body)
+					abandonBilling()
 					return
 				}
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
 					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化
 					if c.Writer.Size() != writerSizeBeforeForward {
+						markBillingOrphaned()
 						h.handleFailoverExhausted(c, failoverErr, account.Platform, true)
 						return
 					}
+					markBillingAttemptFailed()
 					action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, failoverErr)
 					switch action {
 					case FailoverContinue:
 						continue
 					case FailoverExhausted:
+						abandonBilling()
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, account.Platform, streamStarted)
 						return
 					case FailoverCanceled:
+						abandonBilling()
 						return
 					}
 				}
+				markBillingOrphaned()
 				wroteFallback := h.ensureForwardErrorResponse(c, streamStarted)
 				forwardFailedFields := []zap.Field{
 					zap.Int64("account_id", account.ID),
@@ -911,6 +1026,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 				reqLog.Error("gateway.forward_failed", forwardFailedFields...)
 				return
+			}
+			if result != nil {
+				result.UsageBillingIdentity = usageBillingIdentity
 			}
 
 			// RPM 计数递增（Forward 成功后）
@@ -945,7 +1063,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 
 			// 使用量记录通过有界 worker 池提交，避免请求热路径创建无界 goroutine。
-			h.submitUsageRecordTask(func(ctx context.Context) {
+			h.submitGatewayUsageRecordTask(c.Request.Context(), result, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 					Result:             result,
 					ParsedRequest:      parsedReq,
@@ -962,6 +1080,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					APIKeyService:      h.apiKeyService,
 					ChannelUsageFields: channelMapping.ToUsageFields(reqModel, result.UpstreamModel),
 				}); err != nil {
+					if lifecycleErr := h.gatewayService.MarkGatewayUsageBillingOrphaned(ctx, result.UsageBillingIdentity); lifecycleErr != nil {
+						reqLog.Error("gateway.billing_result_orphan_mark_failed", zap.Error(lifecycleErr))
+					}
 					logger.L().With(
 						zap.String("component", "handler.gateway.messages"),
 						zap.Int64("user_id", subject.UserID),
@@ -1006,8 +1127,24 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
+	if visibility, ok := middleware2.GetWalletModelVisibilityFromContext(c); ok &&
+		apiKey != nil && apiKey.User != nil && visibility.APIKeyID == apiKey.ID &&
+		apiKey.IsWalletUniversal() && service.IsWalletUniversalKeyName(apiKey.Name) {
+		h.writeWalletVisibleModels(c, apiKey.User, visibility)
+		return
+	}
+
+	provider := h.modelsProvider
+	if provider == nil && h.gatewayService != nil {
+		provider = h.gatewayService
+	}
+	if provider == nil {
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Model service is not configured")
+		return
+	}
+
 	// Get available models from account configurations (without platform filter)
-	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, "")
+	availableModels := provider.GetAvailableModels(c.Request.Context(), groupID, "")
 
 	if len(availableModels) > 0 {
 		// Build model list from whitelist
@@ -1039,6 +1176,69 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data":   claude.DefaultModels,
+	})
+}
+
+func (h *GatewayHandler) writeWalletVisibleModels(c *gin.Context, user *service.User, visibility middleware2.WalletModelVisibility) {
+	provider := h.modelsProvider
+	if provider == nil && h.gatewayService != nil {
+		provider = h.gatewayService
+	}
+	if provider == nil {
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Model service is not configured")
+		return
+	}
+
+	models := make([]any, 0)
+	seenGroups := make(map[int64]struct{}, len(visibility.Groups))
+	seenModels := make(map[string]struct{})
+	appendModel := func(modelID string, model any) {
+		if _, duplicate := seenModels[modelID]; duplicate {
+			return
+		}
+		seenModels[modelID] = struct{}{}
+		models = append(models, model)
+	}
+
+	for i := range visibility.Groups {
+		group := &visibility.Groups[i]
+		if _, duplicate := seenGroups[group.ID]; duplicate || !service.CanUseWalletGroup(user, group) {
+			continue
+		}
+		seenGroups[group.ID] = struct{}{}
+		availableModels := provider.GetAvailableModels(c.Request.Context(), &group.ID, "")
+		if len(availableModels) > 0 {
+			for _, modelID := range availableModels {
+				if routedGroupName, ok := service.WalletModelRouteGroupName(visibility.Routes, modelID); !ok || routedGroupName != group.Name {
+					continue
+				}
+				appendModel(modelID, claude.Model{
+					ID: modelID, Type: "model", DisplayName: modelID,
+					CreatedAt: "2024-01-01T00:00:00Z",
+				})
+			}
+			continue
+		}
+
+		switch group.Platform {
+		case service.PlatformOpenAI:
+			for _, model := range openai.DefaultModels {
+				if routedGroupName, ok := service.WalletModelRouteGroupName(visibility.Routes, model.ID); ok && routedGroupName == group.Name {
+					appendModel(model.ID, model)
+				}
+			}
+		case service.PlatformAnthropic:
+			for _, model := range claude.DefaultModels {
+				if routedGroupName, ok := service.WalletModelRouteGroupName(visibility.Routes, model.ID); ok && routedGroupName == group.Name {
+					appendModel(model.ID, model)
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"object": "list",
+		"data":   models,
 	})
 }
 
@@ -1476,11 +1676,7 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 				respCode = *rule.ResponseCode
 			}
 
-			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
-			if !rule.PassthroughBody && rule.CustomMessage != nil {
-				msg = *rule.CustomMessage
-			}
+			msg := service.ErrorPassthroughClientMessage(rule, "Upstream request failed")
 
 			if rule.SkipMonitoring {
 				c.Set(service.OpsSkipPassthroughKey, true)
@@ -1659,6 +1855,9 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 			zap.Int("removed", removed),
 			zap.String("path", "anthropic_native"),
 		)
+	} else if errors.Is(sanErr, apicompat.ErrAnthropicSanitizeBodyTooLarge) {
+		h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "Request body exceeds the compatibility sanitization limit")
+		return
 	} else if sanErr != nil {
 		reqLog.Warn("sanitize anthropic body parse error (non-fatal, forwarding unchanged)",
 			zap.Error(sanErr),
@@ -2039,17 +2238,10 @@ func (h *GatewayHandler) maybeLogCompatibilityFallbackMetrics(reqLog *zap.Logger
 	)
 }
 
-func (h *GatewayHandler) submitUsageRecordTask(task service.UsageRecordTask) {
+func (h *GatewayHandler) submitUsageRecordTask(requestCtx context.Context, task service.UsageRecordTask) {
 	if task == nil {
 		return
 	}
-	if h.usageRecordWorkerPool != nil {
-		h.usageRecordWorkerPool.Submit(task)
-		return
-	}
-	// 回退路径：worker 池未注入时同步执行，避免退回到无界 goroutine 模式。
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			logger.L().With(
@@ -2058,7 +2250,34 @@ func (h *GatewayHandler) submitUsageRecordTask(task service.UsageRecordTask) {
 			).Error("gateway.usage_record_task_panic_recovered")
 		}
 	}()
-	task(ctx)
+	billingCtx := context.Background()
+	if requestCtx != nil {
+		billingCtx = context.WithoutCancel(requestCtx)
+	}
+	task(billingCtx)
+}
+
+func (h *GatewayHandler) submitGatewayUsageRecordTask(
+	requestCtx context.Context,
+	result *service.ForwardResult,
+	task service.UsageRecordTask,
+) {
+	if task == nil {
+		return
+	}
+	h.submitUsageRecordTask(requestCtx, func(ctx context.Context) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if result != nil && h != nil && h.gatewayService != nil {
+					if err := h.gatewayService.MarkGatewayUsageBillingOrphaned(ctx, result.UsageBillingIdentity); err != nil {
+						logger.L().Error("gateway.billing_result_orphan_mark_failed", zap.Error(err))
+					}
+				}
+				panic(recovered)
+			}
+		}()
+		task(ctx)
+	})
 }
 
 // getUserMsgQueueMode 获取当前请求的 UMQ 模式

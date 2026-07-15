@@ -57,7 +57,7 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		},
 	}
 
-	t.Run("standard_mode_needs_maintenance_does_not_block_request", func(t *testing.T) {
+	t.Run("standard_mode_waits_for_authoritative_window_maintenance", func(t *testing.T) {
 		cfg := &config.Config{RunMode: config.RunModeStandard}
 		cfg.SubscriptionMaintenance.WorkerCount = 1
 		cfg.SubscriptionMaintenance.QueueSize = 1
@@ -65,47 +65,72 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
 
 		past := time.Now().Add(-48 * time.Hour)
+		recent := time.Now()
 		groupID := group.ID
 		sub := &service.UserSubscription{
-			ID:               55,
-			UserID:           user.ID,
-			GroupID:          &groupID,
-			Status:           service.SubscriptionStatusActive,
-			ExpiresAt:        time.Now().Add(24 * time.Hour),
-			DailyWindowStart: &past,
-			DailyUsageUSD:    0,
+			ID:                 55,
+			UserID:             user.ID,
+			GroupID:            &groupID,
+			Status:             service.SubscriptionStatusActive,
+			ExpiresAt:          time.Now().Add(24 * time.Hour),
+			DailyWindowStart:   &past,
+			WeeklyWindowStart:  &recent,
+			MonthlyWindowStart: &recent,
+			DailyUsageUSD:      0,
 		}
-		maintenanceCalled := make(chan struct{}, 1)
+		maintenanceStarted := make(chan struct{}, 1)
+		releaseMaintenance := make(chan struct{})
 		subscriptionRepo := &stubUserSubscriptionRepo{
 			getActive: func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
 				clone := *sub
 				return &clone, nil
 			},
-			updateStatus:   func(ctx context.Context, subscriptionID int64, status string) error { return nil },
-			activateWindow: func(ctx context.Context, id int64, start time.Time) error { return nil },
-			resetDaily: func(ctx context.Context, id int64, start time.Time) error {
-				maintenanceCalled <- struct{}{}
-				return nil
+			getByID: func(ctx context.Context, id int64) (*service.UserSubscription, error) {
+				clone := *sub
+				return &clone, nil
 			},
-			resetWeekly:  func(ctx context.Context, id int64, start time.Time) error { return nil },
-			resetMonthly: func(ctx context.Context, id int64, start time.Time) error { return nil },
+			advanceWindow: func(ctx context.Context, id int64, advance service.SubscriptionUsageWindowAdvance) (bool, error) {
+				require.Equal(t, service.SubscriptionUsageWindowDaily, advance.Window)
+				require.NotNil(t, advance.ExpectedStart)
+				require.True(t, advance.ExpectedStart.Equal(past))
+				maintenanceStarted <- struct{}{}
+				<-releaseMaintenance
+				start := advance.NewStart
+				sub.DailyWindowStart = &start
+				sub.DailyUsageUSD = 0
+				return true, nil
+			},
 		}
 		subscriptionService := service.NewSubscriptionService(nil, subscriptionRepo, nil, nil, cfg)
 		t.Cleanup(subscriptionService.Stop)
 
 		router := newAuthTestRouter(apiKeyService, subscriptionService, cfg)
 
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/t", nil)
-		req.Header.Set("x-api-key", apiKey.Key)
-		router.ServeHTTP(w, req)
+		responseDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/t", nil)
+			req.Header.Set("x-api-key", apiKey.Key)
+			router.ServeHTTP(w, req)
+			responseDone <- w
+		}()
 
-		require.Equal(t, http.StatusOK, w.Code)
 		select {
-		case <-maintenanceCalled:
-			// ok
+		case <-maintenanceStarted:
 		case <-time.After(time.Second):
-			t.Fatalf("expected maintenance to be scheduled")
+			t.Fatalf("expected maintenance to start")
+		}
+		select {
+		case <-responseDone:
+			t.Fatalf("request must not proceed before window maintenance completes")
+		case <-time.After(25 * time.Millisecond):
+		}
+		close(releaseMaintenance)
+		select {
+		case w := <-responseDone:
+			require.Equal(t, http.StatusOK, w.Code)
+		case <-time.After(time.Second):
+			t.Fatalf("request did not resume after window maintenance")
 		}
 	})
 
@@ -137,7 +162,7 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		require.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("standard_mode_subscription_limit_falls_back_to_balance", func(t *testing.T) {
+	t.Run("standard_mode_subscription_limit_never_falls_back_to_balance", func(t *testing.T) {
 		cfg := &config.Config{RunMode: config.RunModeStandard}
 		apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
 
@@ -170,9 +195,9 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 
 		router := gin.New()
 		router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(apiKeyService, subscriptionService, cfg)))
-		var hasSubscription bool
+		handlerCalled := false
 		router.GET("/t", func(c *gin.Context) {
-			_, hasSubscription = GetSubscriptionFromContext(c)
+			handlerCalled = true
 			c.JSON(http.StatusOK, gin.H{"ok": true})
 		})
 
@@ -181,8 +206,9 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		req.Header.Set("x-api-key", apiKey.Key)
 		router.ServeHTTP(w, req)
 
-		require.Equal(t, http.StatusOK, w.Code)
-		require.False(t, hasSubscription, "over-limit subscription should be removed from context so downstream bills balance")
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		require.Contains(t, w.Body.String(), "USAGE_LIMIT_EXCEEDED")
+		require.False(t, handlerCalled, "an over-limit monthly subscription must not silently fall through to another ledger")
 	})
 
 	t.Run("standard_mode_enforces_quota_check_without_balance", func(t *testing.T) {
@@ -238,6 +264,59 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		require.Equal(t, http.StatusTooManyRequests, w.Code)
 		require.Contains(t, w.Body.String(), "USAGE_LIMIT_EXCEEDED")
 	})
+}
+
+func TestSimpleModeRejectsReservedWalletBusinessGroups(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name     string
+		group    *service.Group
+		user     *service.User
+		wantCode string
+	}{
+		{
+			name: "openai default cannot bypass billing",
+			group: &service.Group{
+				ID: 31, Name: service.WalletDefaultOpenAIGroupName, Platform: service.PlatformOpenAI,
+				Status: service.StatusActive, Hydrated: true, SubscriptionType: service.SubscriptionTypeStandard,
+			},
+			user:     &service.User{ID: 7, Status: service.StatusActive, Concurrency: 1},
+			wantCode: "SIMPLE_MODE_RESERVED_GROUP_DISABLED",
+		},
+		{
+			name: "revoked vip cannot bypass authorization",
+			group: &service.Group{
+				ID: 22, Name: service.WalletDefaultVIPGroupName, Platform: service.PlatformAnthropic,
+				Status: service.StatusActive, Hydrated: true, IsExclusive: true,
+				SubscriptionType: service.SubscriptionTypeStandard,
+			},
+			user:     &service.User{ID: 8, Status: service.StatusActive, Concurrency: 1},
+			wantCode: "GROUP_NOT_ALLOWED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiKey := &service.APIKey{
+				ID: 101, UserID: tt.user.ID, Key: "simple-reserved-key", Status: service.StatusActive,
+				User: tt.user, GroupID: &tt.group.ID, Group: tt.group,
+			}
+			repo := &stubApiKeyRepo{getByKey: func(context.Context, string) (*service.APIKey, error) {
+				clone := *apiKey
+				return &clone, nil
+			}}
+			cfg := &config.Config{RunMode: config.RunModeSimple}
+			router := newAuthTestRouter(service.NewAPIKeyService(repo, nil, nil, nil, nil, nil, cfg), nil, cfg)
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/t", nil)
+			req.Header.Set("x-api-key", apiKey.Key)
+			router.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusForbidden, w.Code)
+			require.Contains(t, w.Body.String(), tt.wantCode)
+		})
+	}
 }
 
 func TestAPIKeyAuthSetsGroupContext(t *testing.T) {
@@ -519,12 +598,23 @@ func TestAPIKeyAuthTouchesLastUsedInStandardMode(t *testing.T) {
 		Balance:     10,
 		Concurrency: 3,
 	}
+	group := &service.Group{
+		ID:               12,
+		Name:             "general-openai",
+		Platform:         service.PlatformOpenAI,
+		Status:           service.StatusActive,
+		Hydrated:         true,
+		SubscriptionType: service.SubscriptionTypeStandard,
+	}
 	apiKey := &service.APIKey{
-		ID:     102,
-		UserID: user.ID,
-		Key:    "touch-standard",
-		Status: service.StatusActive,
-		User:   user,
+		ID:      102,
+		UserID:  user.ID,
+		Key:     "touch-standard",
+		Purpose: service.APIKeyPurposeStandard,
+		GroupID: &group.ID,
+		Status:  service.StatusActive,
+		User:    user,
+		Group:   group,
 	}
 
 	touchCalls := 0
@@ -567,7 +657,8 @@ func TestAPIKeyAuthLoadsWalletSubscription(t *testing.T) {
 	// 会因为 DailyUsageUSD 撞 limit 而 429；钱包模式必须跳过该检查。
 	group := &service.Group{
 		ID:               42,
-		Name:             "standard-grp",
+		Name:             service.WalletDefaultOpenAIGroupName,
+		Platform:         service.PlatformOpenAI,
 		Status:           service.StatusActive,
 		Hydrated:         true,
 		SubscriptionType: service.SubscriptionTypeStandard,
@@ -581,14 +672,14 @@ func TestAPIKeyAuthLoadsWalletSubscription(t *testing.T) {
 		Concurrency: 3,
 	}
 	apiKey := &service.APIKey{
-		ID:     100,
-		UserID: user.ID,
-		Key:    "wallet-key",
-		Status: service.StatusActive,
-		User:   user,
-		Group:  group,
+		ID:      100,
+		UserID:  user.ID,
+		Key:     "wallet-key",
+		Name:    service.WalletUniversalAPIKeyName,
+		Purpose: service.APIKeyPurposeWalletUniversal,
+		Status:  service.StatusActive,
+		User:    user,
 	}
-	apiKey.GroupID = &group.ID
 
 	apiKeyRepo := &stubApiKeyRepo{
 		getByKey: func(ctx context.Context, key string) (*service.APIKey, error) {
@@ -608,13 +699,12 @@ func TestAPIKeyAuthLoadsWalletSubscription(t *testing.T) {
 		apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, nil, nil, nil, nil, cfg)
 
 		bal := 100.0
-		now := time.Now()
 		walletSub := &service.UserSubscription{
 			ID:               201,
 			UserID:           user.ID,
 			GroupID:          nil, // 钱包订阅 group_id=NULL
 			Status:           service.SubscriptionStatusActive,
-			ExpiresAt:        now.Add(24 * time.Hour),
+			ExpiresAt:        service.MaxExpiresAt,
 			WalletBalanceUSD: &bal,
 			DailyUsageUSD:    999, // 故意超 daily limit；钱包模式必须忽略
 		}
@@ -637,9 +727,15 @@ func TestAPIKeyAuthLoadsWalletSubscription(t *testing.T) {
 		t.Cleanup(subscriptionService.Stop)
 
 		router := gin.New()
-		router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddleware(apiKeyService, subscriptionService, cfg)))
+		router.Use(gin.HandlerFunc(NewAPIKeyAuthMiddlewareWithRouter(
+			apiKeyService,
+			subscriptionService,
+			&walletRouteModelRouterStub{groupID: group.ID},
+			&walletRouteGroupGetterStub{group: group},
+			cfg,
+		)))
 		var loadedSub *service.UserSubscription
-		router.GET("/t", func(c *gin.Context) {
+		router.GET("/v1/models", func(c *gin.Context) {
 			if sub, ok := GetSubscriptionFromContext(c); ok {
 				loadedSub = sub
 			}
@@ -647,7 +743,7 @@ func TestAPIKeyAuthLoadsWalletSubscription(t *testing.T) {
 		})
 
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/t", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		req.Header.Set("x-api-key", apiKey.Key)
 		router.ServeHTTP(w, req)
 
@@ -676,6 +772,9 @@ func TestAPIKeyAuthLoadsWalletSubscription(t *testing.T) {
 		}
 		subscriptionRepo := &stubUserSubscriptionRepo{
 			getActiveWallet: func(ctx context.Context, userID int64) (*service.UserSubscription, error) {
+				if !expiredWallet.ExpiresAt.After(time.Now()) {
+					return nil, service.ErrSubscriptionNotFound
+				}
 				clone := *expiredWallet
 				return &clone, nil
 			},
@@ -691,7 +790,7 @@ func TestAPIKeyAuthLoadsWalletSubscription(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		require.Equal(t, http.StatusForbidden, w.Code)
-		require.Contains(t, w.Body.String(), "SUBSCRIPTION_EXPIRED")
+		require.Contains(t, w.Body.String(), "WALLET_NOT_ACTIVE")
 	})
 }
 
@@ -776,11 +875,11 @@ func (r *stubApiKeyRepo) CountByGroupID(ctx context.Context, groupID int64) (int
 	return 0, errors.New("not implemented")
 }
 
-func (r *stubApiKeyRepo) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
+func (r *stubApiKeyRepo) ListAuthCacheLocatorsByUserID(ctx context.Context, userID int64) ([]string, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (r *stubApiKeyRepo) ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error) {
+func (r *stubApiKeyRepo) ListAuthCacheLocatorsByGroupID(ctx context.Context, groupID int64) ([]string, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -806,6 +905,7 @@ func (r *stubApiKeyRepo) GetRateLimitData(ctx context.Context, id int64) (*servi
 }
 
 type stubUserSubscriptionRepo struct {
+	getByID              func(ctx context.Context, id int64) (*service.UserSubscription, error)
 	getActive            func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
 	getActiveWallet      func(ctx context.Context, userID int64) (*service.UserSubscription, error)
 	getActiveByPlanCover func(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error)
@@ -815,6 +915,7 @@ type stubUserSubscriptionRepo struct {
 	resetDaily           func(ctx context.Context, id int64, start time.Time) error
 	resetWeekly          func(ctx context.Context, id int64, start time.Time) error
 	resetMonthly         func(ctx context.Context, id int64, start time.Time) error
+	advanceWindow        func(ctx context.Context, id int64, advance service.SubscriptionUsageWindowAdvance) (bool, error)
 }
 
 func (r *stubUserSubscriptionRepo) Create(ctx context.Context, sub *service.UserSubscription) error {
@@ -822,6 +923,9 @@ func (r *stubUserSubscriptionRepo) Create(ctx context.Context, sub *service.User
 }
 
 func (r *stubUserSubscriptionRepo) GetByID(ctx context.Context, id int64) (*service.UserSubscription, error) {
+	if r.getByID != nil {
+		return r.getByID(ctx, id)
+	}
 	return nil, errors.New("not implemented")
 }
 
@@ -842,6 +946,9 @@ func (r *stubUserSubscriptionRepo) GetActiveWalletByUserID(ctx context.Context, 
 	}
 	// 默认返回 NotFound：老测试默认不走钱包路径，行为与现有 (user, group) lookup 一致。
 	return nil, service.ErrSubscriptionNotFound
+}
+func (r *stubUserSubscriptionRepo) GetActiveCreditsWalletByUserID(ctx context.Context, userID int64) (*service.UserSubscription, error) {
+	return r.GetActiveWalletByUserID(ctx, userID)
 }
 
 func (r *stubUserSubscriptionRepo) GetActiveByPlanCoveringGroup(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
@@ -927,6 +1034,12 @@ func (r *stubUserSubscriptionRepo) ResetMonthlyUsage(ctx context.Context, id int
 		return r.resetMonthly(ctx, id, newWindowStart)
 	}
 	return errors.New("not implemented")
+}
+func (r *stubUserSubscriptionRepo) AdvanceUsageWindow(ctx context.Context, id int64, advance service.SubscriptionUsageWindowAdvance) (bool, error) {
+	if r.advanceWindow != nil {
+		return r.advanceWindow(ctx, id, advance)
+	}
+	return false, errors.New("not implemented")
 }
 
 func (r *stubUserSubscriptionRepo) IncrementUsage(ctx context.Context, id int64, costUSD float64) error {

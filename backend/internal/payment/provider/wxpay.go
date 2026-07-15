@@ -28,9 +28,10 @@ import (
 
 // WeChat Pay constants.
 const (
-	wxpayCurrency   = "CNY"
-	wxpayH5Type     = "Wap"
-	wxpayResultPath = "/payment/result"
+	wxpayCurrency          = "CNY"
+	wxpayH5Type            = "Wap"
+	wxpayResultPath        = "/payment/result"
+	wxpayOutTradeNoMaxSize = 32
 )
 
 const (
@@ -170,6 +171,9 @@ func (w *Wxpay) ensureClient() (*core.Client, error) {
 }
 
 func (w *Wxpay) CreatePayment(ctx context.Context, req payment.CreatePaymentRequest) (*payment.CreatePaymentResponse, error) {
+	if err := validateWxpayOutTradeNo(req.OrderID); err != nil {
+		return nil, err
+	}
 	client, err := w.ensureClient()
 	if err != nil {
 		return nil, err
@@ -201,6 +205,24 @@ func (w *Wxpay) CreatePayment(ctx context.Context, req payment.CreatePaymentRequ
 	default:
 		return nil, fmt.Errorf("wxpay create payment: unsupported mode %q", mode)
 	}
+}
+
+func validateWxpayOutTradeNo(raw string) error {
+	orderID := strings.TrimSpace(raw)
+	if orderID == "" || len(orderID) > wxpayOutTradeNoMaxSize {
+		return infraerrors.BadRequest("WXPAY_OUT_TRADE_NO_INVALID", "wxpay out_trade_no must contain 1 to 32 characters")
+	}
+	for _, ch := range orderID {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= 'A' && ch <= 'Z':
+		case ch >= '0' && ch <= '9':
+		case ch == '_' || ch == '-':
+		default:
+			return infraerrors.BadRequest("WXPAY_OUT_TRADE_NO_INVALID", "wxpay out_trade_no contains unsupported characters")
+		}
+	}
+	return nil
 }
 
 func (w *Wxpay) prepayJSAPI(ctx context.Context, c *core.Client, req payment.CreatePaymentRequest, notifyURL string, totalFen int64) (*payment.CreatePaymentResponse, error) {
@@ -471,9 +493,13 @@ func (w *Wxpay) Refund(ctx context.Context, req payment.RefundRequest) (*payment
 	}
 	rs := refunddomestic.RefundsApiService{Client: c}
 	cur := wxpayCurrency
+	outRefundNo := strings.TrimSpace(req.IdempotencyKey)
+	if outRefundNo == "" {
+		outRefundNo = fmt.Sprintf("%s-refund-%d", req.OrderID, time.Now().UnixNano())
+	}
 	res, _, err := rs.Create(ctx, refunddomestic.CreateRequest{
 		OutTradeNo:  core.String(req.OrderID),
-		OutRefundNo: core.String(fmt.Sprintf("%s-refund-%d", req.OrderID, time.Now().UnixNano())),
+		OutRefundNo: core.String(outRefundNo),
 		Reason:      core.String(req.Reason),
 		Amount:      &refunddomestic.AmountReq{Refund: core.Int64(rf), Total: core.Int64(tf), Currency: &cur},
 	})
