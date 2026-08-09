@@ -229,6 +229,11 @@ type OpenAIWSIngressHooks struct {
 	// BeforeRequest runs before ingress-side model/tool mutations. explicitImageIntent
 	// is computed from the immutable client payload and is shared by all ingress modes.
 	BeforeRequest func(turn int, payload []byte, originalModel string, explicitImageIntent bool) error
+	// OnUpstreamAccepted fires once the current response.create turn has been
+	// successfully written to (or accepted by) the upstream transport. It is
+	// intentionally separate from BeforeTurn/BeforeRequest so local validation
+	// failures are never reported as upstream admissions.
+	OnUpstreamAccepted func(turn int)
 	// MapRequestModel resolves the current turn's client model to the model
 	// that must be written into the upstream response.create frame.
 	MapRequestModel func(turn int, originalModel string) (string, error)

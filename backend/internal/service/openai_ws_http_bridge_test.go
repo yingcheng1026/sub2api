@@ -139,6 +139,8 @@ func TestProxyOpenAIWSHTTPBridgeTurnHTTPStatusFailoverSafety(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			accepted := 0
+			ctx := WithUpstreamAcceptedCallback(context.Background(), func() { accepted++ })
 			upstream := &httpUpstreamRecorder{resp: &http.Response{
 				StatusCode: tt.status,
 				Header:     make(http.Header),
@@ -153,7 +155,7 @@ func TestProxyOpenAIWSHTTPBridgeTurnHTTPStatusFailoverSafety(t *testing.T) {
 			var writes [][]byte
 
 			result, err := svc.proxyOpenAIWSHTTPBridgeTurn(
-				context.Background(), c, account, "sk-test", payload, len(payload),
+				ctx, c, account, "sk-test", payload, len(payload),
 				"gpt-5", "", "", "", "", tt.turn,
 				func(message []byte) error {
 					writes = append(writes, append([]byte(nil), message...))
@@ -171,6 +173,7 @@ func TestProxyOpenAIWSHTTPBridgeTurnHTTPStatusFailoverSafety(t *testing.T) {
 				require.False(t, errors.As(err, &failoverErr))
 			}
 			require.Len(t, writes, tt.wantWrites)
+			require.Equal(t, 0, accepted, "非 2xx 上游响应不能记录 accepted attempt")
 		})
 	}
 }
@@ -239,6 +242,8 @@ func TestProxyOpenAIWSHTTPBridgeTurnRequiresTerminalEvent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			accepted := 0
+			ctx := WithUpstreamAcceptedCallback(context.Background(), func() { accepted++ })
 			upstream := &httpUpstreamRecorder{resp: &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     make(http.Header),
@@ -253,7 +258,7 @@ func TestProxyOpenAIWSHTTPBridgeTurnRequiresTerminalEvent(t *testing.T) {
 			var writes [][]byte
 
 			result, err := svc.proxyOpenAIWSHTTPBridgeTurn(
-				context.Background(), c, account, "sk-test", payload, len(payload),
+				ctx, c, account, "sk-test", payload, len(payload),
 				"gpt-5", "", "", "", "", 1,
 				func(message []byte) error {
 					writes = append(writes, append([]byte(nil), message...))
@@ -271,6 +276,7 @@ func TestProxyOpenAIWSHTTPBridgeTurnRequiresTerminalEvent(t *testing.T) {
 				require.False(t, errors.As(err, &failoverErr))
 			}
 			require.Len(t, writes, tt.wantWrites)
+			require.Equal(t, 1, accepted, "2xx 后即使 SSE 截断也应记录 accepted attempt")
 		})
 	}
 }

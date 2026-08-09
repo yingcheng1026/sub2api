@@ -203,6 +203,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		}
 		return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	if account.Platform == PlatformGrok {
 		s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)

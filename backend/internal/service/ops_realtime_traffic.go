@@ -32,5 +32,15 @@ func (s *OpsService) GetRealtimeTrafficSummary(ctx context.Context, filter *OpsD
 	// Realtime traffic summary always uses raw logs (minute granularity peaks).
 	filter.QueryMode = OpsQueryModeRaw
 
-	return s.opsRepo.GetRealtimeTrafficSummary(ctx, filter)
+	summary, err := s.opsRepo.GetRealtimeTrafficSummary(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	// The lifecycle tracker is process-local and cannot be attributed to a
+	// persisted platform/group slice. Keep it on the unfiltered overview only.
+	if summary != nil && filter.Platform == "" && filter.GroupID == nil {
+		lifecycle := SnapshotOpsRequestLifecycle(filter.StartTime, filter.EndTime)
+		summary.Lifecycle = &lifecycle
+	}
+	return summary, nil
 }

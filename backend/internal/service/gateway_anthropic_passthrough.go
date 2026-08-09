@@ -262,6 +262,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	if resp.StatusCode >= 400 {
 		return s.handleErrorResponse(ctx, resp, c, account, input.RequestModel)
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int

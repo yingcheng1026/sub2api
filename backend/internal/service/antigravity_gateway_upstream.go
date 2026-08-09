@@ -103,6 +103,7 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 			Model: originalModel,
 		}, nil
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	// 处理成功响应（流式/非流式）
 	var usage *ClaudeUsage

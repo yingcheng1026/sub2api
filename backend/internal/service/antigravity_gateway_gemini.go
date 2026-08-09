@@ -389,6 +389,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	}
 
 handleSuccess:
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 	requestID := resp.Header.Get("x-request-id")
 	if requestID != "" {
 		c.Header("x-request-id", requestID)

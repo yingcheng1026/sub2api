@@ -1029,7 +1029,9 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughModeR
 
 	serverErrCh := make(chan error, 1)
 	resultCh := make(chan *OpenAIForwardResult, 1)
+	acceptedCh := make(chan int, 1)
 	hooks := &OpenAIWSIngressHooks{
+		OnUpstreamAccepted: func(turn int) { acceptedCh <- turn },
 		AfterTurn: func(_ int, result *OpenAIForwardResult, turnErr error) {
 			if turnErr == nil && result != nil {
 				resultCh <- result
@@ -1119,6 +1121,12 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughModeR
 	case <-time.After(2 * time.Second):
 		t.Fatal("未收到 passthrough turn 结果回调")
 	}
+	select {
+	case turn := <-acceptedCh:
+		require.Equal(t, 1, turn)
+	case <-time.After(2 * time.Second):
+		t.Fatal("未收到 passthrough upstream accepted 回调")
+	}
 
 	require.Equal(t, 1, captureDialer.DialCount(), "passthrough 模式应直接建立上游 websocket")
 	require.Len(t, upstreamConn.writes, 1, "passthrough 模式应透传首条 response.create")
@@ -1173,7 +1181,9 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughFollo
 
 	serverErrCh := make(chan error, 1)
 	intentCh := make(chan bool, 1)
+	acceptedCh := make(chan int, 2)
 	hooks := &OpenAIWSIngressHooks{
+		OnUpstreamAccepted: func(turn int) { acceptedCh <- turn },
 		CheckImagePermission: func(eventType string, payload []byte, originalModel string, permissionImageIntent bool) error {
 			if permissionImageIntent {
 				intentCh <- true
@@ -1242,6 +1252,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughFollo
 	require.NoError(t, readErr)
 	require.Equal(t, "response.completed", gjson.GetBytes(firstEvent, "type").String())
 	require.Equal(t, "resp_passthrough_permission_1", gjson.GetBytes(firstEvent, "response.id").String())
+	require.Equal(t, 1, <-acceptedCh)
 
 	writeMessage(coderws.MessageBinary, `{"type":"response.create","model":"gpt-5.1","stream":false,"input":"mapped image alias"}`)
 	_, readErr = readMessage()
@@ -1259,6 +1270,11 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughFollo
 		t.Fatal("等待 passthrough image permission close 超时")
 	}
 	require.Len(t, upstreamConn.writes, 1, "被禁止的后续 image turn 不应写入上游")
+	select {
+	case turn := <-acceptedCh:
+		t.Fatalf("被本地拒绝的 binary turn 不应计为 accepted，收到 turn=%d", turn)
+	default:
+	}
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughHeadersUsePromptCacheAndTurnState(t *testing.T) {

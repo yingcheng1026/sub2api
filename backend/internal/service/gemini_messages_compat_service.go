@@ -1047,6 +1047,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		}
 		return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	requestID := resp.Header.Get(requestIDHeader)
 	if requestID == "" {
@@ -1585,6 +1586,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		}
 		return nil, fmt.Errorf("gemini upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int

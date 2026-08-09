@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,42 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+type upstreamAcceptedCallbackContextKey struct{}
+
+// WithUpstreamAcceptedCallback carries an explicit per-attempt admission hook
+// through protocol adapters that do not receive ParsedRequest directly.
+func WithUpstreamAcceptedCallback(ctx context.Context, callback func()) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if callback == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, upstreamAcceptedCallbackContextKey{}, callback)
+}
+
+// NotifyUpstreamAccepted invokes the current attempt's admission hook. The
+// caller must invoke this only after receiving a successful upstream response
+// (or an equivalent protocol-level acceptance signal).
+func NotifyUpstreamAccepted(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	callback, _ := ctx.Value(upstreamAcceptedCallbackContextKey{}).(func())
+	if callback != nil {
+		callback()
+	}
+}
+
+// NotifyUpstreamAcceptedHTTP2xx invokes the admission hook only for a real
+// successful upstream HTTP response. Redirects and error responses do not
+// represent an accepted model attempt.
+func NotifyUpstreamAcceptedHTTP2xx(ctx context.Context, statusCode int) {
+	if statusCode >= 200 && statusCode < 300 {
+		NotifyUpstreamAccepted(ctx)
+	}
+}
 
 var (
 	// 这些字节模式用于 fast-path 判断，避免每次 []byte("...") 产生临时分配。

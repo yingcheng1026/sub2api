@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
@@ -21,6 +22,16 @@ import (
 // forwards to Anthropic upstream, and converts responses back to Chat Completions format.
 func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	streamStarted := false
+	var opsLifecycle *service.OpsRequestLifecycleHandle
+	var opsTerminalErr error
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			opsTerminalErr = errors.New("gateway chat completions handler panic")
+			completeOpsRequestLifecycleFromHTTP(c, opsLifecycle, opsTerminalErr)
+			panic(recovered)
+		}
+		completeOpsRequestLifecycleFromHTTP(c, opsLifecycle, opsTerminalErr)
+	}()
 
 	requestStart := time.Now()
 
@@ -110,6 +121,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		h.openAISecurityAuditError(c, decision)
 		return
 	}
+	opsLifecycle = service.BeginOpsRequestLifecycle()
 
 	// Error passthrough binding
 	if h.errorPassthroughService != nil {
@@ -263,6 +275,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
 		var result *service.ForwardResult
+		var attemptAccepted atomic.Bool
+		acceptAttempt := func() {
+			if !attemptAccepted.CompareAndSwap(false, true) {
+				return
+			}
+			opsLifecycle.Accepted()
+		}
+		requestCtx := service.WithUpstreamAcceptedCallback(c.Request.Context(), acceptAttempt)
 		setActualUpstreamEndpoint(c, "")
 		if account.Platform == service.PlatformGemini {
 			if h.geminiCompatService == nil {
@@ -272,7 +292,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				}
 				return
 			}
-			result, err = h.geminiCompatService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
+			result, err = h.geminiCompatService.ForwardAsChatCompletions(requestCtx, c, account, forwardBody)
 		} else if shouldUseAntigravityCompat(account) {
 			if h.antigravityGatewayService == nil {
 				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "Antigravity compatibility service is not configured")
@@ -282,10 +302,11 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
-			result, err = h.antigravityGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
+			result, err = h.antigravityGatewayService.ForwardAsChatCompletions(requestCtx, c, account, forwardBody, parsedReq)
 		} else {
-			result, err = h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
+			result, err = h.gatewayService.ForwardAsChatCompletions(requestCtx, c, account, forwardBody, parsedReq)
 		}
+		opsTerminalErr = err
 
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()

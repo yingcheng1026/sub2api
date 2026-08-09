@@ -32,17 +32,21 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	groupID int64,
 ) error {
 	if s == nil {
+		RecordOpsCachePrewarmSkipped()
+		return nil
+	}
+	if !s.isOpenAIWSGeneratePrewarmEnabled() {
+		RecordOpsCachePrewarmSkipped()
 		return nil
 	}
 	if lease == nil || account == nil {
+		RecordOpsCachePrewarmSkipped()
 		logOpenAIWSModeInfo("prewarm_skip reason=invalid_state has_lease=%v has_account=%v", lease != nil, account != nil)
 		return nil
 	}
 	connID := strings.TrimSpace(lease.ConnID())
-	if !s.isOpenAIWSGeneratePrewarmEnabled() {
-		return nil
-	}
 	if decision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
+		RecordOpsCachePrewarmSkipped()
 		logOpenAIWSModeInfo(
 			"prewarm_skip account_id=%d conn_id=%s reason=transport_not_v2 transport=%s",
 			account.ID,
@@ -52,6 +56,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 		return nil
 	}
 	if strings.TrimSpace(previousResponseID) != "" {
+		RecordOpsCachePrewarmSkipped()
 		logOpenAIWSModeInfo(
 			"prewarm_skip account_id=%d conn_id=%s reason=has_previous_response_id previous_response_id=%s",
 			account.ID,
@@ -61,14 +66,17 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 		return nil
 	}
 	if lease.IsPrewarmed() {
+		RecordOpsCachePrewarmSkipped()
 		logOpenAIWSModeInfo("prewarm_skip account_id=%d conn_id=%s reason=already_prewarmed", account.ID, connID)
 		return nil
 	}
 	if NeedsToolContinuation(reqBody) {
+		RecordOpsCachePrewarmSkipped()
 		logOpenAIWSModeInfo("prewarm_skip account_id=%d conn_id=%s reason=tool_continuation", account.ID, connID)
 		return nil
 	}
 	prewarmStart := time.Now()
+	RecordOpsCachePrewarmStarted()
 	logOpenAIWSModeInfo("prewarm_start account_id=%d conn_id=%s", account.ID, connID)
 
 	prewarmPayload := make(map[string]any, len(payload)+1)
@@ -79,6 +87,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	prewarmPayloadJSON := payloadAsJSONBytes(prewarmPayload)
 
 	if err := lease.WriteJSONWithContextTimeout(ctx, prewarmPayload, s.openAIWSWriteTimeout()); err != nil {
+		RecordOpsCachePrewarmFailed(time.Since(prewarmStart))
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
 			"prewarm_write_fail account_id=%d conn_id=%s cause=%s",
@@ -96,6 +105,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	for {
 		message, readErr := lease.ReadMessageWithContextTimeout(ctx, s.openAIWSReadTimeout())
 		if readErr != nil {
+			RecordOpsCachePrewarmFailed(time.Since(prewarmStart))
 			lease.MarkBroken()
 			closeStatus, closeReason := summarizeOpenAIWSReadCloseError(readErr)
 			logOpenAIWSModeInfo(
@@ -130,6 +140,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 		}
 
 		if eventType == "error" {
+			RecordOpsCachePrewarmFailed(time.Since(prewarmStart))
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
 			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw)
 			errMsg := strings.TrimSpace(errMsgRaw)
@@ -156,13 +167,21 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 			return wrapOpenAIWSFallback("prewarm_error_event", errors.New(errMsg))
 		}
 
-		if isOpenAIWSTerminalEvent(eventType) {
+		switch normalizeOpenAIWSTerminalEvent(eventType) {
+		case "response.completed", "response.done":
 			prewarmTerminalCount++
-			break
+			lease.MarkPrewarmed()
+			RecordOpsCachePrewarmSucceeded(time.Since(prewarmStart))
+			goto prewarmSucceeded
+		case "response.failed", "response.incomplete", "response.cancelled":
+			prewarmTerminalCount++
+			RecordOpsCachePrewarmFailed(time.Since(prewarmStart))
+			lease.MarkBroken()
+			return wrapOpenAIWSFallback("prewarm_"+strings.TrimPrefix(eventType, "response."), errors.New("OpenAI websocket prewarm terminal failure"))
 		}
 	}
 
-	lease.MarkPrewarmed()
+prewarmSucceeded:
 	if prewarmResponseID != "" && stateStore != nil {
 		ttl := s.openAIWSResponseStickyTTL()
 		logOpenAIWSBindResponseAccountWarn(groupID, account.ID, prewarmResponseID, stateStore.BindResponseAccount(ctx, groupID, prewarmResponseID, account.ID, ttl))

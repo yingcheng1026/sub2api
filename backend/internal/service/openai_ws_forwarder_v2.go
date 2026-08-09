@@ -323,6 +323,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		)
 		return nil, wrapOpenAIWSFallback("write_request", err)
 	}
+	// The user request is accepted at the successful upstream write. This is
+	// deliberately after optional generate=false prewarm so prewarm traffic is
+	// never counted as user throughput.
+	NotifyUpstreamAccepted(ctx)
 	if debugEnabled {
 		logOpenAIWSModeDebug(
 			"write_request_sent account_id=%d conn_id=%s stream=%v payload_bytes=%d previous_response_id=%s",

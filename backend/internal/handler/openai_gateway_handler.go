@@ -236,6 +236,14 @@ func NewOpenAIGatewayHandler(
 func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 局部兜底：确保该 handler 内部任何 panic 都不会击穿到进程级。
 	streamStarted := false
+	var opsLifecycle *service.OpsRequestLifecycleHandle
+	var opsTerminalErr error
+	// Register this defer before the panic recovery defer below. Defer order
+	// ensures a recovered panic has already written its terminal response before
+	// lifecycle status is sampled.
+	defer func() {
+		completeOpsRequestLifecycleFromHTTP(c, opsLifecycle, opsTerminalErr)
+	}()
 	defer h.recoverResponsesPanic(c, &streamStarted)
 	compactStartedAt := time.Now()
 	defer h.logOpenAIRemoteCompactOutcome(c, compactStartedAt)
@@ -352,6 +360,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.openAISecurityAuditError(c, decision)
 		return
 	}
+	opsLifecycle = service.BeginOpsRequestLifecycle()
 
 	// 使用 IsExplicitImageGenerationIntent 排除被动 image_gen namespace 声明。
 	// Codex 在所有请求中被动声明 image_gen namespace，宽泛检测会导致禁了生图的
@@ -447,6 +456,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	c.Request = c.Request.WithContext(pricingCtx)
 
 	for {
+		opsTerminalErr = nil
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
 		// account attempt so a canceled request never starts a failover replay.
@@ -540,6 +550,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// Forward request
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
 		forwardStart := time.Now()
+		var attemptAccepted atomic.Bool
+		acceptAttempt := func() {
+			if !attemptAccepted.CompareAndSwap(false, true) {
+				return
+			}
+			opsLifecycle.Accepted()
+		}
+		requestCtx := service.WithUpstreamAcceptedCallback(c.Request.Context(), acceptAttempt)
 		// 用扣除 compact 心跳字节的口径快照：心跳注释不构成语义响应，
 		// 不能因心跳字节变化而放弃 failover 换号（#3887）。
 		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
@@ -553,8 +571,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					accountReleaseFunc()
 				}
 			}()
-			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
+			return h.gatewayService.Forward(requestCtx, c, account, attemptBody)
 		}()
+		opsTerminalErr = err
 		cyberBlockKeyHTTP := ""
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockKeyHTTP = service.CyberSessionBlockKey(apiKey.ID, c, sessionHashBody)
@@ -884,6 +903,11 @@ func (h *OpenAIGatewayHandler) logOpenAIRemoteCompactOutcome(c *gin.Context, sta
 // POST /v1/messages (when group platform is OpenAI)
 func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	streamStarted := false
+	var opsLifecycle *service.OpsRequestLifecycleHandle
+	var opsTerminalErr error
+	defer func() {
+		completeOpsRequestLifecycleFromHTTP(c, opsLifecycle, opsTerminalErr)
+	}()
 	defer h.recoverAnthropicMessagesPanic(c, &streamStarted)
 
 	requestStart := time.Now()
@@ -963,6 +987,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		h.anthropicSecurityAuditError(c, decision)
 		return
 	}
+	opsLifecycle = service.BeginOpsRequestLifecycle()
 
 	// 解析渠道级模型映射
 	channelMappingMsg, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
@@ -1018,6 +1043,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	c.Request = c.Request.WithContext(msgPricingCtx)
 
 	for {
+		opsTerminalErr = nil
 		if failoverClientGone(c) {
 			return
 		}
@@ -1102,14 +1128,23 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
 		writerSizeBeforeForward := c.Writer.Size()
+		var attemptAccepted atomic.Bool
+		acceptAttempt := func() {
+			if !attemptAccepted.CompareAndSwap(false, true) {
+				return
+			}
+			opsLifecycle.Accepted()
+		}
+		requestCtx := service.WithUpstreamAcceptedCallback(c.Request.Context(), acceptAttempt)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
 				}
 			}()
-			return h.gatewayService.ForwardAsAnthropic(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
+			return h.gatewayService.ForwardAsAnthropic(requestCtx, c, account, forwardBody, promptCacheKey, defaultMappedModel)
 		}()
+		opsTerminalErr = err
 		cyberBlockKeyMsg := ""
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockKeyMsg = service.CyberSessionBlockKey(apiKey.ID, c, body)
@@ -1726,6 +1761,85 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 
+	// WS lifecycle is turn-scoped: one Begin per validated response.create and
+	// one Complete after its terminal event/error. The small registry keeps hook
+	// callbacks idempotent across pool retries and passthrough relays.
+	var opsTurnMu sync.Mutex
+	opsTurns := make(map[int]*service.OpsRequestLifecycleHandle)
+	beginOpsTurn := func(turn int) *service.OpsRequestLifecycleHandle {
+		if turn < 1 {
+			turn = 1
+		}
+		opsTurnMu.Lock()
+		defer opsTurnMu.Unlock()
+		if handle := opsTurns[turn]; handle != nil {
+			return handle
+		}
+		handle := service.BeginOpsRequestLifecycle()
+		opsTurns[turn] = handle
+		return handle
+	}
+	completeOpsTurn := func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+		var failoverErr *service.UpstreamFailoverError
+		retryableFailover := errors.As(turnErr, &failoverErr) && failoverErr != nil && failoverErr.ShouldRetryNextAccount()
+		opsTurnMu.Lock()
+		handle := opsTurns[turn]
+		if !retryableFailover {
+			delete(opsTurns, turn)
+		}
+		opsTurnMu.Unlock()
+		if handle == nil {
+			// AfterTurn may be used for connection-level idle/disconnect cleanup.
+			// Without a validated request handle there is no logical request to
+			// synthesize or complete.
+			return
+		}
+		if retryableFailover {
+			return
+		}
+		statusCode := http.StatusOK
+		terminalErr := turnErr
+		if result == nil {
+			if terminalErr == nil {
+				terminalErr = errors.New("websocket turn ended without a terminal response")
+			}
+			statusCode = http.StatusBadGateway
+		} else {
+			switch strings.TrimSpace(result.UpstreamTerminalEvent) {
+			case "response.cancelled", "response.canceled":
+				terminalErr = context.Canceled
+				statusCode = http.StatusRequestTimeout
+			case "response.failed", "response.incomplete":
+				if terminalErr == nil {
+					terminalErr = errors.New("upstream websocket response failed")
+				}
+				statusCode = http.StatusBadGateway
+			}
+		}
+		if terminalErr == nil && result == nil {
+			terminalErr = service.OpsRequestTerminalError(ctx)
+		}
+		handle.Complete(statusCode, terminalErr)
+	}
+	beginOpsTurn(1)
+	defer func() {
+		fallbackErr := service.OpsRequestTerminalError(ctx)
+		if fallbackErr == nil {
+			fallbackErr = errors.New("websocket request ended before a terminal response")
+		}
+		opsTurnMu.Lock()
+		pending := make(map[int]*service.OpsRequestLifecycleHandle, len(opsTurns))
+		for turn, handle := range opsTurns {
+			pending[turn] = handle
+			delete(opsTurns, turn)
+		}
+		opsTurnMu.Unlock()
+		for turn, handle := range pending {
+			_ = turn
+			handle.Complete(http.StatusBadGateway, fallbackErr)
+		}
+	}()
+
 	requestPlatform := openAICompatibleRequestPlatform(ctx, apiKey)
 	imageIntent := service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, firstMessage)
 	effectiveFirstTurnImageIntent := imageIntent
@@ -2086,10 +2200,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				return prepareImageTurnSlot(imageAdmissionIntent)
 			},
+			OnUpstreamAccepted: func(turn int) {
+				beginOpsTurn(turn).Accepted()
+			},
 			BeforeRequest: func(turn int, payload []byte, originalModel string, explicitImageIntent bool) error {
-				if turn == 1 {
-					return nil
-				}
 				if !gjson.ValidBytes(payload) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 				}
@@ -2105,6 +2219,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					writeSecurityAuditWSError(ctx, wsConn, decision)
 					return service.NewOpenAIWSClientCloseError(securityAuditWSCloseStatus(decision), securityAuditWSCloseReason(decision), nil)
 				}
+				beginOpsTurn(turn)
 				return nil
 			},
 			MapRequestModel: func(turn int, originalModel string) (string, error) {
@@ -2180,6 +2295,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return nil
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+				completeOpsTurn(turn, result, turnErr)
 				// F1: cyber 标记按 turn 生命周期清理——defer 保证任意早返回路径都执行；
 				// CyberBlocked 必须在 submit 前同步预捕获（task 闭包由 worker 池异步执行，
 				// 届时 defer 已清除标记）。
@@ -2372,6 +2488,9 @@ func (h *OpenAIGatewayHandler) recoverResponsesPanic(c *gin.Context, streamStart
 	if recovered == nil {
 		return
 	}
+	if c != nil {
+		c.Set(opsRequestLifecycleTerminalErrorKey, errors.New("openai responses handler panic"))
+	}
 
 	started := false
 	if streamStarted != nil {
@@ -2392,6 +2511,9 @@ func (h *OpenAIGatewayHandler) recoverAnthropicMessagesPanic(c *gin.Context, str
 	recovered := recover()
 	if recovered == nil {
 		return
+	}
+	if c != nil {
+		c.Set(opsRequestLifecycleTerminalErrorKey, errors.New("openai messages handler panic"))
 	}
 
 	started := streamStarted != nil && *streamStarted

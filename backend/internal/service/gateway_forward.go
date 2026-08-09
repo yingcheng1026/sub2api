@@ -791,6 +791,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	}
 
 	// 触发上游接受回调（提前释放串行锁，不等流完成）
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 	if parsed.OnUpstreamAccepted != nil {
 		parsed.OnUpstreamAccepted()
 	}

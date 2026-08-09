@@ -183,6 +183,7 @@ func (s *GatewayService) ForwardAsResponses(
 		writeResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), "server_error", upstreamMsg)
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	// 13. Handle normal response (convert Anthropic → Responses)
 	var result *ForwardResult

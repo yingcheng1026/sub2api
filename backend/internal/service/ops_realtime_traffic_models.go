@@ -16,4 +16,9 @@ type OpsRealtimeTrafficSummary struct {
 
 	QPS OpsRateSummary `json:"qps"`
 	TPS OpsRateSummary `json:"tps"`
+
+	// Lifecycle is process-local and measures validated logical requests at the
+	// gateway boundary. It is separate from persisted QPS/TPS because usage-log
+	// persistence is asynchronous and retries must not inflate offered demand.
+	Lifecycle *OpsRequestLifecycleSnapshot `json:"lifecycle,omitempty"`
 }

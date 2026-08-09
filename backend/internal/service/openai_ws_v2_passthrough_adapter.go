@@ -352,6 +352,7 @@ func (l *openAIWSPassthroughTurnLifecycle) finishTerminalWrite(succeeded bool, o
 type openAIWSPassthroughFirstOutputFrameConn struct {
 	inner             openaiwsv2.FrameConn
 	resolveDeadline   func(payload []byte) openAIWSPassthroughFirstOutputDeadline
+	onWrite           func(msgType coderws.MessageType, payload []byte)
 	activeReadTimeout time.Duration
 
 	mu              sync.Mutex
@@ -459,6 +460,9 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) WriteFrame(ctx context.Context
 	if err := c.inner.WriteFrame(ctx, msgType, payload); err != nil {
 		c.disarmDeadline(generation)
 		return err
+	}
+	if c.onWrite != nil {
+		c.onWrite(msgType, payload)
 	}
 	return nil
 }
@@ -889,10 +893,19 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
 	}
+	completedTurns := atomic.Int32{}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
 		inner:             upstreamFrameConn,
 		activeReadTimeout: s.openAIWSPassthroughIdleTimeout(),
 		deadlineChanged:   make(chan struct{}, 1),
+		onWrite: func(msgType coderws.MessageType, payload []byte) {
+			if (msgType != coderws.MessageText && msgType != coderws.MessageBinary) || strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "response.create" {
+				return
+			}
+			if hooks != nil && hooks.OnUpstreamAccepted != nil {
+				hooks.OnUpstreamAccepted(int(completedTurns.Load()) + 1)
+			}
+		},
 		resolveDeadline: func(payload []byte) openAIWSPassthroughFirstOutputDeadline {
 			reasoningEffort := ""
 			if current := usageMeta.reasoningEffort.Load(); current != nil {
@@ -918,7 +931,6 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		},
 	}
 
-	completedTurns := atomic.Int32{}
 	turnLifecycle := newOpenAIWSPassthroughTurnLifecycle(true)
 	clientFrameConn := &openAIWSClientFrameConn{
 		conn:                 clientConn,
@@ -1112,7 +1124,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if readErr != nil {
 				return msgType, payload, readErr
 			}
-			if msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
+			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+			if (msgType == coderws.MessageText || msgType == coderws.MessageBinary) && eventType == "response.create" {
 				return msgType, payload, nil
 			}
 			if writeErr := upstreamFrameConn.WriteFrame(readCtx, msgType, payload); writeErr != nil {

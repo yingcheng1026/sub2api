@@ -417,6 +417,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 			return nil, s.writeMappedClaudeError(c, account, resp.StatusCode, resp.Header.Get("x-request-id"), respBody)
 		}
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	requestID := resp.Header.Get("x-request-id")
 	if requestID != "" {

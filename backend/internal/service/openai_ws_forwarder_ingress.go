@@ -577,8 +577,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					return fmt.Errorf("resolve Grok websocket cache identity: %w", err)
 				}
 			}
+			bridgeCtx := ctx
+			if hooks != nil && hooks.OnUpstreamAccepted != nil {
+				bridgeCtx = WithUpstreamAcceptedCallback(ctx, func() {
+					hooks.OnUpstreamAccepted(turn)
+				})
+			}
 			result, bridgeErr := s.proxyOpenAIWSHTTPBridgeTurn(
-				ctx,
+				bridgeCtx,
 				c,
 				account,
 				token,
@@ -819,6 +825,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				fmt.Errorf("write upstream websocket request: %w", err),
 				false,
 			)
+		}
+		if hooks != nil && hooks.OnUpstreamAccepted != nil {
+			hooks.OnUpstreamAccepted(turn)
 		}
 		if debugEnabled {
 			logOpenAIWSModeDebug(

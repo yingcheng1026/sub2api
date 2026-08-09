@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
@@ -22,6 +23,11 @@ import (
 // POST /v1/chat/completions
 func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	streamStarted := false
+	var opsLifecycle *service.OpsRequestLifecycleHandle
+	var opsTerminalErr error
+	defer func() {
+		completeOpsRequestLifecycleFromHTTP(c, opsLifecycle, opsTerminalErr)
+	}()
 	defer h.recoverResponsesPanic(c, &streamStarted)
 
 	requestStart := time.Now()
@@ -105,6 +111,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	if h.rejectIfCyberSessionBlocked(c, apiKey, body, reqModel, cyberBlockFormatChat) {
 		return
 	}
+	opsLifecycle = service.BeginOpsRequestLifecycle()
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
@@ -231,14 +238,23 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
 		writerSizeBeforeForward := c.Writer.Size()
+		var attemptAccepted atomic.Bool
+		acceptAttempt := func() {
+			if !attemptAccepted.CompareAndSwap(false, true) {
+				return
+			}
+			opsLifecycle.Accepted()
+		}
+		requestCtx := service.WithUpstreamAcceptedCallback(c.Request.Context(), acceptAttempt)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
 				}
 			}()
-			return h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, promptCacheKey, "")
+			return h.gatewayService.ForwardAsChatCompletions(requestCtx, c, account, forwardBody, promptCacheKey, "")
 		}()
+		opsTerminalErr = err
 		cyberBlockKeyChat := ""
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockKeyChat = service.CyberSessionBlockKey(apiKey.ID, c, body)

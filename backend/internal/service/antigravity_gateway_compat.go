@@ -310,6 +310,7 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatResponse(
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, s.handleAntigravityCompatHTTPError(ctx, c, account, call, resp)
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	requestID := resp.Header.Get("x-request-id")
 	if requestID != "" {

@@ -1342,6 +1342,31 @@ func TestOpenAIGatewayService_PrewarmReadHonorsParentContext(t *testing.T) {
 	require.Less(t, elapsed, 180*time.Millisecond, "预热读取应受父 context 取消控制，不应阻塞到 read_timeout")
 }
 
+func TestOpenAIGatewayService_PrewarmTerminalFailuresDoNotWarm(t *testing.T) {
+	for _, eventType := range []string{"response.failed", "response.incomplete", "response.cancelled"} {
+		t.Run(eventType, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIWS.PrewarmGenerateEnabled = true
+			cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 1
+			cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 1
+			svc := &OpenAIGatewayService{cfg: cfg, toolCorrector: NewCodexToolCorrector()}
+			account := &Account{ID: 602, Name: "prewarm-terminal-failure", Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			conn := newOpenAIWSConn("prewarm_terminal_failure_"+eventType, account.ID, &openAIWSCaptureConn{
+				events: [][]byte{[]byte(`{"type":"` + eventType + `","response":{"id":"resp_failed"}}`)},
+			}, nil)
+			lease := &openAIWSConnLease{accountID: account.ID, conn: conn}
+			err := svc.performOpenAIWSGeneratePrewarm(
+				context.Background(), lease,
+				OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2},
+				map[string]any{"type": "response.create", "model": "gpt-5.1"},
+				"", map[string]any{"model": "gpt-5.1"}, account, nil, 0,
+			)
+			require.Error(t, err)
+			require.False(t, lease.IsPrewarmed())
+		})
+	}
+}
+
 func TestOpenAIGatewayService_Forward_WSv2_TurnMetadataInPayloadOnConnReuse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

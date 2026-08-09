@@ -522,6 +522,9 @@ func TestOpenAIRecoverResponsesPanic_AppendsResponseFailedAfterWritten(t *testin
 	})
 
 	require.Equal(t, http.StatusTeapot, w.Code)
+	marker, ok := c.Get(opsRequestLifecycleTerminalErrorKey)
+	require.True(t, ok)
+	require.Error(t, marker.(error))
 	body := w.Body.String()
 	assert.Contains(t, body, "already written")
 	assert.Contains(t, body, "event: response.failed\n")

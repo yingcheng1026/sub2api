@@ -121,6 +121,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 		// shared compat handler (passthrough rules, ops recording, cyber_policy).
 		return s.handleAnthropicErrorResponse(resp, c, account, billingModel)
 	}
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 
 	// 5. Convert response
 	if clientStream {

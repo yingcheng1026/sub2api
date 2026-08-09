@@ -35,6 +35,8 @@ import (
 
 const gatewayCompatibilityMetricsLogInterval = 1024
 
+const opsRequestLifecycleTerminalErrorKey = "ops_request_lifecycle_terminal_error"
+
 var gatewayCompatibilityMetricsLogCounter atomic.Uint64
 
 // GatewayHandler handles API gateway requests
@@ -213,6 +215,22 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		h.anthropicSecurityAuditError(c, decision)
 		return
 	}
+
+	// Start one logical lifecycle after request validation/security checks. The
+	// handle is completed once on every return path, while each failover attempt
+	// calls Accepted at the first upstream 2xx admission.
+	opsLifecycle := service.BeginOpsRequestLifecycle()
+	var opsTerminalErr error
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			// Keep the original panic flowing to Gin's recovery middleware, but
+			// record the lifecycle as failed before it is recovered there.
+			opsTerminalErr = errors.New("gateway handler panic")
+			completeOpsRequestLifecycleFromHTTP(c, opsLifecycle, opsTerminalErr)
+			panic(recovered)
+		}
+		completeOpsRequestLifecycleFromHTTP(c, opsLifecycle, opsTerminalErr)
+	}()
 
 	// Track if we've started streaming (for error handling)
 	streamStarted := false
@@ -454,7 +472,15 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 			// 转发请求 - 根据账号平台分流
 			var result *service.ForwardResult
+			var attemptAccepted atomic.Bool
+			acceptAttempt := func() {
+				if !attemptAccepted.CompareAndSwap(false, true) {
+					return
+				}
+				opsLifecycle.Accepted()
+			}
 			requestCtx := c.Request.Context()
+			requestCtx = service.WithUpstreamAcceptedCallback(requestCtx, acceptAttempt)
 			if fs.SwitchCount > 0 {
 				requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 			}
@@ -475,6 +501,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			} else {
 				result, err = h.geminiCompatService.Forward(requestCtx, c, account, body)
 			}
+			opsTerminalErr = err
 			if accountReleaseFunc != nil {
 				accountReleaseFunc()
 			}
@@ -823,8 +850,22 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 			// 用 wrapReleaseOnDone 确保 context 取消时自动释放（仅 serialize 模式有 queueRelease）
 			queueRelease = wrapReleaseOnDone(c.Request.Context(), queueRelease)
-			// 注入回调到 ParsedRequest：使用外层 wrapper 以便提前清理 AfterFunc
-			attemptParsedReq.OnUpstreamAccepted = queueRelease
+			// 注入回调到 ParsedRequest：使用外层 wrapper 以便提前清理 AfterFunc。
+			// GatewayService.Forward 调用该回调的时刻就是上游 2xx
+			// admission，因此这里同时记录本次真实 accepted attempt。
+			releaseOnAccepted := queueRelease
+			var attemptAccepted atomic.Bool
+			acceptAttempt := func() {
+				if !attemptAccepted.CompareAndSwap(false, true) {
+					return
+				}
+				opsLifecycle.Accepted()
+			}
+			attemptParsedReq.OnUpstreamAccepted = func() {
+				if releaseOnAccepted != nil {
+					releaseOnAccepted()
+				}
+			}
 			// ===== 用户消息串行队列 END =====
 
 			// 渠道模型映射只作用于本次账号尝试，避免 failover 后污染原始 ParsedRequest。
@@ -846,6 +887,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			c.Set("parsed_request", attemptParsedReq)
 			var result *service.ForwardResult
 			requestCtx := c.Request.Context()
+			requestCtx = service.WithUpstreamAcceptedCallback(requestCtx, acceptAttempt)
 			if fs.SwitchCount > 0 {
 				requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 			}
@@ -859,6 +901,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			} else {
 				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)
 			}
+			opsTerminalErr = err
 
 			// 兜底释放串行锁（正常情况已通过回调提前释放）
 			if queueRelease != nil {
@@ -2385,6 +2428,39 @@ func (h *GatewayHandler) maybeLogCompatibilityFallbackMetrics(reqLog *zap.Logger
 		zap.Float64("session_hash_legacy_read_hit_rate", metrics.SessionHashLegacyReadHitRate),
 		zap.Int64("metadata_legacy_fallback_total", metrics.MetadataLegacyFallbackTotal),
 	)
+}
+
+// completeOpsRequestLifecycleFromHTTP closes one process-local lifecycle
+// handle using the final wire status and request cancellation state. The
+// helper is intentionally shared by the generic and OpenAI HTTP handlers so
+// every validated request has exactly one terminal update.
+func completeOpsRequestLifecycleFromHTTP(c *gin.Context, handle *service.OpsRequestLifecycleHandle, terminalErr error) {
+	if handle == nil {
+		return
+	}
+	statusCode := 0
+	requestCtx := context.Background()
+	if c != nil {
+		if c.Writer != nil {
+			statusCode = c.Writer.Status()
+		}
+		if c.Request != nil && c.Request.Context() != nil {
+			requestCtx = c.Request.Context()
+		}
+	}
+	if terminalErr == nil {
+		if c != nil {
+			if marker, ok := c.Get(opsRequestLifecycleTerminalErrorKey); ok {
+				if markerErr, ok := marker.(error); ok {
+					terminalErr = markerErr
+				}
+			}
+		}
+	}
+	if terminalErr == nil {
+		terminalErr = service.OpsRequestTerminalError(requestCtx)
+	}
+	handle.Complete(statusCode, terminalErr)
 }
 
 func (h *GatewayHandler) submitUsageRecordTask(parent context.Context, task service.UsageRecordTask) {

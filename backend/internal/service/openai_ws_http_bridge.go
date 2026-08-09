@@ -263,6 +263,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		_ = writeClientMessage(buildOpenAIWSHTTPBridgeErrorEvent(resp.StatusCode, upstreamMsg))
 		return nil, fmt.Errorf("upstream http bridge error: status=%d message=%s", resp.StatusCode, upstreamMsg)
 	}
+	// A successful HTTP status is the bridge attempt's admission boundary. Fire
+	// before reading the first SSE event so a 2xx response followed by a truncated
+	// or failed stream remains an accepted (but failed) attempt.
+	NotifyUpstreamAcceptedHTTP2xx(ctx, resp.StatusCode)
 	if account.Platform == PlatformGrok {
 		s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
 	}
