@@ -220,7 +220,15 @@ type OpenAIWSIngressHooks struct {
 	// ReasoningEffortMappings rewrites explicit effort values for this WS session.
 	ReasoningEffortMappings []ReasoningEffortMapping
 	BeforeTurn              func(turn int) error
-	BeforeRequest           func(turn int, payload []byte, originalModel string) error
+	// CheckImagePermission runs for immutable response.create and session.update
+	// client frames before ingress-specific mutation or upstream forwarding.
+	CheckImagePermission func(eventType string, payload []byte, originalModel string, permissionImageIntent bool) error
+	// EnsureImageAdmission runs after model mapping and before a response.create
+	// frame can reach an upstream transport.
+	EnsureImageAdmission func(turn int, imageAdmissionIntent bool) error
+	// BeforeRequest runs before ingress-side model/tool mutations. explicitImageIntent
+	// is computed from the immutable client payload and is shared by all ingress modes.
+	BeforeRequest func(turn int, payload []byte, originalModel string, explicitImageIntent bool) error
 	// MapRequestModel resolves the current turn's client model to the model
 	// that must be written into the upstream response.create frame.
 	MapRequestModel func(turn int, originalModel string) (string, error)

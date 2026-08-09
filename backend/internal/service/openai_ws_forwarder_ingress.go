@@ -145,15 +145,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	isCodexCLI := openai.IsCodexOfficialClientByHeaders(c.GetHeader("User-Agent"), c.GetHeader("originator")) || (s.cfg != nil && s.cfg.Gateway.ForceCodexCLI)
 
 	type openAIWSClientPayload struct {
-		payloadRaw         []byte
-		rawForHash         []byte
-		promptCacheKey     string
-		previousResponseID string
-		originalModel      string
-		imageBillingModel  string
-		imageSizeTier      string
-		imageInputSize     string
-		payloadBytes       int
+		payloadRaw           []byte
+		rawForHash           []byte
+		promptCacheKey       string
+		previousResponseID   string
+		originalModel        string
+		explicitImageIntent  bool
+		imageAdmissionIntent bool
+		imageBillingModel    string
+		imageSizeTier        string
+		imageInputSize       string
+		payloadBytes         int
 	}
 	ingressSessionOriginalModel := ""
 
@@ -240,6 +242,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				)
 			}
 		}
+		immutableImageIntent := classifyOpenAIWSImageIntent("response.create", originalModel, trimmed, account.Platform)
+		explicitImageIntent := immutableImageIntent.Explicit
+		if hooks != nil && hooks.CheckImagePermission != nil {
+			if permissionErr := hooks.CheckImagePermission("response.create", trimmed, originalModel, immutableImageIntent.Permission); permissionErr != nil {
+				return openAIWSClientPayload{}, permissionErr
+			}
+		}
 		promptCacheKey := strings.TrimSpace(values[2].String())
 		previousResponseID := strings.TrimSpace(values[3].String())
 		previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
@@ -319,6 +328,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 		}
 		upstreamModel := normalizeOpenAIModelForUpstream(account, account.GetMappedModel(requestModel))
+		effectiveImageModelIntent := isOpenAIImageGenerationModel(upstreamModel)
+		imageAdmissionIntent := explicitImageIntent || effectiveImageModelIntent
+		if effectiveImageModelIntent && !immutableImageIntent.Permission && hooks != nil && hooks.CheckImagePermission != nil {
+			if permissionErr := hooks.CheckImagePermission("response.create", trimmed, originalModel, true); permissionErr != nil {
+				return openAIWSClientPayload{}, permissionErr
+			}
+		}
 		if modelMissing || upstreamModel != originalModel {
 			next, setErr := applyPayloadMutation(normalized, "model", upstreamModel)
 			if setErr != nil {
@@ -341,7 +357,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			logOpenAIWSModeInfo("ingress_ws_codex_spark_image_tool_stripped account_id=%d", account.ID)
 		}
 		imageIntent := IsImageGenerationIntentForPlatform(openAIResponsesEndpoint, originalModel, normalized, account.Platform)
-		if imageIntent && !imageGenerationAllowed {
+		if (immutableImageIntent.Permission || effectiveImageModelIntent) && !imageGenerationAllowed {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, ImageGenerationPermissionMessage(), nil)
 		}
 		imageBillingModel := ""
@@ -398,15 +414,17 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		ingressSessionOriginalModel = originalModel
 
 		return openAIWSClientPayload{
-			payloadRaw:         normalized,
-			rawForHash:         trimmed,
-			promptCacheKey:     promptCacheKey,
-			previousResponseID: previousResponseID,
-			originalModel:      originalModel,
-			imageBillingModel:  imageBillingModel,
-			imageSizeTier:      imageSizeTier,
-			imageInputSize:     imageInputSize,
-			payloadBytes:       len(normalized),
+			payloadRaw:           normalized,
+			rawForHash:           trimmed,
+			promptCacheKey:       promptCacheKey,
+			previousResponseID:   previousResponseID,
+			originalModel:        originalModel,
+			explicitImageIntent:  explicitImageIntent,
+			imageAdmissionIntent: imageAdmissionIntent,
+			imageBillingModel:    imageBillingModel,
+			imageSizeTier:        imageSizeTier,
+			imageInputSize:       imageInputSize,
+			payloadBytes:         len(normalized),
 		}, nil
 	}
 
@@ -497,7 +515,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		bridgeReplayInputExists := false
 		for turn := 1; ; turn++ {
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
-				if err := hooks.BeforeRequest(turn, currentBridgePayload.payloadRaw, currentBridgePayload.originalModel); err != nil {
+				if err := hooks.BeforeRequest(turn, currentBridgePayload.payloadRaw, currentBridgePayload.originalModel, currentBridgePayload.explicitImageIntent); err != nil {
+					return err
+				}
+			}
+			if hooks != nil && hooks.EnsureImageAdmission != nil {
+				if err := hooks.EnsureImageAdmission(turn, currentBridgePayload.imageAdmissionIntent); err != nil {
 					return err
 				}
 			}
@@ -1057,6 +1080,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	currentPayload := firstPayload.payloadRaw
 	currentOriginalModel := firstPayload.originalModel
+	currentExplicitImageIntent := firstPayload.explicitImageIntent
+	currentImageAdmissionIntent := firstPayload.imageAdmissionIntent
 	currentImageBillingModel := firstPayload.imageBillingModel
 	currentImageSizeTier := firstPayload.imageSizeTier
 	currentImageInputSize := firstPayload.imageInputSize
@@ -1242,7 +1267,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 	for {
 		if turn > 1 && !skipBeforeTurn && hooks != nil && hooks.BeforeRequest != nil {
-			if err := hooks.BeforeRequest(turn, currentPayload, currentOriginalModel); err != nil {
+			if err := hooks.BeforeRequest(turn, currentPayload, currentOriginalModel, currentExplicitImageIntent); err != nil {
+				return err
+			}
+		}
+		if !skipBeforeTurn && hooks != nil && hooks.EnsureImageAdmission != nil {
+			if err := hooks.EnsureImageAdmission(turn, currentImageAdmissionIntent); err != nil {
 				return err
 			}
 		}
@@ -1678,6 +1708,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		currentPayload = nextPayload.payloadRaw
 		currentOriginalModel = nextPayload.originalModel
+		currentExplicitImageIntent = nextPayload.explicitImageIntent
+		currentImageAdmissionIntent = nextPayload.imageAdmissionIntent
 		currentImageBillingModel = nextPayload.imageBillingModel
 		currentImageSizeTier = nextPayload.imageSizeTier
 		currentImageInputSize = nextPayload.imageInputSize

@@ -716,6 +716,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if initialRequestModel == "" {
 		initialRequestModel = openAIWSPassthroughRequestModelForFrame(firstClientMessage)
 	}
+	firstImmutableImageIntent := classifyOpenAIWSImageIntent("response.create", initialRequestModel, firstClientMessage, account.Platform)
+	if hooks != nil && hooks.CheckImagePermission != nil {
+		if permissionErr := hooks.CheckImagePermission("response.create", firstClientMessage, initialRequestModel, firstImmutableImageIntent.Permission); permissionErr != nil {
+			return permissionErr
+		}
+	}
 	if hooks != nil && hooks.MapRequestModel != nil {
 		mappedModel, mapErr := hooks.MapRequestModel(1, initialRequestModel)
 		if mapErr != nil {
@@ -728,6 +734,17 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	capturedSessionModel := openAIWSPassthroughPolicyModelForFrame(account, firstClientMessage)
 	if capturedSessionModel != "" && capturedSessionModel != strings.TrimSpace(gjson.GetBytes(firstClientMessage, "model").String()) {
 		firstClientMessage = s.ReplaceModelInBody(firstClientMessage, capturedSessionModel)
+	}
+	firstEffectiveImageModelIntent := isOpenAIImageGenerationModel(capturedSessionModel)
+	if firstEffectiveImageModelIntent && !firstImmutableImageIntent.Permission && hooks != nil && hooks.CheckImagePermission != nil {
+		if permissionErr := hooks.CheckImagePermission("response.create", firstClientMessage, initialRequestModel, true); permissionErr != nil {
+			return permissionErr
+		}
+	}
+	if hooks != nil && hooks.EnsureImageAdmission != nil {
+		if admissionErr := hooks.EnsureImageAdmission(1, firstImmutableImageIntent.Explicit || firstEffectiveImageModelIntent); admissionErr != nil {
+			return admissionErr
+		}
 	}
 	usageMeta := newOpenAIWSPassthroughUsageMeta(initialRequestModel, firstClientMessage)
 	updatedFirst, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, capturedSessionModel, firstClientMessage)
@@ -917,6 +934,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			return replaceOpenAIWSMessageModel(payload, upstreamModel, requestModel)
 		},
 	}
+	// session.update can install image tools inherited by later response.create
+	// frames. Keep a conservative monotonic session signal for this connection:
+	// once image capability is enabled, subsequent turns remain admitted through
+	// the image limiter even if a later partial update omits the tools field.
+	var sessionImageIntent openAIWSSessionImageIntentState
 	policyClientConn := &openAIWSPolicyEnforcingFrameConn{
 		inner: clientFrameConn,
 		// 注意线程安全：filter 仅在 runClientToUpstream 这一条
@@ -924,11 +946,28 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		// capturedSessionModel 的读写都发生在该 goroutine 内，因此无需
 		// 加锁/原子化。
 		filter: func(msgType coderws.MessageType, payload []byte) (out []byte, blocked *OpenAIFastBlockedError, filterErr error) {
-			if msgType != coderws.MessageText {
+			if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 				return payload, nil, nil
 			}
 			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 			isResponseCreate := eventType == "response.create"
+			isImagePermissionFrame := isResponseCreate || eventType == "session.update"
+			immutableModel := capturedSessionModel
+			if isResponseCreate {
+				if model := strings.TrimSpace(gjson.GetBytes(payload, "model").String()); model != "" {
+					immutableModel = model
+				}
+			} else if eventType == "session.update" {
+				if model := strings.TrimSpace(gjson.GetBytes(payload, "session.model").String()); model != "" {
+					immutableModel = model
+				}
+			}
+			immutableImageIntent := sessionImageIntent.classify(eventType, immutableModel, payload, account.Platform)
+			if isImagePermissionFrame && hooks != nil && hooks.CheckImagePermission != nil {
+				if permissionErr := hooks.CheckImagePermission(eventType, payload, immutableModel, immutableImageIntent.Permission); permissionErr != nil {
+					return payload, nil, permissionErr
+				}
+			}
 			acceptedTurn := false
 			if isResponseCreate {
 				if !turnLifecycle.beginResponseCreate(clientFrameConn.markTurnStarted) {
@@ -966,7 +1005,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					requestModelForThisFrame = capturedSessionModel
 				}
 				if hooks != nil && hooks.BeforeRequest != nil {
-					if err := hooks.BeforeRequest(turnNo, payload, requestModelForThisFrame); err != nil {
+					if err := hooks.BeforeRequest(turnNo, payload, requestModelForThisFrame, immutableImageIntent.Explicit); err != nil {
 						return payload, nil, err
 					}
 				}
@@ -1002,6 +1041,19 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			model := openAIWSPassthroughPolicyModelForFrame(account, payload)
 			if model == "" {
 				model = capturedSessionModel
+			}
+			if isResponseCreate {
+				effectiveImageModelIntent := isOpenAIImageGenerationModel(model)
+				if effectiveImageModelIntent && !immutableImageIntent.Permission && hooks != nil && hooks.CheckImagePermission != nil {
+					if permissionErr := hooks.CheckImagePermission(eventType, payload, requestModelForThisFrame, true); permissionErr != nil {
+						return payload, nil, permissionErr
+					}
+				}
+				if hooks != nil && hooks.EnsureImageAdmission != nil {
+					if admissionErr := hooks.EnsureImageAdmission(turnNo, immutableImageIntent.Explicit || effectiveImageModelIntent); admissionErr != nil {
+						return payload, nil, admissionErr
+					}
+				}
 			}
 			if isResponseCreate && model != "" && model != strings.TrimSpace(gjson.GetBytes(payload, "model").String()) {
 				payload = s.ReplaceModelInBody(payload, model)

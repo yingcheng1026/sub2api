@@ -901,6 +901,29 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 	}
 
 	errCh := make(chan error, 1)
+	followUpRawImageIntentCh := make(chan bool, 1)
+	followUpAdmissionIntentCh := make(chan bool, 1)
+	hooks := &OpenAIWSIngressHooks{
+		BeforeRequest: func(turn int, payload []byte, originalModel string, explicitImageIntent bool) error {
+			if turn != 2 {
+				return errors.New("unexpected http bridge turn")
+			}
+			followUpRawImageIntentCh <- explicitImageIntent
+			return nil
+		},
+		MapRequestModel: func(turn int, originalModel string) (string, error) {
+			if turn == 2 {
+				return "gpt-image-2", nil
+			}
+			return originalModel, nil
+		},
+		EnsureImageAdmission: func(turn int, imageAdmissionIntent bool) error {
+			if turn == 2 {
+				followUpAdmissionIntentCh <- imageAdmissionIntent
+			}
+			return nil
+		},
+	}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{CompressionMode: coderws.CompressionContextTakeover})
 		if err != nil {
@@ -928,7 +951,7 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 		req.Header.Set("User-Agent", "codex_cli_rs/0.135.0")
 		ginCtx.Request = req
 
-		errCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, nil)
+		errCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, hooks)
 	}))
 	defer wsServer.Close()
 
@@ -961,6 +984,8 @@ func TestOpenAIWSHTTPBridgeKeepsContinuationFramesOnHTTPWithoutPreviousResponseI
 	secondTurnEvent := readMessage()
 	require.Equal(t, "response.completed", gjson.GetBytes(secondTurnEvent, "type").String())
 	require.Equal(t, "resp_bridge_second", gjson.GetBytes(secondTurnEvent, "response.id").String())
+	require.False(t, <-followUpRawImageIntentCh, "plain immutable payload must remain non-image intent")
+	require.True(t, <-followUpAdmissionIntentCh, "http_bridge mapped image model must require image admission")
 
 	require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
 	select {

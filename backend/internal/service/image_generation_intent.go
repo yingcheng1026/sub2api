@@ -114,6 +114,60 @@ func IsExplicitImageGenerationIntent(endpoint string, requestedModel string, bod
 	return imageIntent
 }
 
+type openAIWSImageIntent struct {
+	Explicit   bool
+	Permission bool
+}
+
+type openAIWSSessionImageIntentState struct {
+	explicit   bool
+	permission bool
+}
+
+// classifyOpenAIWSImageIntent evaluates immutable client frames before any
+// server-side tool injection. Permission deliberately retains the broader
+// platform policy while Explicit remains the narrower admission/capability
+// signal that ignores a passive image_gen namespace declaration.
+func classifyOpenAIWSImageIntent(eventType string, requestedModel string, payload []byte, platform string) openAIWSImageIntent {
+	eventType = strings.TrimSpace(eventType)
+	intentPayload := payload
+	intentModel := strings.TrimSpace(requestedModel)
+	switch eventType {
+	case "response.create":
+		// The response payload already exposes model/tools/tool_choice at root.
+	case "session.update":
+		session := gjson.GetBytes(payload, "session")
+		if !session.Exists() || !session.IsObject() {
+			return openAIWSImageIntent{}
+		}
+		intentPayload = []byte(session.Raw)
+		if model := strings.TrimSpace(session.Get("model").String()); model != "" {
+			intentModel = model
+		}
+	default:
+		return openAIWSImageIntent{}
+	}
+	return openAIWSImageIntent{
+		Explicit:   IsExplicitImageGenerationIntent(openAIResponsesEndpoint, intentModel, intentPayload),
+		Permission: IsImageGenerationIntentForPlatform(openAIResponsesEndpoint, intentModel, intentPayload, platform),
+	}
+}
+
+func (s *openAIWSSessionImageIntentState) classify(eventType string, requestedModel string, payload []byte, platform string) openAIWSImageIntent {
+	intent := classifyOpenAIWSImageIntent(eventType, requestedModel, payload, platform)
+	switch strings.TrimSpace(eventType) {
+	case "session.update":
+		// Partial session updates may omit previously configured tools. Preserve
+		// a conservative monotonic signal for the lifetime of the connection.
+		s.explicit = s.explicit || intent.Explicit
+		s.permission = s.permission || intent.Permission
+	case "response.create":
+		intent.Explicit = intent.Explicit || s.explicit
+		intent.Permission = intent.Permission || s.permission
+	}
+	return intent
+}
+
 // IsImageGenerationIntentForPlatform applies platform-specific intent rules.
 //
 // Codex advertises the image_gen namespace on ordinary Responses requests so

@@ -61,3 +61,35 @@ func TestIsExplicitImageGenerationIntent_PlainTextRequest(t *testing.T) {
 	assert.False(t, IsExplicitImageGenerationIntent("/v1/responses", "gpt-5.5", body),
 		"plain text request should NOT be explicit image intent")
 }
+
+func TestClassifyOpenAIWSImageIntent_SeparatesAdmissionFromPermission(t *testing.T) {
+	passive := []byte(`{"type":"response.create","model":"gpt-5.5","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}]}`)
+	intent := classifyOpenAIWSImageIntent("response.create", "gpt-5.5", passive, PlatformOpenAI)
+	assert.False(t, intent.Explicit, "passive namespace must not consume image admission capacity")
+	assert.True(t, intent.Permission, "passive namespace remains subject to the group permission gate")
+}
+
+func TestClassifyOpenAIWSImageIntent_SessionUpdateUsesNestedSession(t *testing.T) {
+	update := []byte(`{"type":"session.update","session":{"model":"gpt-5.5","tools":[{"type":"image_generation","model":"gpt-image-2"}]}}`)
+	intent := classifyOpenAIWSImageIntent("session.update", "gpt-5.1", update, PlatformOpenAI)
+	assert.True(t, intent.Explicit)
+	assert.True(t, intent.Permission)
+
+	plain := []byte(`{"type":"session.update","session":{"voice":"alloy"}}`)
+	intent = classifyOpenAIWSImageIntent("session.update", "gpt-5.5", plain, PlatformOpenAI)
+	assert.False(t, intent.Explicit)
+	assert.False(t, intent.Permission)
+}
+
+func TestOpenAIWSSessionImageIntentState_InheritsSessionToolsIntoResponseCreate(t *testing.T) {
+	var state openAIWSSessionImageIntentState
+	update := []byte(`{"type":"session.update","session":{"tools":[{"type":"image_generation","model":"gpt-image-2"}]}}`)
+	intent := state.classify("session.update", "gpt-5.5", update, PlatformOpenAI)
+	assert.True(t, intent.Explicit)
+	assert.True(t, intent.Permission)
+
+	plainTurn := []byte(`{"type":"response.create","model":"gpt-5.5","input":"hello"}`)
+	intent = state.classify("response.create", "gpt-5.5", plainTurn, PlatformOpenAI)
+	assert.True(t, intent.Explicit, "session image tools must keep later turns in image admission")
+	assert.True(t, intent.Permission, "session image tools must keep later turns behind the permission gate")
+}

@@ -148,7 +148,28 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_KeepLeaseAcrossT
 
 	serverErrCh := make(chan error, 1)
 	turnTerminalCh := make(chan string, 2)
+	followUpRawImageIntentCh := make(chan bool, 1)
+	followUpAdmissionIntentCh := make(chan bool, 1)
 	hooks := &OpenAIWSIngressHooks{
+		BeforeRequest: func(turn int, payload []byte, originalModel string, explicitImageIntent bool) error {
+			if turn != 2 {
+				return errors.New("unexpected ctx_pool turn")
+			}
+			followUpRawImageIntentCh <- explicitImageIntent
+			return nil
+		},
+		MapRequestModel: func(turn int, originalModel string) (string, error) {
+			if turn == 2 {
+				return "gpt-image-2", nil
+			}
+			return originalModel, nil
+		},
+		EnsureImageAdmission: func(turn int, imageAdmissionIntent bool) error {
+			if turn == 2 {
+				followUpAdmissionIntentCh <- imageAdmissionIntent
+			}
+			return nil
+		},
 		AfterTurn: func(_ int, result *OpenAIForwardResult, turnErr error) {
 			if turnErr == nil && result != nil {
 				turnTerminalCh <- result.UpstreamTerminalEvent
@@ -225,6 +246,8 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_KeepLeaseAcrossT
 	secondTurnEvent := readMessage()
 	require.Equal(t, "response.completed", gjson.GetBytes(secondTurnEvent, "type").String())
 	require.Equal(t, "resp_ingress_turn_2", gjson.GetBytes(secondTurnEvent, "response.id").String())
+	require.False(t, <-followUpRawImageIntentCh, "plain immutable payload must remain non-image intent")
+	require.True(t, <-followUpAdmissionIntentCh, "ctx_pool mapped image model must require image admission")
 	require.Equal(t, "response.completed", <-turnTerminalCh, "首轮 turn 应保留成功终态")
 	require.Equal(t, "response.completed", <-turnTerminalCh, "第二轮 turn 应保留成功终态")
 
@@ -1099,6 +1122,143 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughModeR
 
 	require.Equal(t, 1, captureDialer.DialCount(), "passthrough 模式应直接建立上游 websocket")
 	require.Len(t, upstreamConn.writes, 1, "passthrough 模式应透传首条 response.create")
+}
+
+func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughFollowUpImageIntentRechecksPermission(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+	cfg.Gateway.OpenAIWS.IngressModeDefault = OpenAIWSIngressModeCtxPool
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
+	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+
+	upstreamConn := &openAIWSCaptureConn{
+		readDelays: []time.Duration{0, time.Second},
+		events: [][]byte{
+			[]byte(`{"type":"response.completed","response":{"id":"resp_passthrough_permission_1","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_passthrough_permission_2","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`),
+		},
+	}
+	captureDialer := &openAIWSCaptureDialer{conn: upstreamConn}
+	svc := &OpenAIGatewayService{
+		cfg:                       cfg,
+		httpUpstream:              &httpUpstreamRecorder{},
+		cache:                     &stubGatewayCache{},
+		openaiWSResolver:          NewOpenAIWSProtocolResolver(cfg),
+		toolCorrector:             NewCodexToolCorrector(),
+		openaiWSPassthroughDialer: captureDialer,
+	}
+
+	account := &Account{
+		ID:          453,
+		Name:        "openai-ingress-passthrough-permission",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test"},
+		Extra: map[string]any{
+			"openai_apikey_responses_websockets_v2_mode": OpenAIWSIngressModePassthrough,
+		},
+	}
+
+	serverErrCh := make(chan error, 1)
+	intentCh := make(chan bool, 1)
+	hooks := &OpenAIWSIngressHooks{
+		CheckImagePermission: func(eventType string, payload []byte, originalModel string, permissionImageIntent bool) error {
+			if permissionImageIntent {
+				intentCh <- true
+				return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, ImageGenerationPermissionMessage(), nil)
+			}
+			return nil
+		},
+		MapRequestModel: func(turn int, originalModel string) (string, error) {
+			if turn == 2 {
+				return "gpt-image-2", nil
+			}
+			return originalModel, nil
+		},
+	}
+
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{CompressionMode: coderws.CompressionContextTakeover})
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		req := r.Clone(r.Context())
+		req.Header = req.Header.Clone()
+		req.Header.Set("User-Agent", "unit-test-agent/1.0")
+		ginCtx.Request = req
+
+		readCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		msgType, firstMessage, readErr := conn.Read(readCtx)
+		cancel()
+		if readErr != nil {
+			serverErrCh <- readErr
+			return
+		}
+		if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
+			serverErrCh <- errors.New("unsupported websocket client message type")
+			return
+		}
+		serverErrCh <- svc.ProxyResponsesWebSocketFromClient(r.Context(), ginCtx, conn, account, "sk-test", firstMessage, hooks)
+	}))
+	defer wsServer.Close()
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http"), nil)
+	cancelDial()
+	require.NoError(t, err)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	writeMessage := func(msgType coderws.MessageType, payload string) {
+		writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		require.NoError(t, clientConn.Write(writeCtx, msgType, []byte(payload)))
+	}
+	readMessage := func() ([]byte, error) {
+		readCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, message, readErr := clientConn.Read(readCtx)
+		return message, readErr
+	}
+
+	writeMessage(coderws.MessageText, `{"type":"response.create","model":"gpt-5.1","stream":false,"input":"text"}`)
+	firstEvent, readErr := readMessage()
+	require.NoError(t, readErr)
+	require.Equal(t, "response.completed", gjson.GetBytes(firstEvent, "type").String())
+	require.Equal(t, "resp_passthrough_permission_1", gjson.GetBytes(firstEvent, "response.id").String())
+
+	writeMessage(coderws.MessageBinary, `{"type":"response.create","model":"gpt-5.1","stream":false,"input":"mapped image alias"}`)
+	_, readErr = readMessage()
+	require.Error(t, readErr)
+	require.Equal(t, coderws.StatusPolicyViolation, coderws.CloseStatus(readErr))
+	require.Equal(t, true, <-intentCh)
+
+	select {
+	case serverErr := <-serverErrCh:
+		var closeErr *OpenAIWSClientCloseError
+		require.Error(t, serverErr)
+		require.ErrorAs(t, serverErr, &closeErr)
+		require.Equal(t, coderws.StatusPolicyViolation, closeErr.StatusCode())
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待 passthrough image permission close 超时")
+	}
+	require.Len(t, upstreamConn.writes, 1, "被禁止的后续 image turn 不应写入上游")
 }
 
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PassthroughHeadersUsePromptCacheAndTurnState(t *testing.T) {
