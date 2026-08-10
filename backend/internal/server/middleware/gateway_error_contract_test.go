@@ -210,7 +210,11 @@ func TestAnthropicErrorTypesFollowOfficialHTTPMapping(t *testing.T) {
 		want   string
 	}{
 		{http.StatusBadRequest, "invalid_request_error"},
+		{http.StatusUnauthorized, "authentication_error"},
+		{http.StatusForbidden, "permission_error"},
+		{http.StatusNotFound, "not_found_error"},
 		{http.StatusRequestEntityTooLarge, "request_too_large"},
+		{http.StatusTooManyRequests, "rate_limit_error"},
 		{http.StatusServiceUnavailable, "api_error"},
 		{529, "overloaded_error"},
 	} {
