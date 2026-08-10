@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -158,4 +159,34 @@ func TestImageTaskErrorUsesOpenAIErrorContract(t *testing.T) {
 	require.Equal(t, "not_found_error", errorObject["type"])
 	require.Equal(t, "IMAGE_TASK_NOT_FOUND", errorObject["code"])
 	require.Nil(t, errorObject["param"])
+}
+
+// batchImageError 必须按 HTTP status 分类 error.type（404→not_found_error、
+// 500→server_error），而不是一律 invalid_request_error。
+func TestBatchImageErrorStatusClassification(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/images/batches/job-1", nil)
+	batchImageError(c, service.ErrBatchImageJobNotFound)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+	errObj := payload["error"].(map[string]any)
+	require.Equal(t, "not_found_error", errObj["type"])
+	require.Equal(t, "BATCH_IMAGE_NOT_FOUND", errObj["code"])
+	require.Nil(t, errObj["param"])
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Request = httptest.NewRequest(http.MethodGet, "/v1/images/batches/job-2", nil)
+	batchImageError(c2, errors.New("boom"))
+
+	var payload2 map[string]any
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &payload2))
+	errObj2 := payload2["error"].(map[string]any)
+	require.Equal(t, "server_error", errObj2["type"])
+	require.Equal(t, "INTERNAL_ERROR", errObj2["code"])
+	require.Nil(t, errObj2["param"])
 }

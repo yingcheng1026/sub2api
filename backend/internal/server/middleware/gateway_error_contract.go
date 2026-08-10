@@ -102,7 +102,8 @@ func WriteAnthropicError(c *gin.Context, status int, errType, message string) {
 // AnthropicErrorPayload returns the official body shape for SSE error events.
 func AnthropicErrorPayload(c *gin.Context, errType, message string) gin.H {
 	requestID := anthropicRequestID(c)
-	if requestID != "" && c != nil {
+	// 流已提交（首包已发出）时响应头无法再修改；body request_id 仍然保留。
+	if requestID != "" && c != nil && !c.Writer.Written() {
 		c.Header("request-id", requestID)
 	}
 	payload := gin.H{

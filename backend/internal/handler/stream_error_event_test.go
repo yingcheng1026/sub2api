@@ -114,6 +114,21 @@ func TestOpenAIHandleStreamingAwareError_ResponsesStreamingReusesRequestID(t *te
 	assert.Equal(t, "resp_fd277bc5ff7e45d18aa9f54e1df318f1", resp["id"])
 }
 
+// OpenAI Chat Completions 流内错误帧必须与 JSON 路径同构：error 对象含
+// message/type/param/code（param 可空），不允许 SSE 帧缺参数字段。
+func TestOpenAIHandleStreamingAwareError_ChatStreamingSSEIncludesParam(t *testing.T) {
+	c, w := newGinContextForEndpoint(t, "/v1/chat/completions")
+	h := &OpenAIGatewayHandler{}
+	h.handleStreamingAwareError(c, http.StatusTooManyRequests, "rate_limit_error",
+		"rate limited", true)
+
+	body := w.Body.String()
+	assert.True(t, strings.HasPrefix(body, "event: error\n"), "unexpected frame: %q", body)
+	assert.Contains(t, body, `"param":null`)
+	assert.Contains(t, body, `"type":"rate_limit_error"`)
+	assert.Contains(t, body, `"message":"rate limited"`)
+}
+
 // 与旧分支的 TestOpenAIHandleStreamingAwareError_JSONEscaping 对齐：
 // 新的 response.failed payload 也必须正确转义 message 里的特殊字符，
 // 否则下游 SDK 解析 JSON 时会失败。

@@ -306,5 +306,7 @@ func batchImageError(c *gin.Context, err error) {
 		code = "BATCH_IMAGE_NOT_FOUND"
 		message = "batch image job not found"
 	}
-	middleware.WriteOpenAIError(c, status, "invalid_request_error", code, message)
+	// errType 留空由 WriteOpenAIError 按 HTTP status 分类（400→invalid_request_error、
+	// 404→not_found_error、500→server_error），业务 code 保留。
+	middleware.WriteOpenAIError(c, status, "", code, message)
 }
