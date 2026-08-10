@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -74,9 +73,10 @@ func NewErrorResponse(code, message string) ErrorResponse {
 	}
 }
 
-// AbortWithError 中断请求并返回JSON错误
+// AbortWithError interrupts the request. AI gateway paths are rendered with
+// their client protocol; management paths keep the Sub2API envelope.
 func AbortWithError(c *gin.Context, statusCode int, code, message string) {
-	c.JSON(statusCode, NewErrorResponse(code, message))
+	WriteGatewayError(c, statusCode, code, message)
 	c.Abort()
 }
 
@@ -100,23 +100,35 @@ func abortWithOpenAIQuotaError(c *gin.Context, statusCode int, message string) {
 // GatewayErrorWriter 定义网关错误响应格式（不同协议使用不同格式）
 type GatewayErrorWriter func(c *gin.Context, status int, message string)
 
-// AnthropicErrorWriter 按 Anthropic API 规范输出错误
+// AnthropicErrorWriter writes a local policy error using Anthropic's API contract.
 func AnthropicErrorWriter(c *gin.Context, status int, message string) {
-	c.JSON(status, gin.H{
-		"type":  "error",
-		"error": gin.H{"type": "permission_error", "message": message},
-	})
+	writeAnthropicError(c, status, "", message)
 }
 
-// GoogleErrorWriter 按 Google API 规范输出错误
+// OpenAIErrorWriter writes a local policy error using OpenAI's API contract.
+func OpenAIErrorWriter(c *gin.Context, status int, message string) {
+	writeOpenAIError(c, status, "", message)
+}
+
+// ProtocolErrorWriter resolves the client protocol after authentication. This is
+// required for shared routes whose final platform comes from the API key group.
+func ProtocolErrorWriter(c *gin.Context, status int, message string) {
+	if apiKey, ok := GetAPIKeyFromContext(c); ok && apiKey != nil && apiKey.Group != nil {
+		switch apiKey.Group.Platform {
+		case service.PlatformOpenAI, service.PlatformGrok:
+			writeOpenAIError(c, status, "", message)
+			return
+		case service.PlatformGemini:
+			writeGoogleError(c, status, "", message)
+			return
+		}
+	}
+	WriteGatewayError(c, status, "", message)
+}
+
+// GoogleErrorWriter writes a local policy error using Google API's contract.
 func GoogleErrorWriter(c *gin.Context, status int, message string) {
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"code":    status,
-			"message": message,
-			"status":  googleapi.HTTPStatusToGoogleStatus(status),
-		},
-	})
+	writeGoogleError(c, status, "", message)
 }
 
 // RequireGroupAssignment 检查 API Key 是否已分配到分组，

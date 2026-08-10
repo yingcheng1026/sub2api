@@ -4,6 +4,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -54,7 +55,17 @@ func TestAPIKeyAuthInvalidAbuseReturns429BeforeRepository(t *testing.T) {
 	r.ServeHTTP(w, httpRequest(t, "/v1/messages", "", "another-random-key"))
 	require.Equal(t, http.StatusTooManyRequests, w.Code)
 	require.Equal(t, "60", w.Header().Get("Retry-After"))
-	require.Contains(t, w.Body.String(), "INVALID_AUTH_RATE_LIMITED")
+	var response struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.Equal(t, "error", response.Type)
+	require.Equal(t, "rate_limit_error", response.Error.Type)
+	require.Equal(t, "Too many invalid authentication attempts; retry later", response.Error.Message)
 	require.Equal(t, IngressRejectInvalidAuthRateLimited, reason)
 	require.Equal(t, 1, repoCalls, "rate-limited request must not reach the repository")
 }
@@ -79,7 +90,7 @@ func TestGoogleAPIKeyAuthInvalidAbuseReturnsProtocol429(t *testing.T) {
 		req.Header.Del("x-api-key")
 		req.Header.Set("x-goog-api-key", key)
 		r.ServeHTTP(w, req)
-		require.Equal(t, http.StatusUnauthorized, w.Code)
+		require.Equal(t, http.StatusBadRequest, w.Code)
 	}
 	w := httptest.NewRecorder()
 	req := httpRequest(t, "/v1beta/models/test:generateContent", "", "random-3")

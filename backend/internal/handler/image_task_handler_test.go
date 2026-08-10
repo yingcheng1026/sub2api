@@ -143,3 +143,19 @@ func TestAsyncImageHandlerDisabledReturns404(t *testing.T) {
 	// No task was created / persisted.
 	require.Empty(t, store.tasks)
 }
+
+func TestImageTaskErrorUsesOpenAIErrorContract(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/images/tasks/task-1", nil)
+
+	imageTaskJSONError(c, http.StatusNotFound, "IMAGE_TASK_NOT_FOUND", "image task not found")
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &payload))
+	errorObject := payload["error"].(map[string]any)
+	require.Equal(t, "not_found_error", errorObject["type"])
+	require.Equal(t, "IMAGE_TASK_NOT_FOUND", errorObject["code"])
+	require.Nil(t, errorObject["param"])
+}

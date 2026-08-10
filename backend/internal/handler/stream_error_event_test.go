@@ -164,15 +164,24 @@ func TestGatewayHandleStreamingAwareError_ResponsesStreamingEmitsResponseFailed(
 	assert.Equal(t, "upstream gone", errObj["message"])
 }
 
-// Gateway handler: /v1/messages preserves the legacy data:{type:error,...} format
-// (Anthropic spec accepts a type:"error" stream event).
-func TestGatewayHandleStreamingAwareError_MessagesStreamingKeepsLegacy(t *testing.T) {
+// Gateway handler: /v1/messages emits Anthropic's official SSE error event.
+func TestGatewayHandleStreamingAwareError_MessagesStreamingUsesAnthropicErrorEvent(t *testing.T) {
 	c, w := newGinContextForEndpoint(t, EndpointMessages)
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.RequestID, "req-test-messages"))
 	h := &GatewayHandler{}
 	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "boom", true)
 
 	body := w.Body.String()
-	assert.True(t, strings.HasPrefix(body, `data: {"type":"error"`), "got: %q", body)
+	assert.True(t, strings.HasPrefix(body, "event: error\ndata: "), "got: %q", body)
+	data := strings.TrimSuffix(strings.TrimPrefix(body, "event: error\ndata: "), "\n\n")
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal([]byte(data), &payload))
+	assert.Equal(t, "error", payload["type"])
+	require.Equal(t, "req_reqtestmessages", payload["request_id"])
+	require.Equal(t, payload["request_id"], w.Header().Get("request-id"))
+	errorObject := payload["error"].(map[string]any)
+	assert.Equal(t, "upstream_error", errorObject["type"])
+	assert.Equal(t, "boom", errorObject["message"])
 }
 
 // 项目里 /responses 注册在多组路由：/v1/responses（gateway）、裸 /responses（top-level）、

@@ -574,7 +574,9 @@ func TestOpenAIEnsureResponsesDependencies(t *testing.T) {
 		require.NoError(t, err)
 		errorObj, exists := parsed["error"].(map[string]any)
 		require.True(t, exists)
-		assert.Equal(t, "api_error", errorObj["type"])
+		assert.Equal(t, "server_error", errorObj["type"])
+		assert.Nil(t, errorObj["param"])
+		assert.Nil(t, errorObj["code"])
 		assert.Equal(t, "Service temporarily unavailable", errorObj["message"])
 	})
 
@@ -715,7 +717,7 @@ func TestOpenAIGatewayMessagesDispatchGateAllowsGrokGroups(t *testing.T) {
 		h.Messages(c)
 
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-		require.Equal(t, "api_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+		require.Equal(t, "server_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
 		require.NotContains(t, rec.Body.String(), "This group does not allow /v1/messages dispatch")
 	})
 }
@@ -787,7 +789,9 @@ func TestOpenAIResponses_MissingDependencies_ReturnsServiceUnavailable(t *testin
 
 	errorObj, ok := parsed["error"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "api_error", errorObj["type"])
+	assert.Equal(t, "server_error", errorObj["type"])
+	assert.Nil(t, errorObj["param"])
+	assert.Nil(t, errorObj["code"])
 	assert.Equal(t, "Service temporarily unavailable", errorObj["message"])
 }
 

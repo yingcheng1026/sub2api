@@ -306,11 +306,5 @@ func batchImageError(c *gin.Context, err error) {
 		code = "BATCH_IMAGE_NOT_FOUND"
 		message = "batch image job not found"
 	}
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"type":    "invalid_request_error",
-			"code":    code,
-			"message": message,
-		},
-	})
+	middleware.WriteOpenAIError(c, status, "invalid_request_error", code, message)
 }

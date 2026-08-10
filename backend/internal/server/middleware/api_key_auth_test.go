@@ -1469,7 +1469,7 @@ func TestAPIKeyAuthOpenAIQuotaErrorFormat(t *testing.T) {
 	require.Equal(t, "insufficient_quota", response.Error.Code)
 }
 
-func TestAPIKeyAuthQuotaErrorKeepsLegacyFormatOutsideResponses(t *testing.T) {
+func TestAPIKeyAuthQuotaErrorUsesAnthropicFormatForMessages(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	user := &service.User{ID: 11, Role: service.RoleUser, Status: service.StatusActive, Balance: 10}
@@ -1496,7 +1496,17 @@ func TestAPIKeyAuthQuotaErrorKeepsLegacyFormatOutsideResponses(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusTooManyRequests, w.Code)
-	requireAPIKeyAuthError(t, w, "API_KEY_QUOTA_EXHAUSTED", "API key 额度已用完")
+	var response struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.Equal(t, "error", response.Type)
+	require.Equal(t, "rate_limit_error", response.Error.Type)
+	require.Equal(t, "API key 额度已用完", response.Error.Message)
 }
 
 func newAuthTestRouter(apiKeyService *service.APIKeyService, subscriptionService *service.SubscriptionService, cfg *config.Config) *gin.Engine {

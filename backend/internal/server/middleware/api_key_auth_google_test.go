@@ -42,7 +42,7 @@ func TestGoogleAPIKeyAuthRejectsOversizedCredentialsBeforeLookup(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
 	req.Header.Set("x-goog-api-key", strings.Repeat("x", service.MaxAPIKeyCredentialBytes+1))
 	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Zero(t, calls.Load())
 	require.True(t, rejected)
 	require.Equal(t, IngressRejectInvalidAPIKey, reason)
@@ -301,12 +301,12 @@ func TestApiKeyAuthWithSubscriptionGoogle_MissingKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Equal(t, http.StatusUnauthorized, resp.Error.Code)
+	require.Equal(t, http.StatusForbidden, resp.Error.Code)
 	require.Equal(t, "API key is required", resp.Error.Message)
-	require.Equal(t, "UNAUTHENTICATED", resp.Error.Status)
+	require.Equal(t, "PERMISSION_DENIED", resp.Error.Status)
 }
 
 func TestApiKeyAuthWithSubscriptionGoogle_QueryApiKeyRejected(t *testing.T) {
@@ -449,12 +449,12 @@ func TestApiKeyAuthWithSubscriptionGoogle_InvalidKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Equal(t, http.StatusUnauthorized, resp.Error.Code)
+	require.Equal(t, http.StatusBadRequest, resp.Error.Code)
 	require.Equal(t, "Invalid API key", resp.Error.Message)
-	require.Equal(t, "UNAUTHENTICATED", resp.Error.Status)
+	require.Equal(t, "INVALID_ARGUMENT", resp.Error.Status)
 	require.True(t, rejected)
 	require.Equal(t, IngressRejectInvalidAPIKey, rejectReason)
 }
@@ -576,12 +576,12 @@ func TestApiKeyAuthWithSubscriptionGoogle_DisabledKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Equal(t, http.StatusUnauthorized, resp.Error.Code)
+	require.Equal(t, http.StatusBadRequest, resp.Error.Code)
 	require.Equal(t, "API key is disabled", resp.Error.Message)
-	require.Equal(t, "UNAUTHENTICATED", resp.Error.Status)
+	require.Equal(t, "INVALID_ARGUMENT", resp.Error.Status)
 }
 
 func TestApiKeyAuthWithSubscriptionGoogle_InsufficientBalance(t *testing.T) {

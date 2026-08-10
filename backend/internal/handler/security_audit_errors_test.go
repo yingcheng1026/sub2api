@@ -98,7 +98,9 @@ func TestPromptGuardOpenAIAndClaudeErrorEnvelopesGolden(t *testing.T) {
 			payload := decodeErrorJSON(t, recorder)
 			require.Equal(t, "error", payload["type"])
 			errorObject := requireObject(t, payload["error"])
-			require.Equal(t, decision.ErrorCode, errorObject["code"])
+			require.NotContains(t, errorObject, "code")
+			require.Equal(t, "req_requesterrorgolden", payload["request_id"])
+			require.Equal(t, payload["request_id"], recorder.Header().Get("request-id"))
 			if kind == securityaudit.DecisionBlock {
 				require.Equal(t, "permission_error", errorObject["type"])
 			} else {

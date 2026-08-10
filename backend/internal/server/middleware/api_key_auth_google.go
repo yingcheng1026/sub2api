@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -31,7 +30,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 		if apiKeyHeadersTooLarge(c) {
 			recordInvalidAuthFailure(c, apiKeyService)
 			MarkIngressRejected(c, IngressRejectInvalidAPIKey)
-			abortWithGoogleError(c, 401, "Invalid API key")
+			abortWithGoogleErrorCode(c, 401, "INVALID_API_KEY", "Invalid API key")
 			return
 		}
 		if v := strings.TrimSpace(c.Query("api_key")); v != "" {
@@ -48,13 +47,13 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			} else {
 				MarkIngressRejected(c, IngressRejectAPIKeyRequired)
 			}
-			abortWithGoogleError(c, 401, "API key is required")
+			abortWithGoogleErrorCode(c, 401, "API_KEY_REQUIRED", "API key is required")
 			return
 		}
 		if len(apiKeyString) > service.MaxAPIKeyCredentialBytes {
 			recordInvalidAuthFailure(c, apiKeyService)
 			MarkIngressRejected(c, IngressRejectInvalidAPIKey)
-			abortWithGoogleError(c, 401, "Invalid API key")
+			abortWithGoogleErrorCode(c, 401, "INVALID_API_KEY", "Invalid API key")
 			return
 		}
 
@@ -63,7 +62,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			if errors.Is(err, service.ErrAPIKeyNotFound) {
 				recordInvalidAuthFailure(c, apiKeyService)
 				MarkIngressRejected(c, IngressRejectInvalidAPIKey)
-				abortWithGoogleError(c, 401, "Invalid API key")
+				abortWithGoogleErrorCode(c, 401, "INVALID_API_KEY", "Invalid API key")
 				return
 			}
 			if errors.Is(err, service.ErrAPIKeyAuthOverloaded) {
@@ -85,7 +84,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			apiKey.Status != service.StatusAPIKeyExpired &&
 			apiKey.Status != service.StatusAPIKeyQuotaExhausted {
 			MarkIngressRejected(c, IngressRejectAPIKeyDisabled)
-			abortWithGoogleError(c, 401, "API key is disabled")
+			abortWithGoogleErrorCode(c, 401, "INVALID_API_KEY", "API key is disabled")
 			return
 		}
 
@@ -258,12 +257,11 @@ func allowGoogleQueryKey(path string) bool {
 }
 
 func abortWithGoogleError(c *gin.Context, status int, message string) {
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"code":    status,
-			"message": message,
-			"status":  googleapi.HTTPStatusToGoogleStatus(status),
-		},
-	})
+	writeGoogleError(c, status, "", message)
+	c.Abort()
+}
+
+func abortWithGoogleErrorCode(c *gin.Context, status int, code, message string) {
+	writeGoogleError(c, status, code, message)
 	c.Abort()
 }
