@@ -866,6 +866,10 @@ type ImageConcurrencyConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// MaxConcurrentRequests: 当前进程允许同时处理的图片生成请求数，0表示不限制
 	MaxConcurrentRequests int `mapstructure:"max_concurrent_requests"`
+	// DistributedEnabled: 是否用 Redis 对所有实例共享同一图片总并发上限
+	DistributedEnabled bool `mapstructure:"distributed_enabled"`
+	// LeaseTTLSeconds: 分布式图片槽租约 TTL；持有期间自动续租
+	LeaseTTLSeconds int `mapstructure:"lease_ttl_seconds"`
 	// OverflowMode: 图片并发达到上限后的处理方式：reject/wait
 	OverflowMode string `mapstructure:"overflow_mode"`
 	// WaitTimeoutSeconds: overflow_mode=wait 时等待图片并发槽位的超时时间（秒）
@@ -2311,6 +2315,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_proxy_stream_circuit.ttl_seconds", 600)
 	viper.SetDefault("gateway.image_concurrency.enabled", false)
 	viper.SetDefault("gateway.image_concurrency.max_concurrent_requests", 0)
+	viper.SetDefault("gateway.image_concurrency.distributed_enabled", false)
+	viper.SetDefault("gateway.image_concurrency.lease_ttl_seconds", 900)
 	viper.SetDefault("gateway.image_concurrency.overflow_mode", ImageConcurrencyOverflowModeReject)
 	viper.SetDefault("gateway.image_concurrency.wait_timeout_seconds", 30)
 	viper.SetDefault("gateway.image_concurrency.max_waiting_requests", 100)
@@ -3144,6 +3150,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.ImageConcurrency.MaxConcurrentRequests < 0 {
 		return fmt.Errorf("gateway.image_concurrency.max_concurrent_requests must be non-negative")
+	}
+	if c.Gateway.ImageConcurrency.OverflowMode == ImageConcurrencyOverflowModeWait && c.Gateway.ImageConcurrency.WaitTimeoutSeconds <= 0 {
+		return fmt.Errorf("gateway.image_concurrency.wait_timeout_seconds must be positive when overflow_mode=wait")
+	}
+	if c.Gateway.ImageConcurrency.DistributedEnabled {
+		if !c.Gateway.ImageConcurrency.Enabled || c.Gateway.ImageConcurrency.MaxConcurrentRequests <= 0 {
+			return fmt.Errorf("gateway.image_concurrency.distributed_enabled requires enabled=true and max_concurrent_requests>0")
+		}
+		if c.Gateway.ImageConcurrency.LeaseTTLSeconds < 3 {
+			return fmt.Errorf("gateway.image_concurrency.lease_ttl_seconds must be at least 3 when distributed mode is enabled")
+		}
+		if c.Gateway.ImageStreamDataIntervalTimeout > 0 && c.Gateway.ImageConcurrency.LeaseTTLSeconds < c.Gateway.ImageStreamDataIntervalTimeout {
+			return fmt.Errorf("gateway.image_concurrency.lease_ttl_seconds must be at least gateway.image_stream_data_interval_timeout when distributed mode is enabled")
+		}
 	}
 	switch strings.TrimSpace(c.Gateway.ImageConcurrency.OverflowMode) {
 	case "", ImageConcurrencyOverflowModeReject, ImageConcurrencyOverflowModeWait:

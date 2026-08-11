@@ -40,6 +40,7 @@ type OpenAIGatewayHandler struct {
 	grokMediaEligibilityProber grokMediaEligibilityProber
 	opsService                 *service.OpsService
 	concurrencyHelper          *ConcurrencyHelper
+	concurrencyService         *service.ConcurrencyService
 	imageLimiter               *imageConcurrencyLimiter
 	maxAccountSwitches         int
 	cfg                        *config.Config
@@ -225,6 +226,7 @@ func NewOpenAIGatewayHandler(
 		contentModerationService: contentModerationService,
 		opsService:               opsService,
 		concurrencyHelper:        NewConcurrencyHelper(concurrencyService, SSEPingFormatComment, pingInterval),
+		concurrencyService:       concurrencyService,
 		imageLimiter:             &imageConcurrencyLimiter{},
 		maxAccountSwitches:       maxAccountSwitches,
 		cfg:                      cfg,
@@ -1658,6 +1660,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		ctx = ingressLease.Context()
 		c.Request = c.Request.WithContext(ctx)
 	}
+	imageLeaseCtx, imageLeaseCancel := context.WithCancelCause(ctx)
+	ctx = context.WithValue(imageLeaseCtx, imageLeaseLossCancelContextKey{}, context.CancelCauseFunc(imageLeaseCancel))
+	c.Request = c.Request.WithContext(ctx)
+	defer imageLeaseCancel(context.Canceled)
 
 	wsConn, err := coderws.Accept(c.Writer, c.Request, &coderws.AcceptOptions{
 		CompressionMode: coderws.CompressionContextTakeover,
@@ -2426,6 +2432,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "websocket ingress capacity lease lost; please reconnect")
 				return
 			}
+			if errors.Is(context.Cause(ctx), service.ErrImageConcurrencyLeaseLost) {
+				reqLog.Warn("openai.websocket_image_concurrency_lease_lost",
+					zap.Int64("account_id", account.ID),
+					zap.Error(err),
+				)
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "image capacity lease lost; please reconnect")
+				return
+			}
 
 			var closeErr *service.OpenAIWSClientCloseError
 			if errors.As(err, &closeErr) && closeErr.StatusCode() == coderws.StatusNormalClosure {
@@ -2643,15 +2657,43 @@ func (h *OpenAIGatewayHandler) acquireImageGenerationSlot(c *gin.Context, stream
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
 	}
-	release, admission := h.acquireImageGenerationSlotWithContext(ctx)
+	leaseCtx, leaseCancel := context.WithCancelCause(ctx)
+	admissionCtx := context.WithValue(leaseCtx, imageLeaseLossCancelContextKey{}, context.CancelCauseFunc(leaseCancel))
+	release, admission := h.acquireImageGenerationSlotWithContext(admissionCtx)
 	acquired := admission.Acquired
-	if acquired {
+	if !acquired {
+		leaseCancel(context.Canceled)
+		if h != nil {
+			h.handleStreamingAwareError(c, http.StatusTooManyRequests, "rate_limit_error", "Image generation concurrency limit exceeded, please retry later", streamStarted)
+		}
+		return nil, false
+	}
+	if !admission.Distributed {
+		leaseCancel(context.Canceled)
 		return release, true
 	}
-	if h != nil {
-		h.handleStreamingAwareError(c, http.StatusTooManyRequests, "rate_limit_error", "Image generation concurrency limit exceeded, please retry later", streamStarted)
+	if c != nil && c.Request != nil {
+		c.Request = c.Request.WithContext(leaseCtx)
 	}
-	return nil, false
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if release != nil {
+				release()
+			}
+			leaseCancel(context.Canceled)
+		})
+	}, true
+}
+
+type imageLeaseLossCancelContextKey struct{}
+
+func imageLeaseLossCancelFromContext(ctx context.Context) context.CancelCauseFunc {
+	if ctx == nil {
+		return nil
+	}
+	cancel, _ := ctx.Value(imageLeaseLossCancelContextKey{}).(context.CancelCauseFunc)
+	return cancel
 }
 
 func (h *OpenAIGatewayHandler) acquireImageGenerationSlotWithContext(ctx context.Context) (func(), imageConcurrencyAdmission) {
@@ -2666,16 +2708,154 @@ func (h *OpenAIGatewayHandler) acquireImageGenerationSlotWithContext(ctx context
 	}
 	imageConcurrency := h.cfg.Gateway.ImageConcurrency
 	wait := strings.TrimSpace(imageConcurrency.OverflowMode) == config.ImageConcurrencyOverflowModeWait
-	release, admission := h.imageLimiter.AcquireObserved(
+	startedAt := time.Now()
+	var distributedLease *service.ImageConcurrencyLease
+	if imageConcurrency.Enabled && imageConcurrency.DistributedEnabled {
+		if h.concurrencyService == nil {
+			observation := h.rejectedImageConcurrencyObservation()
+			h.logImageConcurrencyObservation(observation)
+			return nil, imageConcurrencyAdmission{Observation: observation}
+		}
+		leaseCtx := ctx
+		var cancel context.CancelFunc
+		if wait {
+			leaseCtx, cancel = context.WithTimeout(ctx, time.Duration(imageConcurrency.WaitTimeoutSeconds)*time.Second)
+			defer cancel()
+		}
+		var externalWaitRelease func() imageConcurrencySnapshot
+		var retryTicker *time.Ticker
+		defer func() {
+			if retryTicker != nil {
+				retryTicker.Stop()
+			}
+			if externalWaitRelease != nil {
+				externalWaitRelease()
+			}
+		}()
+		for {
+			lease, acquired, err := h.concurrencyService.AcquireImageConcurrencyLease(
+				leaseCtx,
+				imageConcurrency.MaxConcurrentRequests,
+				time.Duration(imageConcurrency.LeaseTTLSeconds)*time.Second,
+			)
+			if err != nil {
+				observation := h.rejectedImageConcurrencyObservation()
+				observation.WaitDuration = time.Since(startedAt)
+				h.logImageConcurrencyObservation(observation)
+				return nil, imageConcurrencyAdmission{Observation: observation}
+			}
+			if acquired {
+				if leaseCtx.Err() != nil {
+					lease.Release()
+					observation := imageConcurrencyObservation{
+						Outcome:      imageConcurrencyWaitOutcome(leaseCtx),
+						WaitDuration: time.Since(startedAt),
+						Snapshot:     h.imageConcurrencySnapshot(),
+					}
+					h.imageLimiter.recordObservation(observation)
+					h.logImageConcurrencyObservation(observation)
+					return nil, imageConcurrencyAdmission{Observation: observation}
+				}
+				distributedLease = lease
+				if externalWaitRelease != nil {
+					externalWaitRelease()
+					externalWaitRelease = nil
+				}
+				break
+			}
+			if !wait {
+				observation := h.rejectedImageConcurrencyObservation()
+				observation.WaitDuration = time.Since(startedAt)
+				h.logImageConcurrencyObservation(observation)
+				return nil, imageConcurrencyAdmission{Observation: observation}
+			}
+			if externalWaitRelease == nil {
+				waitRelease, waitSnapshot, registered := h.imageLimiter.registerExternalWait(imageConcurrency.MaxWaitingRequests)
+				if !registered {
+					observation := imageConcurrencyObservation{
+						Outcome:      imageConcurrencyOutcomeQueueFull,
+						WaitDuration: time.Since(startedAt),
+						Snapshot:     waitSnapshot,
+					}
+					h.imageLimiter.recordObservation(observation)
+					h.logImageConcurrencyObservation(observation)
+					return nil, imageConcurrencyAdmission{Observation: observation}
+				}
+				externalWaitRelease = waitRelease
+				retryTicker = time.NewTicker(75 * time.Millisecond)
+			}
+			select {
+			case <-leaseCtx.Done():
+				observation := imageConcurrencyObservation{
+					Outcome:      imageConcurrencyWaitOutcome(leaseCtx),
+					WaitDuration: time.Since(startedAt),
+					Snapshot:     h.imageConcurrencySnapshot(),
+				}
+				h.imageLimiter.recordObservation(observation)
+				h.logImageConcurrencyObservation(observation)
+				return nil, imageConcurrencyAdmission{Observation: observation}
+			case <-retryTicker.C:
+			}
+		}
+	}
+	localWait := wait && distributedLease == nil
+	localRelease, admission := h.imageLimiter.AcquireObserved(
 		ctx,
 		imageConcurrency.Enabled,
 		imageConcurrency.MaxConcurrentRequests,
-		wait,
+		localWait,
 		time.Duration(imageConcurrency.WaitTimeoutSeconds)*time.Second,
 		imageConcurrency.MaxWaitingRequests,
 	)
+	if !admission.Acquired {
+		if distributedLease != nil {
+			distributedLease.Release()
+		}
+		h.logImageConcurrencyObservation(admission.Observation)
+		return nil, admission
+	}
+	release := localRelease
+	if distributedLease != nil {
+		stopWatch := make(chan struct{})
+		watchDone := make(chan struct{})
+		if cancel := imageLeaseLossCancelFromContext(ctx); cancel != nil {
+			go func() {
+				defer close(watchDone)
+				select {
+				case <-distributedLease.Lost():
+					cancel(service.ErrImageConcurrencyLeaseLost)
+				case <-stopWatch:
+				}
+			}()
+		} else {
+			close(watchDone)
+		}
+		var once sync.Once
+		release = func() {
+			once.Do(func() {
+				close(stopWatch)
+				<-watchDone
+				if localRelease != nil {
+					localRelease()
+				}
+				distributedLease.Release()
+			})
+		}
+		admission.Distributed = true
+	}
 	h.logImageConcurrencyObservation(admission.Observation)
 	return release, admission
+}
+
+func (h *OpenAIGatewayHandler) rejectedImageConcurrencyObservation() imageConcurrencyObservation {
+	observation := imageConcurrencyObservation{
+		Outcome:  imageConcurrencyOutcomeRejected,
+		Snapshot: h.imageConcurrencySnapshot(),
+	}
+	if h != nil && h.imageLimiter != nil {
+		h.imageLimiter.recordObservation(observation)
+	}
+	return observation
 }
 
 func (h *OpenAIGatewayHandler) acquireImageTurnSlot(ctx context.Context, imageIntent bool) (func(), bool, imageConcurrencyObservation) {

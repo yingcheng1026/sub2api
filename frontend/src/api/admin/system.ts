@@ -1,5 +1,8 @@
 /**
  * System API endpoints for admin operations
+ *
+ * Immutable deployment: in-place update / rollback / restart are disabled by the
+ * backend. Only read-only version operations are exposed from the client.
  */
 
 import { apiClient } from '../client'
@@ -40,74 +43,9 @@ export async function checkUpdates(force = false): Promise<VersionInfo> {
   return data
 }
 
-export interface UpdateResult {
-  message: string
-  need_restart: boolean
-}
-
-export interface RollbackVersionInfo {
-  version: string
-  published_at: string
-  html_url: string
-}
-
-/**
- * Get versions available for rollback (up to 3 versions older than current)
- */
-export async function getRollbackVersions(): Promise<{ versions: RollbackVersionInfo[] }> {
-  const { data } = await apiClient.get<{ versions: RollbackVersionInfo[] }>(
-    '/admin/system/rollback-versions'
-  )
-  return data
-}
-
-/**
- * In-place update/rollback downloads a full release binary from GitHub, which
- * can take several minutes on slow links. The global 30s axios timeout would
- * abort the request mid-download (#4504), so these calls wait as long as the
- * backend allows (15 minutes server-side).
- */
-const UPDATE_REQUEST_TIMEOUT_MS = 15 * 60 * 1000
-
-/**
- * Perform system update
- * Downloads and applies the latest version
- */
-export async function performUpdate(): Promise<UpdateResult> {
-  const { data } = await apiClient.post<UpdateResult>('/admin/system/update', undefined, {
-    timeout: UPDATE_REQUEST_TIMEOUT_MS
-  })
-  return data
-}
-
-/**
- * Rollback to a previous version
- * @param version - Target version (e.g. "0.1.146"); omit to restore the local backup binary
- */
-export async function rollback(version?: string): Promise<UpdateResult> {
-  const { data } = await apiClient.post<UpdateResult>(
-    '/admin/system/rollback',
-    version ? { version } : undefined,
-    { timeout: UPDATE_REQUEST_TIMEOUT_MS }
-  )
-  return data
-}
-
-/**
- * Restart the service
- */
-export async function restartService(): Promise<{ message: string }> {
-  const { data } = await apiClient.post<{ message: string }>('/admin/system/restart')
-  return data
-}
-
 export const systemAPI = {
   getVersion,
-  checkUpdates,
-  performUpdate,
-  getRollbackVersions,
-  rollback,
-  restartService
+  checkUpdates
 }
 
 export default systemAPI

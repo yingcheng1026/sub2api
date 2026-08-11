@@ -9,9 +9,12 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -433,4 +436,289 @@ func TestOpenAIGatewayHandlerResponses_TextOnlyNotRejectedByImageConcurrency(t *
 
 	require.NotEqual(t, http.StatusTooManyRequests, rec.Code)
 	require.NotContains(t, rec.Body.String(), "Image generation concurrency limit exceeded")
+}
+
+func TestOpenAIGatewayHandlerDistributedImageAdmissionSharesCapacityAcrossInstances(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	cache := repository.NewConcurrencyCache(client, 1, 60)
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeReject,
+		DistributedEnabled:    true,
+		LeaseTTLSeconds:       30,
+	}}}
+	first := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+	second := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+
+	firstRelease, acquired, observation := first.acquireImageTurnSlot(context.Background(), true)
+	require.True(t, acquired)
+	require.Equal(t, imageConcurrencyOutcomeAcquired, observation.Outcome)
+	require.NotNil(t, firstRelease)
+
+	blockedRelease, acquired, observation := second.acquireImageTurnSlot(context.Background(), true)
+	require.False(t, acquired)
+	require.Equal(t, imageConcurrencyOutcomeRejected, observation.Outcome)
+	require.Nil(t, blockedRelease)
+
+	firstRelease()
+	secondRelease, acquired, observation := second.acquireImageTurnSlot(context.Background(), true)
+	require.True(t, acquired)
+	require.Equal(t, imageConcurrencyOutcomeAcquired, observation.Outcome)
+	require.NotNil(t, secondRelease)
+	secondRelease()
+}
+
+func TestOpenAIGatewayHandlerDistributedImageAdmissionFailsClosedButTextBypasses(t *testing.T) {
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeReject,
+		DistributedEnabled:    true,
+		LeaseTTLSeconds:       30,
+	}}}
+	h := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(nil), nil, nil, nil, nil, nil, nil, cfg)
+
+	release, acquired, observation := h.acquireImageTurnSlot(context.Background(), false)
+	require.True(t, acquired)
+	require.Nil(t, release)
+	require.Equal(t, imageConcurrencyOutcomeSkipped, observation.Outcome)
+
+	release, acquired, observation = h.acquireImageTurnSlot(context.Background(), true)
+	require.False(t, acquired)
+	require.Nil(t, release)
+	require.Equal(t, imageConcurrencyOutcomeRejected, observation.Outcome)
+}
+
+func TestOpenAIGatewayHandlerDistributedImageAdmissionWaitsForGlobalCapacity(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	cache := repository.NewConcurrencyCache(client, 1, 60)
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeWait,
+		WaitTimeoutSeconds:    2,
+		MaxWaitingRequests:    1,
+		DistributedEnabled:    true,
+		LeaseTTLSeconds:       30,
+	}}}
+	first := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+	second := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+
+	firstRelease, acquired, _ := first.acquireImageTurnSlot(context.Background(), true)
+	require.True(t, acquired)
+
+	type admissionResult struct {
+		release     func()
+		acquired    bool
+		observation imageConcurrencyObservation
+	}
+	resultCh := make(chan admissionResult, 1)
+	go func() {
+		release, ok, observation := second.acquireImageTurnSlot(context.Background(), true)
+		resultCh <- admissionResult{release: release, acquired: ok, observation: observation}
+	}()
+
+	select {
+	case <-resultCh:
+		t.Fatal("distributed wait returned before global capacity was released")
+	case <-time.After(100 * time.Millisecond):
+	}
+	firstRelease()
+
+	select {
+	case result := <-resultCh:
+		require.True(t, result.acquired)
+		require.Equal(t, imageConcurrencyOutcomeAcquired, result.observation.Outcome)
+		require.NotNil(t, result.release)
+		result.release()
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for distributed image capacity")
+	}
+}
+
+func TestOpenAIGatewayHandlerDistributedImageAdmissionBoundsGlobalWaiters(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	cache := repository.NewConcurrencyCache(client, 1, 60)
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeWait,
+		WaitTimeoutSeconds:    2,
+		MaxWaitingRequests:    1,
+		DistributedEnabled:    true,
+		LeaseTTLSeconds:       30,
+	}}}
+	holder := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+	waiter := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+
+	holderRelease, acquired, _ := holder.acquireImageTurnSlot(context.Background(), true)
+	require.True(t, acquired)
+	defer holderRelease()
+
+	waitingDone := make(chan struct{})
+	go func() {
+		release, ok, _ := waiter.acquireImageTurnSlot(context.Background(), true)
+		if ok && release != nil {
+			release()
+		}
+		close(waitingDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for waiter.imageLimiter.Snapshot().Waiting != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.Equal(t, 1, waiter.imageLimiter.Snapshot().Waiting)
+
+	release, acquired, observation := waiter.acquireImageTurnSlot(context.Background(), true)
+	require.False(t, acquired)
+	require.Nil(t, release)
+	require.Equal(t, imageConcurrencyOutcomeQueueFull, observation.Outcome)
+
+	holderRelease()
+	select {
+	case <-waitingDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bounded distributed waiter")
+	}
+}
+
+func TestOpenAIGatewayHandlerDistributedImageAdmissionWaitCancellationCleansState(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	cache := repository.NewConcurrencyCache(client, 1, 60)
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeWait,
+		WaitTimeoutSeconds:    2,
+		MaxWaitingRequests:    1,
+		DistributedEnabled:    true,
+		LeaseTTLSeconds:       30,
+	}}}
+	holder := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+	waiter := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+	holderRelease, acquired, _ := holder.acquireImageTurnSlot(context.Background(), true)
+	require.True(t, acquired)
+
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	resultCh := make(chan imageConcurrencyObservation, 1)
+	go func() {
+		release, ok, observation := waiter.acquireImageTurnSlot(waitCtx, true)
+		if ok && release != nil {
+			release()
+		}
+		resultCh <- observation
+	}()
+	deadline := time.Now().Add(time.Second)
+	for waiter.imageLimiter.Snapshot().Waiting != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.Equal(t, 1, waiter.imageLimiter.Snapshot().Waiting)
+	cancelWait()
+
+	select {
+	case observation := <-resultCh:
+		require.Equal(t, imageConcurrencyOutcomeCanceled, observation.Outcome)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for distributed waiter cancellation")
+	}
+	require.Zero(t, waiter.imageLimiter.Snapshot().Waiting)
+	members, err := client.ZCard(context.Background(), "concurrency:image:global").Result()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, members)
+
+	holderRelease()
+	members, err = client.ZCard(context.Background(), "concurrency:image:global").Result()
+	require.NoError(t, err)
+	require.Zero(t, members)
+}
+
+func TestOpenAIGatewayHandlerDistributedImageLeaseLossCancelsRequestContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	cache := repository.NewConcurrencyCache(client, 1, 60)
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeReject,
+		DistributedEnabled:    true,
+		LeaseTTLSeconds:       3,
+	}}}
+	h := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+
+	release, acquired := h.acquireImageGenerationSlot(c, false)
+	require.True(t, acquired)
+	require.NotNil(t, release)
+	members, err := client.ZRange(context.Background(), "concurrency:image:global", 0, -1).Result()
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	require.NoError(t, client.ZRem(context.Background(), "concurrency:image:global", members[0]).Err())
+
+	select {
+	case <-c.Request.Context().Done():
+		require.ErrorIs(t, context.Cause(c.Request.Context()), service.ErrImageConcurrencyLeaseLost)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for image lease loss cancellation")
+	}
+	release()
+}
+
+func TestOpenAIGatewayHandlerProcessLocalImageAdmissionPreservesRequestContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeReject,
+		DistributedEnabled:    false,
+	}}}
+	h := NewOpenAIGatewayHandler(nil, nil, nil, nil, nil, nil, nil, nil, cfg)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	originalCtx := context.WithValue(context.Background(), struct{}{}, "sentinel")
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(originalCtx)
+
+	release, acquired := h.acquireImageGenerationSlot(c, false)
+	require.True(t, acquired)
+	require.Same(t, originalCtx, c.Request.Context())
+	require.NotNil(t, release)
+	release()
+}
+
+func TestOpenAIGatewayHandlerDistributedImageNormalReleaseDoesNotReportLeaseLoss(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	cache := repository.NewConcurrencyCache(client, 1, 60)
+	cfg := &config.Config{Gateway: config.GatewayConfig{ImageConcurrency: config.ImageConcurrencyConfig{
+		Enabled:               true,
+		MaxConcurrentRequests: 1,
+		OverflowMode:          config.ImageConcurrencyOverflowModeReject,
+		DistributedEnabled:    true,
+		LeaseTTLSeconds:       3,
+	}}}
+	h := NewOpenAIGatewayHandler(nil, service.NewConcurrencyService(cache), nil, nil, nil, nil, nil, nil, cfg)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+
+	release, acquired := h.acquireImageGenerationSlot(c, false)
+	require.True(t, acquired)
+	release()
+	release()
+
+	require.ErrorIs(t, context.Cause(c.Request.Context()), context.Canceled)
+	require.NotErrorIs(t, context.Cause(c.Request.Context()), service.ErrImageConcurrencyLeaseLost)
+	require.Zero(t, h.imageLimiter.Snapshot().Active)
 }

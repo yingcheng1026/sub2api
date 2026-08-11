@@ -1,55 +1,77 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { get, post } = vi.hoisted(() => ({
-  get: vi.fn(),
-  post: vi.fn(),
+const { get } = vi.hoisted(() => ({
+  get: vi.fn()
 }))
 
 vi.mock('../client', () => ({
   apiClient: {
-    get,
-    post,
-  },
+    get
+  }
 }))
 
-import { getRollbackVersions, rollback, type RollbackVersionInfo } from '@/api/admin/system'
+import * as systemModule from '@/api/admin/system'
 
-describe('admin system rollback API', () => {
+const sourcePath = resolve(dirname(fileURLToPath(import.meta.url)), '../admin/system.ts')
+const source = readFileSync(sourcePath, 'utf8')
+
+describe('admin system API (immutable deployment surface)', () => {
   beforeEach(() => {
     get.mockReset()
-    post.mockReset()
   })
 
-  it('getRollbackVersions fetches the rollback version list', async () => {
-    const versions: RollbackVersionInfo[] = [
-      {
-        version: '0.1.146',
-        published_at: '2026-07-07T00:00:00Z',
-        html_url: 'https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.146'
+  it('exports read-only version helpers', async () => {
+    expect(typeof systemModule.getVersion).toBe('function')
+    expect(typeof systemModule.checkUpdates).toBe('function')
+  })
+
+  it('does not export mutable update, rollback, or restart helpers', () => {
+    expect(systemModule).not.toHaveProperty('performUpdate')
+    expect(systemModule).not.toHaveProperty('rollback')
+    expect(systemModule).not.toHaveProperty('restartService')
+  })
+
+  it('does not reference mutable admin system write endpoints in source', () => {
+    expect(source).not.toContain("'/admin/system/update'")
+    expect(source).not.toContain("'/admin/system/rollback'")
+    expect(source).not.toContain("'/admin/system/restart'")
+  })
+
+  it('does not reference the mutable timeout constant or update result type', () => {
+    expect(source).not.toContain('UPDATE_REQUEST_TIMEOUT_MS')
+    expect(source).not.toContain('UpdateResult')
+    expect(source).not.toContain('RollbackVersionInfo')
+  })
+
+  it('getVersion fetches current version via GET', async () => {
+    get.mockResolvedValue({ data: { version: '0.1.132' } })
+
+    const result = await systemModule.getVersion()
+
+    expect(get).toHaveBeenCalledWith('/admin/system/version')
+    expect(result.version).toBe('0.1.132')
+  })
+
+  it('checkUpdates fetches version info via GET', async () => {
+    get.mockResolvedValue({
+      data: {
+        current_version: '0.1.132',
+        latest_version: '0.1.146',
+        has_update: true,
+        cached: false,
+        build_type: 'release'
       }
-    ]
-    get.mockResolvedValue({ data: { versions } })
+    })
 
-    const result = await getRollbackVersions()
+    const result = await systemModule.checkUpdates(true)
 
-    expect(get).toHaveBeenCalledWith('/admin/system/rollback-versions')
-    expect(result.versions).toEqual(versions)
-  })
-
-  it('rollback posts the target version in the request body', async () => {
-    post.mockResolvedValue({ data: { message: 'ok', need_restart: true } })
-
-    const result = await rollback('0.1.146')
-
-    expect(post).toHaveBeenCalledWith('/admin/system/rollback', { version: '0.1.146' })
-    expect(result.need_restart).toBe(true)
-  })
-
-  it('rollback without a version posts no body (legacy backup rollback)', async () => {
-    post.mockResolvedValue({ data: { message: 'ok', need_restart: true } })
-
-    await rollback()
-
-    expect(post).toHaveBeenCalledWith('/admin/system/rollback', undefined)
+    expect(get).toHaveBeenCalledWith('/admin/system/check-updates', {
+      params: { force: 'true' }
+    })
+    expect(result.has_update).toBe(true)
   })
 })

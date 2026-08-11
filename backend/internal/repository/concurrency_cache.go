@@ -37,6 +37,7 @@ const (
 	// ordinary request slots, because idle ingress sessions do not hold a turn slot.
 	openAIWSIngressLeaseKeyPrefix  = "concurrency:openai_ws_ingress:api_key:"
 	openAIWSIngressLeaseTTLSeconds = 60
+	imageConcurrencyLeaseKey       = "concurrency:image:global"
 	liveLeaseTTLSeconds            = 60
 	// 等待队列计数器格式: concurrency:wait:{userID}
 	waitQueueKeyPrefix = "concurrency:wait:"
@@ -240,6 +241,38 @@ var (
 		if redis.call('ZSCORE', key, leaseID) == false then
 			return 0
 		end
+		redis.call('ZADD', key, now, leaseID)
+		redis.call('EXPIRE', key, ttl)
+		return 1
+	`)
+
+	acquireImageConcurrencyLeaseScript = redis.NewScript(`
+		redis.replicate_commands()
+		local key = KEYS[1]
+		local maxConcurrent = tonumber(ARGV[1])
+		local ttl = tonumber(ARGV[2])
+		local leaseID = ARGV[3]
+		local now = tonumber(redis.call('TIME')[1])
+		redis.call('ZREMRANGEBYSCORE', key, '-inf', now - ttl)
+		if redis.call('ZSCORE', key, leaseID) ~= false then
+			redis.call('ZADD', key, now, leaseID)
+			redis.call('EXPIRE', key, ttl)
+			return 1
+		end
+		if redis.call('ZCARD', key) >= maxConcurrent then return 0 end
+		redis.call('ZADD', key, now, leaseID)
+		redis.call('EXPIRE', key, ttl)
+		return 1
+	`)
+
+	refreshImageConcurrencyLeaseScript = redis.NewScript(`
+		redis.replicate_commands()
+		local key = KEYS[1]
+		local ttl = tonumber(ARGV[1])
+		local leaseID = ARGV[2]
+		local now = tonumber(redis.call('TIME')[1])
+		redis.call('ZREMRANGEBYSCORE', key, '-inf', now - ttl)
+		if redis.call('ZSCORE', key, leaseID) == false then return 0 end
 		redis.call('ZADD', key, now, leaseID)
 		redis.call('EXPIRE', key, ttl)
 		return 1
@@ -790,6 +823,42 @@ func (c *concurrencyCache) ReleaseOpenAIWSIngressLease(ctx context.Context, apiK
 		return nil
 	}
 	return c.rdb.ZRem(ctx, openAIWSIngressLeaseKey(apiKeyID), leaseID).Err()
+}
+
+func (c *concurrencyCache) AcquireImageConcurrencyLease(ctx context.Context, maxConcurrent, ttlSeconds int, leaseID string) (bool, error) {
+	if c == nil || c.rdb == nil || maxConcurrent <= 0 || ttlSeconds <= 0 || leaseID == "" {
+		return false, nil
+	}
+	result, err := acquireImageConcurrencyLeaseScript.Run(
+		ctx,
+		c.rdb,
+		[]string{imageConcurrencyLeaseKey},
+		maxConcurrent,
+		ttlSeconds,
+		leaseID,
+	).Int()
+	return result == 1, err
+}
+
+func (c *concurrencyCache) RefreshImageConcurrencyLease(ctx context.Context, ttlSeconds int, leaseID string) (bool, error) {
+	if c == nil || c.rdb == nil || ttlSeconds <= 0 || leaseID == "" {
+		return false, nil
+	}
+	result, err := refreshImageConcurrencyLeaseScript.Run(
+		ctx,
+		c.rdb,
+		[]string{imageConcurrencyLeaseKey},
+		ttlSeconds,
+		leaseID,
+	).Int()
+	return result == 1, err
+}
+
+func (c *concurrencyCache) ReleaseImageConcurrencyLease(ctx context.Context, leaseID string) error {
+	if c == nil || c.rdb == nil || leaseID == "" {
+		return nil
+	}
+	return c.rdb.ZRem(ctx, imageConcurrencyLeaseKey, leaseID).Err()
 }
 
 func (c *concurrencyCache) AcquireLiveLease(

@@ -1900,9 +1900,28 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.image_concurrency.max_concurrent_requests must be non-negative",
 		},
 		{
+			name: "gateway distributed image lease shorter than stream timeout",
+			mutate: func(c *Config) {
+				c.Gateway.ImageConcurrency.Enabled = true
+				c.Gateway.ImageConcurrency.MaxConcurrentRequests = 2
+				c.Gateway.ImageConcurrency.DistributedEnabled = true
+				c.Gateway.ImageConcurrency.LeaseTTLSeconds = 30
+				c.Gateway.ImageStreamDataIntervalTimeout = 900
+			},
+			wantErr: "gateway.image_concurrency.lease_ttl_seconds must be at least gateway.image_stream_data_interval_timeout",
+		},
+		{
 			name:    "gateway image concurrency overflow mode invalid",
 			mutate:  func(c *Config) { c.Gateway.ImageConcurrency.OverflowMode = "queue" },
 			wantErr: "gateway.image_concurrency.overflow_mode",
+		},
+		{
+			name: "gateway image concurrency wait timeout zero",
+			mutate: func(c *Config) {
+				c.Gateway.ImageConcurrency.OverflowMode = ImageConcurrencyOverflowModeWait
+				c.Gateway.ImageConcurrency.WaitTimeoutSeconds = 0
+			},
+			wantErr: "gateway.image_concurrency.wait_timeout_seconds must be positive when overflow_mode=wait",
 		},
 		{
 			name:    "gateway image concurrency wait timeout negative",
@@ -2530,6 +2549,12 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.ImageConcurrency.MaxConcurrentRequests != 0 {
 		t.Fatalf("image_concurrency.max_concurrent_requests = %d, want 0", cfg.Gateway.ImageConcurrency.MaxConcurrentRequests)
+	}
+	if cfg.Gateway.ImageConcurrency.DistributedEnabled {
+		t.Fatal("image_concurrency.distributed_enabled = true, want false")
+	}
+	if cfg.Gateway.ImageConcurrency.LeaseTTLSeconds != 900 {
+		t.Fatalf("image_concurrency.lease_ttl_seconds = %d, want 900", cfg.Gateway.ImageConcurrency.LeaseTTLSeconds)
 	}
 	if cfg.Gateway.ImageConcurrency.OverflowMode != ImageConcurrencyOverflowModeReject {
 		t.Fatalf("image_concurrency.overflow_mode = %q, want %q", cfg.Gateway.ImageConcurrency.OverflowMode, ImageConcurrencyOverflowModeReject)

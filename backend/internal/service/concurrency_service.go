@@ -70,13 +70,26 @@ type OpenAIWSIngressLeaseCache interface {
 	ReleaseOpenAIWSIngressLease(ctx context.Context, apiKeyID int64, leaseID string) error
 }
 
+// ImageConcurrencyLeaseCache owns the global Redis-backed image generation
+// capacity. It is independent from user/account request slots so image
+// saturation cannot consume text-only capacity.
+type ImageConcurrencyLeaseCache interface {
+	AcquireImageConcurrencyLease(ctx context.Context, maxConcurrent, ttlSeconds int, leaseID string) (bool, error)
+	RefreshImageConcurrencyLease(ctx context.Context, ttlSeconds int, leaseID string) (bool, error)
+	ReleaseImageConcurrencyLease(ctx context.Context, leaseID string) error
+}
+
 const (
 	openAIWSIngressLeaseTTL             = 60 * time.Second
 	openAIWSIngressLeaseRefreshInterval = 20 * time.Second
 	openAIWSIngressLeaseOperationTO     = 2 * time.Second
+	imageConcurrencyLeaseOperationTO    = 2 * time.Second
 )
 
-var ErrOpenAIWSIngressLeaseLost = errors.New("openai websocket ingress lease lost")
+var (
+	ErrOpenAIWSIngressLeaseLost  = errors.New("openai websocket ingress lease lost")
+	ErrImageConcurrencyLeaseLost = errors.New("image concurrency lease lost")
+)
 
 // OpenAIWSIngressLease keeps a Redis-backed ingress lease alive and cancels
 // its context if Redis cannot confirm ownership for a full lease lifetime.
@@ -186,6 +199,143 @@ func (l *OpenAIWSIngressLease) refresh(lastConfirmedAt time.Time) (time.Time, bo
 	return lastConfirmedAt, false
 }
 
+// ImageConcurrencyLease refreshes a distributed image slot until Release.
+type ImageConcurrencyLease struct {
+	ctx         context.Context
+	cancel      context.CancelCauseFunc
+	cache       ImageConcurrencyLeaseCache
+	leaseID     string
+	ttl         time.Duration
+	stopOnce    sync.Once
+	stopCh      chan struct{}
+	refreshDone chan struct{}
+	lostOnce    sync.Once
+	lostCh      chan struct{}
+	lostErr     atomic.Value
+}
+
+func (l *ImageConcurrencyLease) Context() context.Context {
+	if l == nil || l.ctx == nil {
+		return context.Background()
+	}
+	return l.ctx
+}
+
+func (l *ImageConcurrencyLease) Lost() <-chan struct{} {
+	if l == nil || l.lostCh == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return l.lostCh
+}
+
+func (l *ImageConcurrencyLease) Err() error {
+	if l == nil {
+		return ErrImageConcurrencyLeaseLost
+	}
+	if err, ok := l.lostErr.Load().(error); ok {
+		return err
+	}
+	return nil
+}
+
+func (l *ImageConcurrencyLease) markLost(err error) {
+	if err == nil {
+		err = ErrImageConcurrencyLeaseLost
+	}
+	l.lostOnce.Do(func() {
+		l.lostErr.Store(err)
+		if l.cancel != nil {
+			l.cancel(err)
+		}
+		close(l.lostCh)
+	})
+}
+
+func (l *ImageConcurrencyLease) Release() {
+	if l == nil {
+		return
+	}
+	l.stopOnce.Do(func() {
+		close(l.stopCh)
+		<-l.refreshDone
+		releaseCtx, cancel := context.WithTimeout(context.Background(), imageConcurrencyLeaseOperationTO)
+		defer cancel()
+		if err := l.cache.ReleaseImageConcurrencyLease(releaseCtx, l.leaseID); err != nil {
+			logger.L().Warn("image_concurrency_lease_release_failed", zap.Error(err))
+		}
+		if l.cancel != nil {
+			l.cancel(context.Canceled)
+		}
+	})
+}
+
+func imageConcurrencyLeaseRefreshInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 3
+	if interval < time.Second {
+		return time.Second
+	}
+	if interval > 5*time.Second {
+		return 5 * time.Second
+	}
+	return interval
+}
+
+func imageConcurrencyLeaseLossGrace(ttl time.Duration) time.Duration {
+	if ttl > 15*time.Second {
+		return 15 * time.Second
+	}
+	return ttl
+}
+
+func (l *ImageConcurrencyLease) refreshLoop() {
+	defer close(l.refreshDone)
+	interval := imageConcurrencyLeaseRefreshInterval(l.ttl)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	lastConfirmedAt := time.Now()
+	for {
+		select {
+		case <-l.stopCh:
+			return
+		case <-ticker.C:
+			var lost bool
+			lastConfirmedAt, lost = l.refresh(lastConfirmedAt)
+			if lost {
+				return
+			}
+		}
+	}
+}
+
+func (l *ImageConcurrencyLease) refresh(lastConfirmedAt time.Time) (time.Time, bool) {
+	refreshCtx, cancel := context.WithTimeout(context.Background(), imageConcurrencyLeaseOperationTO)
+	owned, err := l.cache.RefreshImageConcurrencyLease(refreshCtx, int(l.ttl/time.Second), l.leaseID)
+	cancel()
+	if err == nil && owned {
+		return time.Now(), false
+	}
+	if err == nil {
+		err = ErrImageConcurrencyLeaseLost
+	}
+	unconfirmedFor := time.Since(lastConfirmedAt)
+	logger.L().Warn("image_concurrency_lease_refresh_failed",
+		zap.Duration("unconfirmed_for", unconfirmedFor),
+		zap.Error(err),
+	)
+	lossGrace := imageConcurrencyLeaseLossGrace(l.ttl)
+	if errors.Is(err, ErrImageConcurrencyLeaseLost) || unconfirmedFor >= lossGrace {
+		l.markLost(ErrImageConcurrencyLeaseLost)
+		logger.L().Error("image_concurrency_lease_lost",
+			zap.Duration("unconfirmed_for", unconfirmedFor),
+			zap.Error(err),
+		)
+		return lastConfirmedAt, true
+	}
+	return lastConfirmedAt, false
+}
+
 var (
 	requestIDPrefix  = initRequestIDPrefix()
 	requestIDCounter atomic.Uint64
@@ -288,6 +438,49 @@ func (s *ConcurrencyService) AcquireOpenAIWSIngressLease(ctx context.Context, ap
 		leaseID:     leaseID,
 		stopCh:      make(chan struct{}),
 		refreshDone: make(chan struct{}),
+	}
+	go lease.refreshLoop()
+	return lease, true, nil
+}
+
+// AcquireImageConcurrencyLease atomically reserves one global image slot.
+// Cache failures are returned so image admission can fail closed without
+// affecting text-only requests.
+func (s *ConcurrencyService) AcquireImageConcurrencyLease(ctx context.Context, maxConcurrent int, ttl time.Duration) (*ImageConcurrencyLease, bool, error) {
+	if maxConcurrent <= 0 {
+		return nil, true, nil
+	}
+	if ttl < 3*time.Second {
+		return nil, false, errors.New("image concurrency lease TTL must be at least 3 seconds")
+	}
+	if s == nil || s.cache == nil {
+		return nil, false, errors.New("image concurrency lease cache is unavailable")
+	}
+	cache, ok := s.cache.(ImageConcurrencyLeaseCache)
+	if !ok {
+		return nil, false, errors.New("image concurrency lease cache is unsupported")
+	}
+	leaseID := generateRequestID()
+	baseCtx := context.Background()
+	if ctx != nil {
+		baseCtx = context.WithoutCancel(ctx)
+	}
+	acquireCtx, cancel := context.WithTimeout(baseCtx, imageConcurrencyLeaseOperationTO)
+	acquired, err := cache.AcquireImageConcurrencyLease(acquireCtx, maxConcurrent, int(ttl/time.Second), leaseID)
+	cancel()
+	if err != nil || !acquired {
+		return nil, acquired, err
+	}
+	leaseCtx, leaseCancel := context.WithCancelCause(context.Background())
+	lease := &ImageConcurrencyLease{
+		ctx:         leaseCtx,
+		cancel:      leaseCancel,
+		cache:       cache,
+		leaseID:     leaseID,
+		ttl:         ttl,
+		stopCh:      make(chan struct{}),
+		refreshDone: make(chan struct{}),
+		lostCh:      make(chan struct{}),
 	}
 	go lease.refreshLoop()
 	return lease, true, nil

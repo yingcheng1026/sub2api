@@ -480,8 +480,8 @@ gateway:
   # Non-streaming Images JSON keepalive interval (seconds), 0=disable; commits HTTP 200 after the first heartbeat
   # 图片非流式 JSON keepalive 间隔（秒），0=禁用；首个心跳后 HTTP 状态会固化为 200
   image_nonstream_keepalive_interval: 0
-  # Image generation independent concurrency limiter (process-local, default disabled)
-  # 图片生成独立并发限制（进程级，默认关闭；多实例总上限约为实例数×该值）
+  # Image generation independent concurrency limiter (default disabled)
+  # 图片生成独立并发限制（默认关闭；可选 Redis 多实例共享总上限）
   image_concurrency:
     # Enable image-only concurrency protection; false keeps existing behavior unchanged
     # 是否启用图片独立并发保护；false 保持现有行为不变
@@ -489,6 +489,12 @@ gateway:
     # Max concurrent image generation requests in this process, 0=unlimited
     # 当前进程允许同时处理的图片生成请求数，0=不限制
     max_concurrent_requests: 0
+    # Share max_concurrent_requests across every instance through Redis leases
+    # 通过 Redis 租约让所有实例共享同一个图片总并发上限
+    distributed_enabled: false
+    # Must cover the longest allowed image stream silence window
+    # 必须覆盖图片流允许的最长静默窗口
+    lease_ttl_seconds: 900
     # Overflow mode when the image concurrency limit is full: reject/wait
     # 图片并发满时的处理方式：reject=立即拒绝，wait=等待槽位
     overflow_mode: "reject"
@@ -496,7 +502,7 @@ gateway:
     # wait 模式等待图片并发槽位的超时时间（秒），0=不等待
     wait_timeout_seconds: 30
     # Max image requests waiting in this process when overflow_mode=wait, 0=unlimited
-    # wait 模式当前进程允许排队等待的图片请求数，0=不限制
+    # wait 模式当前进程允许排队等待的图片请求数；多实例总等待量约为实例数×该值；0=不限制
     max_waiting_requests: 100
   # SSE max line size in bytes (default: 40MB)
   # SSE 单行最大字节数（默认 40MB）

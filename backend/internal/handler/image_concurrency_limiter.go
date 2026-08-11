@@ -32,6 +32,7 @@ type imageConcurrencyObservation struct {
 
 type imageConcurrencyAdmission struct {
 	Acquired    bool
+	Distributed bool
 	Observation imageConcurrencyObservation
 }
 
@@ -216,6 +217,18 @@ func (l *imageConcurrencyLimiter) waiterReleaseFunc() func() imageConcurrencySna
 		})
 		return snapshot
 	}
+}
+
+// registerExternalWait accounts for a Redis-backed distributed waiter in the
+// same process-local queue bound used by ordinary image admission.
+func (l *imageConcurrencyLimiter) registerExternalWait(maxWaiting int) (func() imageConcurrencySnapshot, imageConcurrencySnapshot, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if maxWaiting > 0 && l.waiting >= maxWaiting {
+		return nil, l.snapshotLocked(), false
+	}
+	l.waiting++
+	return l.waiterReleaseFunc(), l.snapshotLocked(), true
 }
 
 func (l *imageConcurrencyLimiter) SetObserver(observer func(imageConcurrencyObservation)) {
