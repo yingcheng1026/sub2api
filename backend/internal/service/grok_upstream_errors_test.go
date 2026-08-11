@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -190,7 +191,10 @@ func TestGrokContentPolicy403SharedErrorFallbackDoesNotMutate(t *testing.T) {
 	_, err := svc.handleErrorResponse(context.Background(), resp, c, account, nil, "grok-4.5")
 	require.Error(t, err)
 	require.Equal(t, http.StatusForbidden, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "invalid_request_error")
+	var nativePayload map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &nativePayload))
+	require.Equal(t, "permission-denied", nativePayload["code"])
+	require.Equal(t, "prohibited content", nativePayload["error"])
 
 	c, recorder = newContext()
 	resp = &http.Response{
@@ -201,7 +205,12 @@ func TestGrokContentPolicy403SharedErrorFallbackDoesNotMutate(t *testing.T) {
 	_, err = svc.handleCompatErrorResponse(resp, c, account, writeChatCompletionsError, "grok-4.5")
 	require.Error(t, err)
 	require.Equal(t, http.StatusForbidden, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "invalid_request_error")
+	var compatPayload map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &compatPayload))
+	compatError := compatPayload["error"].(map[string]any)
+	require.Equal(t, "invalid_request_error", compatError["type"])
+	require.Contains(t, compatError, "param")
+	require.Contains(t, compatError, "code")
 
 	require.Zero(t, repo.tempUnschedCalls)
 	require.Zero(t, repo.rateLimitedCalls)
@@ -234,7 +243,10 @@ func TestGrokContentPolicy403MediaResponseBypassesCustomErrorCodes(t *testing.T)
 	_, err := svc.handleGrokMediaErrorResponse(context.Background(), resp, c, account, "request-id", "grok-imagine")
 	require.Error(t, err)
 	require.Equal(t, http.StatusForbidden, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "invalid_request_error")
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.Equal(t, "permission-denied", payload["code"])
+	require.Equal(t, "image is sensitive", payload["error"])
 	require.Zero(t, repo.tempUnschedCalls)
 	require.Zero(t, repo.rateLimitedCalls)
 	require.Zero(t, repo.updateCalls)

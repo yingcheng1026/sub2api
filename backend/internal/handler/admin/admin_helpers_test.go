@@ -224,6 +224,23 @@ func TestOpsWSHelpers(t *testing.T) {
 	require.False(t, isAddrInTrustedProxies(netip.MustParseAddr("192.168.0.1"), prefixes))
 }
 
+func TestQPSWSHandlerUnavailableUsesManagementErrorEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/ops/ws/qps", nil)
+
+	var handler *OpsHandler
+	handler.QPSWSHandler(c)
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.Equal(t, float64(http.StatusServiceUnavailable), payload["code"])
+	require.Equal(t, "ops service not initialized", payload["message"])
+	require.NotContains(t, payload, "error")
+}
+
 // TestOpenAIFastPolicySettingsFromDTO_NormalizesServiceTier 验证 admin
 // 写入路径会把 ServiceTier 的空字符串/空白/大小写归一化为
 // service.OpenAIFastTierAny ("all")，避免落盘时 "" 与 "all" 双语义。

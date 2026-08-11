@@ -703,7 +703,7 @@ type completeDingTalkOAuthRequest struct {
 func (h *AuthHandler) CompleteDingTalkOAuthRegistration(c *gin.Context) {
 	var req completeDingTalkOAuthRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "INVALID_REQUEST", "message": err.Error()})
+		response.ErrorWithDetails(c, http.StatusBadRequest, err.Error(), "INVALID_REQUEST", nil)
 		return
 	}
 

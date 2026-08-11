@@ -17,6 +17,7 @@ const (
 	GatewayErrorProtocolOpenAI     GatewayErrorProtocol = "openai"
 	GatewayErrorProtocolAnthropic  GatewayErrorProtocol = "anthropic"
 	GatewayErrorProtocolGoogle     GatewayErrorProtocol = "google"
+	GatewayErrorProtocolXAI        GatewayErrorProtocol = "xai"
 )
 
 // GatewayErrorProtocolForRequest selects the protocol before API key authentication.
@@ -64,6 +65,8 @@ func WriteGatewayError(c *gin.Context, status int, code, message string) {
 		writeAnthropicError(c, status, code, message)
 	case GatewayErrorProtocolGoogle:
 		writeGoogleError(c, status, code, message)
+	case GatewayErrorProtocolXAI:
+		writeXAIError(c, status, message)
 	default:
 		c.JSON(status, NewErrorResponse(code, message))
 	}
@@ -138,6 +141,13 @@ func WriteGoogleError(c *gin.Context, status int, code, message string) {
 	writeGoogleError(c, status, code, message)
 }
 
+// WriteXAIError writes the xAI top-level error shape. It is used only after
+// authentication resolves the group platform; pre-auth shared routes remain
+// OpenAI-shaped because their destination platform is unknown.
+func WriteXAIError(c *gin.Context, status int, message string) {
+	writeXAIError(c, status, message)
+}
+
 func writeOpenAIError(c *gin.Context, status int, code, message string) {
 	errType, officialCode := openAIErrorClassification(status, code)
 	codeString, _ := officialCode.(string)
@@ -163,6 +173,23 @@ func writeGoogleError(c *gin.Context, status int, code, message string) {
 		}}
 	}
 	c.JSON(status, gin.H{"error": errObject})
+}
+
+func writeXAIError(c *gin.Context, status int, message string) {
+	code := "api-error"
+	switch status {
+	case http.StatusBadRequest:
+		code = "invalid-request"
+	case http.StatusUnauthorized:
+		code = "unauthenticated"
+	case http.StatusForbidden:
+		code = "permission-denied"
+	case http.StatusNotFound:
+		code = "not-found"
+	case http.StatusTooManyRequests:
+		code = "rate-limit-exceeded"
+	}
+	c.JSON(status, gin.H{"code": code, "error": message})
 }
 
 func openAIErrorClassification(status int, code string) (string, any) {

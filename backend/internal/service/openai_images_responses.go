@@ -1019,19 +1019,14 @@ func writeOpenAIImagesUpstreamErrorResponse(c *gin.Context, err *OpenAIImagesUps
 		return false
 	}
 	StopOpenAIImagesJSONKeepaliveCommitted(c)
-	errorObj := gin.H{
-		"type":    err.clientErrorType(),
-		"message": err.clientMessage(),
-	}
-	if code := strings.TrimSpace(err.Code); code != "" {
-		errorObj["code"] = code
-	}
-	if param := strings.TrimSpace(err.Param); param != "" {
-		errorObj["param"] = param
-	}
-	c.JSON(err.clientStatusCode(), gin.H{
-		"error": errorObj,
-	})
+	writeOpenAIContractError(
+		c,
+		err.clientStatusCode(),
+		err.clientErrorType(),
+		strings.TrimSpace(err.Code),
+		strings.TrimSpace(err.Param),
+		err.clientMessage(),
+	)
 	return true
 }
 

@@ -1,9 +1,15 @@
 package handler
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCleanPageImageRelativePath(t *testing.T) {
@@ -99,6 +105,24 @@ func TestResolvePageImagePathRejectsSymlinkEscape(t *testing.T) {
 	if got, ok := resolvePageImagePath(pagesDir, base, "images/secret.png"); ok {
 		t.Fatalf("expected symlink escape to be rejected, got %q", got)
 	}
+}
+
+func TestGetPageContentNotFoundUsesManagementErrorEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewPageHandler(t.TempDir(), nil)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/pages/missing", nil)
+	c.Params = gin.Params{{Key: "slug", Value: "missing"}}
+
+	handler.GetPageContent(c)
+
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.Equal(t, float64(http.StatusNotFound), payload["code"])
+	require.Equal(t, "page not found", payload["message"])
+	require.NotContains(t, payload, "error")
 }
 
 func mustEvalSymlinks(t *testing.T, path string) string {

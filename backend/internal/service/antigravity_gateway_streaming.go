@@ -194,7 +194,12 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			return
 		}
 		errorEventSent = true
-		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
+		_, payload := googleContractErrorPayload(http.StatusBadGateway, "", reason)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", body)
 		flusher.Flush()
 	}
 
@@ -647,10 +652,7 @@ func mergeTextPartsToResponse(response map[string]any, textParts []string) map[s
 
 func (s *AntigravityGatewayService) writeClaudeError(c *gin.Context, status int, errType, message string) error {
 	MarkResponseCommitted(c)
-	c.JSON(status, gin.H{
-		"type":  "error",
-		"error": gin.H{"type": errType, "message": message},
-	})
+	writeAnthropicContractError(c, status, errType, message)
 	return fmt.Errorf("%s", message)
 }
 
@@ -687,10 +689,7 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 		c, account.Platform, upstreamStatus, body,
 		0, "", "",
 	); matched {
-		c.JSON(ptStatus, gin.H{
-			"type":  "error",
-			"error": gin.H{"type": ptErrType, "message": ptErrMsg},
-		})
+		writeAnthropicContractError(c, ptStatus, ptErrType, ptErrMsg)
 		if upstreamMsg == "" {
 			return fmt.Errorf("upstream error: %d", upstreamStatus)
 		}
@@ -727,10 +726,7 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 		errMsg = "Upstream request failed"
 	}
 
-	c.JSON(statusCode, gin.H{
-		"type":  "error",
-		"error": gin.H{"type": errType, "message": errMsg},
-	})
+	writeAnthropicContractError(c, statusCode, errType, errMsg)
 	if upstreamMsg == "" {
 		return fmt.Errorf("upstream error: %d", upstreamStatus)
 	}
@@ -739,27 +735,7 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 
 func (s *AntigravityGatewayService) writeGoogleError(c *gin.Context, status int, message string) error {
 	MarkResponseCommitted(c)
-	statusStr := "UNKNOWN"
-	switch status {
-	case 400:
-		statusStr = "INVALID_ARGUMENT"
-	case 404:
-		statusStr = "NOT_FOUND"
-	case 429:
-		statusStr = "RESOURCE_EXHAUSTED"
-	case 500:
-		statusStr = "INTERNAL"
-	case 502, 503:
-		statusStr = "UNAVAILABLE"
-	}
-
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"code":    status,
-			"message": message,
-			"status":  statusStr,
-		},
-	})
+	writeGoogleContractError(c, status, "", message)
 	return fmt.Errorf("%s", message)
 }
 
@@ -974,6 +950,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
+	prepareAnthropicContractStream(c)
 	c.Status(http.StatusOK)
 
 	flusher, ok := c.Writer.(http.Flusher)
@@ -1076,7 +1053,11 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			return
 		}
 		errorEventSent = true
-		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
+		body, err := json.Marshal(anthropicContractErrorPayload(c, "api_error", reason))
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", body)
 		flusher.Flush()
 	}
 

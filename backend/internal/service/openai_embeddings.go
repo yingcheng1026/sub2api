@@ -184,12 +184,7 @@ func writeOpenAIEmbeddingsUpstreamResponse(c *gin.Context, resp *http.Response, 
 }
 
 func writeOpenAIEmbeddingsError(c *gin.Context, statusCode int, errType, message string) {
-	c.JSON(statusCode, gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	writeOpenAIContractError(c, statusCode, errType, "", "", message)
 }
 
 func extractOpenAIEmbeddingsUsage(body []byte) OpenAIUsage {

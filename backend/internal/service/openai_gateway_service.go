@@ -862,12 +862,7 @@ func (s *OpenAIGatewayService) writeOpenAIWSFallbackErrorResponse(c *gin.Context
 			Message:            upstreamMessage,
 		})
 	}
-	c.JSON(statusCode, gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": clientMessage,
-		},
-	})
+	writeOpenAIOrXAIContractError(c, account, statusCode, errType, "", "", clientMessage)
 	return true
 }
 

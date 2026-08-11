@@ -431,14 +431,7 @@ func (s *AntigravityGatewayService) writeAntigravityCompatError(
 	message string,
 ) error {
 	MarkResponseCommitted(c)
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"message": message,
-			"type":    errType,
-			"param":   nil,
-			"code":    nil,
-		},
-	})
+	writeOpenAIContractError(c, status, errType, "", "", message)
 	return errors.New(message)
 }
 
@@ -461,14 +454,7 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 		Kind:               "http_error",
 		Message:            message,
 	})
-	c.JSON(mapUpstreamStatusCode(upstreamStatus), gin.H{
-		"error": gin.H{
-			"message": getPassthroughOrDefault(message, "Upstream request failed"),
-			"type":    "upstream_error",
-			"param":   nil,
-			"code":    nil,
-		},
-	})
+	writeOpenAIContractError(c, mapUpstreamStatusCode(upstreamStatus), "server_error", "", "", getPassthroughOrDefault(message, "Upstream request failed"))
 	return fmt.Errorf("upstream error: %d %s", upstreamStatus, message)
 }
 

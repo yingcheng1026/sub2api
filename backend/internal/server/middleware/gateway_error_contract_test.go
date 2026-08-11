@@ -252,6 +252,29 @@ func TestAnthropicErrorWriterIncludesOfficialRequestID(t *testing.T) {
 	require.Equal(t, "permission_error", errObject["type"])
 }
 
+func TestProtocolErrorWriterUsesXAIContractForKnownGrokGroup(t *testing.T) {
+	c, rec := errorContractContext(t, "/v1/chat/completions", "grok-policy")
+	groupID := int64(7)
+	c.Set(string(ContextKeyAPIKey), &service.APIKey{
+		GroupID: &groupID,
+		Group:   &service.Group{ID: groupID, Platform: service.PlatformGrok},
+	})
+
+	ProtocolErrorWriter(c, http.StatusForbidden, "group access denied")
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, "permission-denied", payload["code"])
+	require.Equal(t, "group access denied", payload["error"])
+	require.NotContains(t, payload, "message")
+}
+
+func TestGatewayErrorProtocolDoesNotGuessGrokBeforeAuthentication(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	require.Equal(t, GatewayErrorProtocolOpenAI, GatewayErrorProtocolForRequest(req))
+}
+
 func errorContractContext(t *testing.T, path, requestID string) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	rec := httptest.NewRecorder()

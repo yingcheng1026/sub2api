@@ -279,13 +279,7 @@ func (s *OpenAIGatewayService) buildInputTokensUpstreamRequest(
 }
 
 func writeAnthropicCountTokensError(c *gin.Context, status int, errType, message string) {
-	c.JSON(status, gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	writeAnthropicContractError(c, status, errType, message)
 }
 
 func isOpenAIInputTokensUnsupported(statusCode int, body []byte) bool {

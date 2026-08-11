@@ -42,7 +42,7 @@ func (h *PageHandler) GetPageContent(c *gin.Context) {
 	// Visibility check: slug must be configured in custom_menu_items
 	// and the user must have permission based on visibility setting
 	if !h.checkSlugVisibility(c, slug) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "page not found"})
+		response.NotFound(c, "page not found")
 		return
 	}
 
@@ -55,17 +55,17 @@ func (h *PageHandler) GetPageContent(c *gin.Context) {
 
 	info, err := os.Stat(cleaned)
 	if err != nil || info.IsDir() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "page not found"})
+		response.NotFound(c, "page not found")
 		return
 	}
 	if info.Size() > maxPageFileSize {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "page too large"})
+		response.Error(c, http.StatusRequestEntityTooLarge, "page too large")
 		return
 	}
 
 	content, err := os.ReadFile(cleaned)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read page"})
+		response.InternalError(c, "failed to read page")
 		return
 	}
 

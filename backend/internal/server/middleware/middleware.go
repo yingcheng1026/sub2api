@@ -115,8 +115,11 @@ func OpenAIErrorWriter(c *gin.Context, status int, message string) {
 func ProtocolErrorWriter(c *gin.Context, status int, message string) {
 	if apiKey, ok := GetAPIKeyFromContext(c); ok && apiKey != nil && apiKey.Group != nil {
 		switch apiKey.Group.Platform {
-		case service.PlatformOpenAI, service.PlatformGrok:
+		case service.PlatformOpenAI:
 			writeOpenAIError(c, status, "", message)
+			return
+		case service.PlatformGrok:
+			writeXAIError(c, status, message)
 			return
 		case service.PlatformGemini:
 			writeGoogleError(c, status, "", message)

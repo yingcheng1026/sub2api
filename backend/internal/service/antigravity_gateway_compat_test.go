@@ -585,7 +585,57 @@ func TestAntigravityCompatStreamErrorCommitsSingleTerminalFrame(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.True(t, IsResponseCommitted(c))
-	require.Equal(t, 1, strings.Count(recorder.Body.String(), "event: error"))
+	emitted := recorder.Body.String()
+	require.Equal(t, 1, strings.Count(emitted, "event: response.failed"))
+	payload := lastSSEDataPayload(t, emitted)
+	require.Equal(t, "response.failed", gjson.Get(payload, "type").String())
+	require.Equal(t, "failed", gjson.Get(payload, "response.status").String())
+	require.Equal(t, "server_error", gjson.Get(payload, "response.error.code").String())
+}
+
+func TestAntigravityChatStreamAdapterErrorUsesOpenAIEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/chat/completions", nil)
+	flusher, ok := c.Writer.(http.Flusher)
+	require.True(t, ok)
+	writer := newAntigravityClientWriter(c.Writer, flusher, "test")
+
+	newAntigravityChatStreamAdapter("gemini-3.1-pro-high", false).WriteError(writer, "stream_timeout")
+
+	payload := lastSSEDataPayload(t, recorder.Body.String())
+	require.Equal(t, "server_error", gjson.Get(payload, "error.type").String())
+	require.True(t, gjson.Get(payload, "error.param").Exists())
+	require.True(t, gjson.Get(payload, "error.code").Exists())
+	require.Equal(t, "stream_timeout", gjson.Get(payload, "error.message").String())
+}
+
+func TestAntigravityResponsesStreamAdapterErrorUsesResponseFailedEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/responses", nil)
+	flusher, ok := c.Writer.(http.Flusher)
+	require.True(t, ok)
+	writer := newAntigravityClientWriter(c.Writer, flusher, "test")
+
+	newAntigravityResponsesStreamAdapter("gemini-3.1-pro-high").WriteError(writer, "stream_timeout")
+
+	emitted := recorder.Body.String()
+	require.Contains(t, emitted, "event: response.failed")
+	payload := lastSSEDataPayload(t, emitted)
+	require.Equal(t, "response.failed", gjson.Get(payload, "type").String())
+	require.Equal(t, "failed", gjson.Get(payload, "response.status").String())
+	require.Equal(t, "server_error", gjson.Get(payload, "response.error.code").String())
+	require.Equal(t, "stream_timeout", gjson.Get(payload, "response.error.message").String())
+}
+
+func lastSSEDataPayload(t *testing.T, stream string) string {
+	t.Helper()
+	start := strings.LastIndex(stream, "data: ")
+	require.GreaterOrEqual(t, start, 0, "expected SSE data line")
+	payload := stream[start+len("data: "):]
+	if end := strings.Index(payload, "\n"); end >= 0 {
+		payload = payload[:end]
+	}
+	return payload
 }
 
 func TestAntigravityCompatKeepaliveAfterFirstEvent(t *testing.T) {

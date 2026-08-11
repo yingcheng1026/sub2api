@@ -942,12 +942,7 @@ func writeGrokMediaErrorResponse(c *gin.Context, statusCode int, errType, messag
 	if c == nil || c.Writer == nil || c.Writer.Written() {
 		return
 	}
-	c.JSON(statusCode, gin.H{
-		"error": gin.H{
-			"type":    strings.TrimSpace(errType),
-			"message": strings.TrimSpace(message),
-		},
-	})
+	writeXAIContractError(c, statusCode, message)
 }
 
 func writeGrokMediaResponse(c *gin.Context, resp *http.Response, body []byte, filter *responseheaders.CompiledHeaderFilter) {

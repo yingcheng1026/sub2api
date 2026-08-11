@@ -819,7 +819,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
-	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
+	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header, func() { prepareAnthropicContractStream(c) })
 
 	state := apicompat.NewResponsesEventToAnthropicState()
 	state.Model = originalModel
@@ -915,7 +915,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 						if clientMsg == "" {
 							clientMsg = "Request blocked by upstream cyber-security policy"
 						}
-						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE("invalid_request_error", clientMsg)); err == nil {
+						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE(c, "invalid_request_error", clientMsg)); err == nil {
 							c.Writer.Flush()
 						}
 						clientDisconnected = true
@@ -949,7 +949,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 						clientOutputStarted = true
 					} else {
 						writeStreamHeaders()
-						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE(errType, errMsg)); err == nil {
+						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE(c, errType, errMsg)); err == nil {
 							c.Writer.Flush()
 						}
 					}
@@ -1197,29 +1197,17 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 // writeAnthropicError writes an error response in Anthropic Messages API format.
 func writeAnthropicError(c *gin.Context, statusCode int, errType, message string) {
-	c.JSON(statusCode, gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	writeAnthropicContractError(c, statusCode, errType, message)
 }
 
 // buildAnthropicStreamErrorSSE builds one Anthropic SSE `error` event so a
 // streaming response can terminate with a visible error (e.g. upstream
 // cyber_policy) and programmatic clients stop retrying.
 // Marshal 失败的兜底仅保留固定提示。
-func buildAnthropicStreamErrorSSE(errType, message string) string {
-	payload, err := json.Marshal(gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+func buildAnthropicStreamErrorSSE(c *gin.Context, errType, message string) string {
+	payload, err := json.Marshal(anthropicContractErrorPayload(c, errType, message))
 	if err != nil {
-		return "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"" + errType + "\",\"message\":\"upstream error\"}}\n\n"
+		return ""
 	}
 	return "event: error\ndata: " + string(payload) + "\n\n"
 }

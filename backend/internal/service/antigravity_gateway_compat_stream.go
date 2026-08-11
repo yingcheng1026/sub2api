@@ -58,7 +58,15 @@ func (a *antigravityChatStreamAdapter) Finalize(writer *antigravityClientWriter)
 }
 
 func (a *antigravityChatStreamAdapter) WriteError(writer *antigravityClientWriter, reason string) {
-	writer.Fprintf("data: {\"error\":{\"message\":%q,\"type\":\"upstream_error\"}}\n\n", reason)
+	payload, err := json.Marshal(gin.H{"error": gin.H{
+		"message": reason,
+		"type":    "server_error",
+		"param":   nil,
+		"code":    nil,
+	}})
+	if err == nil {
+		writer.Fprintf("data: %s\n\n", payload)
+	}
 }
 
 func (a *antigravityChatStreamAdapter) emitResponseEvent(event *apicompat.ResponsesStreamEvent, writer *antigravityClientWriter) {
@@ -92,7 +100,20 @@ func (a *antigravityResponsesStreamAdapter) Finalize(writer *antigravityClientWr
 }
 
 func (a *antigravityResponsesStreamAdapter) WriteError(writer *antigravityClientWriter, reason string) {
-	writer.Fprintf("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"message\":%q}}\n\n", reason)
+	payload, err := json.Marshal(gin.H{
+		"type": "response.failed",
+		"response": gin.H{
+			"id":     "resp_" + randomHex(16),
+			"object": "response",
+			"model":  a.anthropicState.Model,
+			"status": "failed",
+			"output": []any{},
+			"error":  gin.H{"code": "server_error", "message": reason},
+		},
+	})
+	if err == nil {
+		writer.Fprintf("event: response.failed\ndata: %s\n\n", payload)
+	}
 }
 
 func (a *antigravityResponsesStreamAdapter) emitResponseEvent(event apicompat.ResponsesStreamEvent, writer *antigravityClientWriter) {

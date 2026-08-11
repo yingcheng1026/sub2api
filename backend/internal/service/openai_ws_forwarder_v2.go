@@ -639,12 +639,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				emitStreamMessage(message, true)
 			}
 			if !reqStream {
-				c.JSON(statusCode, gin.H{
-					"error": gin.H{
-						"type":    "upstream_error",
-						"message": errMsg,
-					},
-				})
+				writeOpenAIContractError(c, statusCode, "server_error", "", "", errMsg)
 			}
 			return nil, fmt.Errorf("openai ws error event: %s", errMsg)
 		}
