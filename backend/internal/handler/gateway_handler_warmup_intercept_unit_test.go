@@ -26,7 +26,8 @@ import (
 // 后端会在转发上游前直接拦截并返回 mock 响应（不依赖上游）。
 
 type fakeSchedulerCache struct {
-	accounts []*service.Account
+	accounts         []*service.Account
+	hydratedAccounts map[int64]*service.Account
 }
 
 func (f *fakeSchedulerCache) GetSnapshot(_ context.Context, _ service.SchedulerBucket) ([]*service.Account, bool, error) {
@@ -51,6 +52,9 @@ func (f *fakeSchedulerCache) ReleaseGroupLifecycleLease(_ context.Context, _ ser
 	return nil
 }
 func (f *fakeSchedulerCache) GetAccount(_ context.Context, id int64) (*service.Account, error) {
+	if account, ok := f.hydratedAccounts[id]; ok {
+		return account, nil
+	}
 	for _, account := range f.accounts {
 		if account != nil && account.ID == id {
 			return account, nil
@@ -156,10 +160,44 @@ func (f *fakeConcurrencyCache) CleanupExpiredAccountSlots(context.Context, int64
 func (f *fakeConcurrencyCache) CleanupExpiredAccountSlotKeys(context.Context) error     { return nil }
 func (f *fakeConcurrencyCache) CleanupStaleProcessSlots(context.Context, string) error  { return nil }
 
-func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*service.Account) (*GatewayHandler, func()) {
+type sessionCall struct {
+	accountID int64
+	sessionID string
+}
+
+type recordingSessionLimitCache struct {
+	service.SessionLimitCache
+	registrations   []sessionCall
+	unregistrations []sessionCall
+}
+
+func (c *recordingSessionLimitCache) RegisterSession(_ context.Context, accountID int64, sessionID string, _ int, _ time.Duration) (bool, error) {
+	c.registrations = append(c.registrations, sessionCall{accountID: accountID, sessionID: sessionID})
+	return true, nil
+}
+
+func (c *recordingSessionLimitCache) UnregisterSession(_ context.Context, accountID int64, sessionID string) error {
+	c.unregistrations = append(c.unregistrations, sessionCall{accountID: accountID, sessionID: sessionID})
+	return nil
+}
+
+type testGatewayHandlerOptions struct {
+	sessionLimitCache service.SessionLimitCache
+	schedulerCache    *fakeSchedulerCache
+	httpUpstream      service.HTTPUpstream
+}
+
+func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*service.Account, options ...testGatewayHandlerOptions) (*GatewayHandler, func()) {
 	t.Helper()
 
-	schedulerCache := &fakeSchedulerCache{accounts: accounts}
+	var opts testGatewayHandlerOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	schedulerCache := opts.schedulerCache
+	if schedulerCache == nil {
+		schedulerCache = &fakeSchedulerCache{accounts: accounts}
+	}
 	schedulerSnapshot := service.NewSchedulerSnapshotService(schedulerCache, nil, nil, nil, nil)
 
 	gwSvc := service.NewGatewayService(
@@ -178,10 +216,10 @@ func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*servi
 		nil, // rateLimitService
 		nil, // billingCacheService
 		nil, // identityService
-		nil, // httpUpstream
+		opts.httpUpstream,
 		nil, // deferredService
 		nil, // claudeTokenProvider
-		nil, // sessionLimitCache
+		opts.sessionLimitCache,
 		nil, // rpmCache
 		nil, // digestStore
 		nil, // settingService
@@ -381,4 +419,176 @@ func TestGatewayHandlerMessages_InterceptWarmup_AntigravityAccount_ForcePlatform
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.True(t, strings.HasPrefix(resp["id"].(string), "msg_01"))
 	require.Equal(t, "claude-sonnet-4-5", resp["model"])
+}
+
+func TestGatewayHandlerMessages_InterceptWarmup_AnthropicAccount_ReleasesRegisteredSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(2101)
+	accountID := int64(1101)
+	group := &service.Group{
+		ID:       groupID,
+		Hydrated: true,
+		Platform: service.PlatformAnthropic,
+		Status:   service.StatusActive,
+	}
+	account := &service.Account{
+		ID:       accountID,
+		Name:     "anthropic-warmup",
+		Platform: service.PlatformAnthropic,
+		Type:     service.AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":              "tok_xxx",
+			"intercept_warmup_requests": true,
+		},
+		Extra: map[string]any{
+			"max_sessions": 1,
+		},
+		Concurrency:   1,
+		Priority:      1,
+		Status:        service.StatusActive,
+		Schedulable:   true,
+		AccountGroups: []service.AccountGroup{{AccountID: accountID, GroupID: groupID}},
+	}
+	sessionCache := &recordingSessionLimitCache{}
+	h, cleanup := newTestGatewayHandler(t, group, []*service.Account{account}, testGatewayHandlerOptions{
+		sessionLimitCache: sessionCache,
+	})
+	defer cleanup()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 256,
+		"messages": [{"role":"user","content":[{"type":"text","text":"Warmup"}]}]
+	}`)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkey.Group, group))
+	c.Request = req
+
+	apiKey := &service.APIKey{
+		ID:      3101,
+		UserID:  4101,
+		GroupID: &groupID,
+		Status:  service.StatusActive,
+		User: &service.User{
+			ID:          4101,
+			Concurrency: 10,
+			Balance:     100,
+		},
+		Group: group,
+	}
+	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.UserID, Concurrency: 10})
+
+	h.Messages(c)
+
+	require.Equal(t, 200, rec.Code)
+	require.Len(t, sessionCache.registrations, 1)
+	require.Len(t, sessionCache.unregistrations, 1, "intercepted requests must release the session registered during selection")
+	require.Equal(t, sessionCache.registrations[0], sessionCache.unregistrations[0])
+}
+
+func TestGatewayHandlerMessages_ProfitVetoExhausted_ReleasesLastRegisteredSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(2102)
+	group := &service.Group{
+		ID:                   groupID,
+		Hydrated:             true,
+		Platform:             service.PlatformAnthropic,
+		Status:               service.StatusActive,
+		RateMultiplier:       1,
+		ProfitControlEnabled: true,
+		ProfitMinMargin:      0.5,
+	}
+
+	const candidateCount = 10
+	accounts := make([]*service.Account, 0, candidateCount)
+	hydratedAccounts := make(map[int64]*service.Account, candidateCount)
+	for i := 0; i < candidateCount; i++ {
+		accountID := int64(1200 + i)
+		selectionRate := 0.1
+		latestRate := 0.9
+		selectionAccount := &service.Account{
+			ID:       accountID,
+			Name:     "anthropic-profit-selection",
+			Platform: service.PlatformAnthropic,
+			Type:     service.AccountTypeOAuth,
+			Credentials: map[string]any{
+				"access_token": "tok_xxx",
+			},
+			Extra: map[string]any{
+				"max_sessions": 1,
+			},
+			Concurrency:    1,
+			Priority:       1,
+			RateMultiplier: &selectionRate,
+			Status:         service.StatusActive,
+			Schedulable:    true,
+			AccountGroups:  []service.AccountGroup{{AccountID: accountID, GroupID: groupID}},
+		}
+		latestAccount := *selectionAccount
+		latestAccount.Name = "anthropic-profit-latest"
+		latestAccount.RateMultiplier = &latestRate
+		accounts = append(accounts, selectionAccount)
+		hydratedAccounts[accountID] = &latestAccount
+	}
+	sessionCache := &recordingSessionLimitCache{}
+	schedulerCache := &fakeSchedulerCache{accounts: accounts, hydratedAccounts: hydratedAccounts}
+	h, cleanup := newTestGatewayHandler(t, group, accounts, testGatewayHandlerOptions{
+		sessionLimitCache: sessionCache,
+		schedulerCache:    schedulerCache,
+	})
+	defer cleanup()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 256,
+		"messages": [{"role":"user","content":[{"type":"text","text":"regular request"}]}]
+	}`)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkey.Group, group))
+	c.Request = req
+
+	apiKey := &service.APIKey{
+		ID:      3102,
+		UserID:  4102,
+		GroupID: &groupID,
+		Status:  service.StatusActive,
+		User: &service.User{
+			ID:          4102,
+			Concurrency: 10,
+			Balance:     100,
+		},
+		Group: group,
+	}
+	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.UserID, Concurrency: 10})
+
+	h.Messages(c)
+
+	require.Equal(t, 503, rec.Code)
+	require.Len(t, sessionCache.registrations, candidateCount)
+	require.Len(t, sessionCache.unregistrations, candidateCount, "the terminal profit veto must release the last registered session")
+}
+
+func TestReleaseSessionSlotsOnUnservedRequest_ServedSessionIsRetained(t *testing.T) {
+	account := &service.Account{ID: 1301}
+	accounts := map[int64]*service.Account{account.ID: account}
+	releaseCalls := 0
+	release := func(_ *service.Account, _ string) {
+		releaseCalls++
+	}
+
+	releaseSessionSlotsOnUnservedRequest(true, "session-1", accounts, release)
+	require.Zero(t, releaseCalls, "a request served by the upstream must keep its session slot")
+
+	releaseSessionSlotsOnUnservedRequest(false, "session-1", accounts, release)
+	require.Equal(t, 1, releaseCalls)
 }

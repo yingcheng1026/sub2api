@@ -119,6 +119,23 @@ func NewGatewayHandler(
 	}
 }
 
+// releaseSessionSlotsOnUnservedRequest releases session registrations only when
+// no upstream account served the request. A successful upstream response keeps
+// the registration for its normal idle-timeout lifecycle.
+func releaseSessionSlotsOnUnservedRequest(
+	upstreamServed bool,
+	sessionID string,
+	accounts map[int64]*service.Account,
+	release func(*service.Account, string),
+) {
+	if upstreamServed {
+		return
+	}
+	for _, account := range accounts {
+		release(account, sessionID)
+	}
+}
+
 // Messages handles Claude API compatible messages endpoint
 // POST /v1/messages
 func (h *GatewayHandler) Messages(c *gin.Context) {
@@ -658,13 +675,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	sessionSlotAccounts := make(map[int64]*service.Account)
 	upstreamServedSession := false
 	defer func() {
-		if upstreamServedSession {
-			return
-		}
 		// 客户端可能已断开、请求 ctx 已取消，用独立 ctx 执行释放
-		for _, acc := range sessionSlotAccounts {
-			h.gatewayService.ReleaseAccountSession(context.Background(), acc, sessionKey)
-		}
+		releaseSessionSlotsOnUnservedRequest(upstreamServedSession, sessionKey, sessionSlotAccounts,
+			func(account *service.Account, sessionID string) {
+				h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionID)
+			})
 	}()
 
 	for {
@@ -726,6 +741,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 			account := selection.Account
+			// 选号阶段已向会话限制缓存登记该账号；在本地拦截、利润终检或
+			// 其他转发前早退路径上，defer 必须能找到并释放这次登记。
+			sessionSlotAccounts[account.ID] = account
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
 			// [DEBUG-STICKY] 打印账号选择结果
@@ -827,8 +845,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			account = latest
 			selection.Account = latest
-			// 记录本请求注册过会话槽的账号（profit 准入后账号已定）
-			sessionSlotAccounts[account.ID] = account
 			// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已
 			// 抢槽的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
 			if selection.ProfitGateActive() || !selection.Acquired {
