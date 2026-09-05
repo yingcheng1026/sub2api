@@ -19,7 +19,9 @@ type dashboardAggregationRepository struct {
 	clock func() time.Time
 }
 
-const usageLogsCleanupBatchSize = 10000
+// Keep each non-partitioned cleanup transaction short. The transaction holds
+// the group-rollup invalidation lock, which is also needed by live usage writes.
+const usageLogsCleanupBatchSize = 100
 const usageBillingDedupCleanupBatchSize = 10000
 
 // NewDashboardAggregationRepository 创建仪表盘预聚合仓储。

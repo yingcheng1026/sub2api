@@ -212,6 +212,56 @@ func TestDashboardAggregationRepositoryCleanupUsageLogsNonPartitionedInvalidates
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestDashboardAggregationRepositoryCleanupUsageLogsCommitsFullBatchBeforeNextBatch(t *testing.T) {
+	setGroupUsageRollupTestTimezone(t)
+	db, mock := newSQLMock(t)
+	repo := newDashboardAggregationRepositoryWithSQL(db)
+	cutoff := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	earliestDeletedAt := time.Date(2026, 5, 3, 2, 0, 0, 0, time.UTC)
+	fixedNow := time.Date(2026, 8, 14, 8, 0, 0, 0, time.UTC)
+	repo.clock = func() time.Time { return fixedNow }
+	todayStart := service.GroupUsageTodayStart(fixedNow)
+
+	mock.ExpectQuery(`SELECT EXISTS`).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id FROM usage_group_rollup_state.*FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	fullBatch := sqlmock.NewRows([]string{"created_at"})
+	for i := 0; i < usageLogsCleanupBatchSize; i++ {
+		fullBatch.AddRow(earliestDeletedAt.Add(time.Duration(i) * time.Minute))
+	}
+	mock.ExpectQuery(`(?s)DELETE FROM usage_logs.*RETURNING created_at`).
+		WithArgs(cutoff, usageLogsCleanupBatchSize).
+		WillReturnRows(fullBatch)
+	mock.ExpectExec(`UPDATE usage_group_rollup_state`).
+		WithArgs(earliestDeletedAt, "Asia/Shanghai").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT id FROM usage_group_rollup_state.*FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	mock.ExpectQuery(`(?s)DELETE FROM usage_logs.*RETURNING created_at`).
+		WithArgs(cutoff, usageLogsCleanupBatchSize).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at"}))
+	mock.ExpectCommit()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT closed_before::text, retained_from.*FOR UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"closed_before", "retained_from", "timezone_name"}).
+			AddRow(service.GroupUsageDate(todayStart), time.Unix(0, 0).UTC(), "Asia/Shanghai"))
+	mock.ExpectCommit()
+
+	require.NoError(t, repo.CleanupUsageLogs(context.Background(), cutoff))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUsageLogsCleanupBatchSizeBoundsBillingLockWindow(t *testing.T) {
+	require.LessOrEqual(t, usageLogsCleanupBatchSize, 100,
+		"usage cleanup holds the group-rollup invalidation lock for the full batch")
+}
+
 func TestDashboardAggregationRepositoryCleanupUsageLogsPartitionedSortsAndInvalidatesEachDropBeforeSync(t *testing.T) {
 	setGroupUsageRollupTestTimezone(t)
 	db, mock := newSQLMock(t)
